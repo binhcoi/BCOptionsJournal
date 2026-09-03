@@ -208,6 +208,13 @@ def contract_text(position) -> str:
     )
 
 
+def status_badge(status) -> str:
+    """Status as a coloured pill, so open and closed legs read differently at
+    a glance instead of being two words in the same grey."""
+    name = status.value.lower()
+    return f'<span class="badge st-{esc(name)}">{esc(status.value.title())}</span>'
+
+
 def dte_cell(days: int | None) -> str:
     if days is None:
         return '<span class="dim">-</span>'

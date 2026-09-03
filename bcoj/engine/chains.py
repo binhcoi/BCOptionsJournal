@@ -244,3 +244,4 @@ class ChainIndex:
 
         walk(self.root(position), 0)
         return tuple(out)
+

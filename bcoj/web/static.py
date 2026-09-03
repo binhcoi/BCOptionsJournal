@@ -15,6 +15,9 @@ CSS = """
   --line: #e3e3e0; --pos: #067647; --neg: #b42318; --accent: #1e4fd8;
   --warn-bg: #fffbeb; --warn-line: #f5d76e; --ok-bg: #ecfdf3;
   --neg-tint: #fdeceb; --pos-tint: #e7f6ee;
+  --accent-tint: #e8eefc; --roll: #6d28d9; --roll-tint: #efe9fb;
+  --amber: #b45309; --amber-tint: #fdf1de;
+  --chain-bg: #f3f3f1; --current-tint: #fff7d6;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -22,6 +25,9 @@ CSS = """
     --line: #2e3138; --pos: #4ade80; --neg: #f87171; --accent: #7aa2ff;
     --warn-bg: #2a2312; --warn-line: #6b5a1f; --ok-bg: #12261a;
     --neg-tint: #3a1d1d; --pos-tint: #14301f;
+    --accent-tint: #1c2540; --roll: #b79cff; --roll-tint: #2a2140;
+    --amber: #fbbf24; --amber-tint: #3a2e12;
+    --chain-bg: #1a1c21; --current-tint: #2e2a14;
   }
 }
 * { box-sizing: border-box; }
@@ -53,7 +59,7 @@ table { width: 100%; border-collapse: collapse; background: var(--panel);
   border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 th, td { padding: .5rem .6rem; text-align: right; white-space: nowrap;
   border-bottom: 1px solid var(--line); }
-th:first-child, td:first-child { text-align: left; }
+th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
 th { font-size: .78rem; text-transform: uppercase; letter-spacing: .04em;
   color: var(--dim); font-weight: 600; }
 tbody tr:last-child td { border-bottom: 0; }
@@ -70,6 +76,9 @@ td:last-child, th:last-child { text-align: left; }
   display: inline-grid;
   grid-template-columns: 3.4em 6ch 10.5ch auto;
   column-gap: .55rem; align-items: baseline;
+  /* Tracks are in ch, which follows the font. Pin the weight here so no
+     ancestor (a bold row, a heading) can change the track widths. */
+  font-weight: 400; font-size: 1em;
 }
 .qty {
   text-align: right; padding: .02rem .34rem; border-radius: 4px;
@@ -80,7 +89,6 @@ td:last-child, th:last-child { text-align: left; }
 .exp, .strike { font-variant-numeric: tabular-nums; }
 .strike, .right { font-weight: 600; }
 td:first-child a { text-decoration: none; }
-td:first-child a:hover .ticker { text-decoration: underline; }
 
 .pos { color: var(--pos); }
 .neg { color: var(--neg); }
@@ -146,13 +154,88 @@ ul.problems li.error { border-color: var(--neg); color: var(--neg); }
 
 p.hint { color: var(--dim); font-size: .86rem; max-width: 68ch; }
 
-/* Row-level action links, and the form that opens beneath a row. */
-td a.act {
-  font-size: .82rem; margin-right: .5rem; text-decoration: none;
-  color: var(--dim);
+/* Actions sit beneath the contract, colour-coded by what they do:
+   blue closes, purple rolls, green keeps the credit, amber moves stock,
+   grey divides. */
+.row-actions { margin-top: .3rem; display: flex; gap: .35rem; flex-wrap: wrap; }
+.row-actions a.act {
+  font-size: .76rem; padding: .05rem .5rem; border-radius: 999px;
+  text-decoration: none; font-weight: 600; border: 1px solid transparent;
 }
-td a.act:hover { color: var(--accent); text-decoration: underline; }
-td a.act.here { color: var(--accent); font-weight: 600; }
+.act-close  { color: var(--accent); background: var(--accent-tint); }
+.act-roll   { color: var(--roll);   background: var(--roll-tint); }
+.act-expire { color: var(--pos);    background: var(--pos-tint); }
+.act-assign { color: var(--amber);  background: var(--amber-tint); }
+.act-split  { color: var(--dim);    background: var(--bg); border-color: var(--line); }
+.row-actions a.act:hover, .row-actions a.act.here {
+  border-color: currentColor;
+}
+
+/* Status pills. Open is the one that matters; everything else is history. */
+.badge {
+  display: inline-block; padding: .05rem .5rem; border-radius: 999px;
+  font-size: .76rem; font-weight: 600; letter-spacing: .01em;
+}
+.st-open     { color: var(--accent); background: var(--accent-tint); }
+.st-rolled   { color: var(--dim);    background: var(--bg); border: 1px solid var(--line); }
+.st-closed   { color: var(--dim);    background: var(--bg); border: 1px solid var(--line); }
+.st-expired  { color: var(--pos);    background: var(--pos-tint); }
+.st-assigned { color: var(--amber);  background: var(--amber-tint); }
+.st-split    { color: var(--dim);    background: var(--bg); border: 1px dashed var(--line); }
+
+/* Open positions that are branches of one family share a coloured rail. */
+tr.fam > td:first-child { border-left: 3px solid var(--line); }
+tr.fam-0 > td:first-child { border-left-color: var(--accent); }
+tr.fam-1 > td:first-child { border-left-color: var(--roll); }
+tr.fam-2 > td:first-child { border-left-color: var(--amber); }
+tr.fam-3 > td:first-child { border-left-color: var(--pos); }
+.fam-note { display: block; font-size: .74rem; color: var(--dim); margin-top: .1rem; }
+a.legs { text-decoration: none; font-weight: 600; padding: .05rem .45rem;
+  border-radius: 999px; border: 1px solid var(--line);
+  display: inline-block; min-width: 1.9em; text-align: center; }
+a.legs.here { font-size: .7em; padding: .2rem .45rem; }
+a.legs:hover, a.legs.here { background: var(--accent); color: #fff; border-color: transparent; }
+
+/* Legs revealed by expanding a chain, in the same row format as the list.
+   A header row marks where the block begins; every row in it shares a tint
+   and a rail so the block's extent is unambiguous. Closed legs are history
+   and step back; open legs step forward; the row this page or click is about
+   gets its own tint and an explicit tag. */
+tr.chain-head td {
+  background: var(--chain-bg); border-left: 3px solid var(--accent);
+  font-size: .8rem; color: var(--dim); text-align: left;
+  padding: .35rem .6rem; white-space: normal;
+}
+tr.chain-head td span { margin-right: .8rem; }
+tr.chain-head a.legs { float: right; }
+tr.chain-leg td { background: var(--chain-bg); }
+tr.chain-leg > td:first-child { border-left: 3px solid var(--accent); }
+tr.chain-leg.leg-closed td { color: var(--dim); }
+tr.chain-leg.leg-closed .qty { opacity: .6; }
+tr.chain-leg.leg-closed a, tr.chain-leg.leg-closed .ticker { color: var(--dim); }
+tr.chain-leg.leg-open td { background: var(--accent-tint); }
+tr.current td { background: var(--current-tint); }
+tr.current > td:first-child { border-left: 3px solid var(--ink); }
+tr.current .ticker, tr.current td { color: var(--ink); }
+/* The gutter column is zero-width: the row marker sits on the rail itself,
+   as a notch in the left line, and the contract never shifts. */
+td.gutter, th:first-child { width: 0; padding: 0; position: relative; }
+/* The marker is the rail itself pointing into the row: a solid arrowhead
+   drawn in the rail's colour, flush against it, so the line reads as an
+   arrow rather than a line with a character beside it. */
+.here-arrow {
+  position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+  width: 0; height: 0;
+  border-left: 8px solid var(--ink);
+  border-top: 7px solid transparent; border-bottom: 7px solid transparent;
+}
+tr[data-chain] { cursor: pointer; }
+tr[data-chain] a, tr[data-chain] button { cursor: pointer; }
+/* Projections -- an open position's close price and closing cash at target. */
+.proj { font-style: italic; color: var(--dim); }
+td.unit { font-variant-numeric: tabular-nums; }
+/* Hovering a contract underlines the whole thing, not just the ticker. */
+td a:hover .contract > :not(.qty) { text-decoration: underline; }
 tr.action-row > td { padding: 0; background: var(--bg); white-space: normal; }
 tr.action-row:hover { background: var(--bg); }
 .action-inline { padding: .8rem .9rem 1rem; border-left: 3px solid var(--accent); }
@@ -170,7 +253,6 @@ fieldset p.hint { grid-column: 1 / -1; margin: 0; }
 
 /* The family tree: greyed rows are the other branch of a split; a struck
    credit belongs to a divided position and is now carried by its halves. */
-tr.superseded td { color: var(--dim); }
 tr.branch td { color: var(--dim); }
 tr.branch a { color: var(--dim); }
 s { text-decoration-color: var(--dim); }
@@ -215,6 +297,94 @@ JS = """
       input.value = when.toISOString().slice(0, 10);
     });
   });
+
+  // Expanding a chain or opening an action form swaps just the positions
+  // table -- fetched as a bare table, and prefetched ahead of the click, so
+  // the swap is instant. Links still work as plain navigation without this.
+  var table = document.querySelector('table.positions');
+  if (table && window.fetch && window.DOMParser) {
+    var cache = {};
+
+    var partial = function (href) {
+      var parts = href.split('#');
+      var url = parts[0] + (parts[0].indexOf('?') >= 0 ? '&' : '?') + 'partial=table';
+      return { url: url, anchor: parts[1] || null };
+    };
+
+    var load = function (href) {
+      if (cache[href]) return Promise.resolve(cache[href]);
+      var target = partial(href);
+      return fetch(target.url, { credentials: 'same-origin' })
+        .then(function (res) { if (!res.ok) throw new Error(res.status); return res.text(); })
+        .then(function (html) { cache[href] = html; return html; });
+    };
+
+    var render = function (href, html, push) {
+      var current = document.querySelector('table.positions');
+      if (!current) { window.location.href = href; return; }
+      var holder = document.createElement('div');
+      holder.innerHTML = html;
+      var fresh = holder.querySelector('table.positions');
+      if (!fresh) { window.location.href = href; return; }
+      current.replaceWith(fresh);
+      if (push) history.pushState({ bcoj: href }, '', href);
+      var anchor = partial(href).anchor;
+      var row = anchor ? document.getElementById(anchor) : null;
+      if (row) row.scrollIntoView({ block: 'nearest' });
+      var focus = fresh.querySelector('[autofocus]');
+      if (focus) focus.focus();
+      prefetchAll(fresh);
+    };
+
+    var swap = function (href, push) {
+      // Remember the table we are leaving, so coming back is instant too.
+      var here = window.location.pathname + window.location.search;
+      var current = document.querySelector('table.positions');
+      if (current && !cache[here]) cache[here] = current.outerHTML;
+      load(href).then(function (html) { render(href, html, push); })
+        .catch(function () { window.location.href = href; });
+    };
+
+    // Warm the cache for every toggle target in view, a few at a time.
+    var prefetchAll = function (root) {
+      var targets = [];
+      root.querySelectorAll('tr[data-chain], a.legs').forEach(function (el) {
+        var href = el.getAttribute('data-chain') || el.getAttribute('href');
+        if (href && !cache[href] && targets.indexOf(href) < 0) targets.push(href);
+      });
+      var i = 0;
+      var next = function () {
+        if (i >= targets.length || i >= 24) return;
+        load(targets[i++]).catch(function () {}).then(next);
+      };
+      next(); next();  // two in flight
+    };
+    prefetchAll(table);
+
+    document.addEventListener('click', function (event) {
+      if (event.metaKey || event.ctrlKey || event.button !== 0) return;
+      var link = event.target.closest('table.positions a.legs, table.positions a.act');
+      if (link) {
+        event.preventDefault();
+        swap(link.getAttribute('href'), true);
+        return;
+      }
+      if (event.target.closest('a, button, input, select, label, form')) return;
+      var row = event.target.closest('table.positions tr[data-chain]');
+      if (!row) return;
+      swap(row.getAttribute('data-chain'), true);
+    });
+    // Hovering a row is a strong hint it is about to be clicked.
+    document.addEventListener('mouseover', function (event) {
+      var row = event.target.closest('table.positions tr[data-chain]');
+      if (row) load(row.getAttribute('data-chain')).catch(function () {});
+    });
+    window.addEventListener('popstate', function (event) {
+      var href = (event.state && event.state.bcoj) || (window.location.pathname + window.location.search + window.location.hash);
+      load(href).then(function (html) { render(href, html, false); })
+        .catch(function () { window.location.reload(); });
+    });
+  }
 
   // Uppercase tickers as they are typed, without moving the cursor.
   var ticker = document.getElementById('f_underlying');

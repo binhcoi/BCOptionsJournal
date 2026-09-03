@@ -570,7 +570,7 @@ class TestInlineActions(WebTestCase):
         self.assertNotIn("Put risk", body)
 
 
-class TestFamilyTree(WebTestCase):
+class TestChainView(WebTestCase):
     def test_split_shows_both_halves_and_what_became_of_each(self):
         self.add_position(underlying="fam")
         parent = [p for p in self.positions() if p.underlying == "FAM"][0]
@@ -587,22 +587,27 @@ class TestFamilyTree(WebTestCase):
                    "new_expiry": "2026-04-17", "new_strike": "33",
                    "new_price": "2.50", "new_quantity": "6"})
 
-        # From the assigned half, the whole family is visible.
+        # From the assigned half, the whole chain is visible: the split
+        # record, both halves, and what became of the other one.
         body = self.get(f"/position/{four.id}")
-        self.assertIn("Family - 4 leg(s)", body)
-        self.assertIn("divided into 4 + 6", body)
-        self.assertIn('class="superseded"', body)
-        self.assertIn("All branches realized", body)
-        # The other branch is present and greyed, with its successor.
-        self.assertIn('class="branch"', body)
-        self.assertIn("2026-04-17", body)
+        self.assertIn("Chain - 4 leg(s)", body)
+        self.assertIn("split into 4 + 6", body)
+        self.assertIn('class="badge st-split"', body)
+        self.assertIn("All legs realized", body)
+        self.assertIn("2026-04-17", body)          # the other half's roll
+        # Same columns as the positions page: one renderer.
+        self.assertIn("<th>Break-even</th>", body)
+        self.assertIn("<th>Legs</th>", body)
+        # The row being looked at is marked, and still a link to itself.
+        self.assertRegex(body, r'<tr id="row-%s" class="[^"]*\bcurrent\b' % four.id)
+        self.assertIn(f'href="/position/{four.id}"', body)
 
     def test_a_plain_chain_is_still_called_a_chain(self):
         self.add_position(underlying="pln")
         position = [p for p in self.positions() if p.underlying == "PLN"][0]
         body = self.get(f"/position/{position.id}")
         self.assertIn("Chain - 1 leg(s)", body)
-        self.assertNotIn("All branches", body)
+        self.assertNotIn("All legs realized", body)
 
     def test_days_show_while_open(self):
         self.add_position(underlying="dys",
@@ -611,3 +616,281 @@ class TestFamilyTree(WebTestCase):
         position = [p for p in self.positions() if p.underlying == "DYS"][0]
         body = self.get(f"/position/{position.id}")
         self.assertIn("<span>Days</span><b>12</b>", body)
+
+
+class TestPositionsPageLayout(WebTestCase):
+    def _fresh(self, ticker):
+        self.add_position(underlying=ticker)
+        return [p for p in self.positions()
+                if p.underlying == ticker.upper() and p.is_open][0]
+
+    def test_actions_sit_beneath_the_contract_and_are_colour_coded(self):
+        self._fresh("lay")
+        body = self.get("/")
+        cell = re.search(r'<td><a href="/position/[^"]+">.*?</td>', body, re.S).group(0)
+        self.assertIn('class="row-actions"', cell)
+        for action in ("close", "roll", "expire", "assign", "split"):
+            with self.subTest(action=action):
+                self.assertIn(f'class="act act-{action}', cell)
+
+    def test_status_is_a_badge(self):
+        self._fresh("bdg")
+        self.assertIn('class="badge st-open"', self.get("/"))
+
+    def test_sibling_branches_share_a_rail_and_a_note(self):
+        position = self._fresh("sib")
+        self.post(f"/position/{position.id}/split",
+                  {"quantity": "4", "on": "2026-02-01"})
+        body = self.get("/")
+        self.assertEqual(body.count('class="fam fam-'), 2)
+        self.assertEqual(body.count("1 of 2 open in this chain"), 2)
+
+    def test_leg_count_expands_the_chain_in_place(self):
+        position = self._fresh("exp")
+        self.post(f"/position/{position.id}/roll",
+                  {"on": "2026-02-20", "close_price": "2.00",
+                   "new_expiry": "2026-04-17", "new_strike": "33",
+                   "new_price": "2.50"})
+        successor = [p for p in self.positions()
+                     if p.underlying == "EXP" and p.is_open][0]
+        collapsed = self.get("/")
+        self.assertIn(f"chain={successor.id}", collapsed)
+        self.assertNotIn("chain-leg", collapsed)
+
+        expanded = self.get(f"/?show=open&chain={successor.id}")
+        # The rolled leg appears as an ordinary row, dimmed as history;
+        # the open successor is marked as the row that was clicked.
+        self.assertRegex(expanded, r'class="chain-leg leg-closed"')
+        self.assertRegex(expanded, r'class="chain-leg leg-open current"')
+        self.assertIn('class="badge st-rolled"', expanded)
+
+    def test_open_and_closed_legs_are_styled_differently(self):
+        position = self._fresh("sty")
+        self.post(f"/position/{position.id}/roll",
+                  {"on": "2026-02-20", "close_price": "2.00",
+                   "new_expiry": "2026-04-17", "new_strike": "33",
+                   "new_price": "2.50"})
+        successor = [p for p in self.positions()
+                     if p.underlying == "STY" and p.is_open][0]
+        body = self.get(f"/position/{successor.id}")
+        self.assertRegex(body, r'class="chain-leg leg-closed"')
+        self.assertRegex(body, r'class="chain-leg leg-open current"')
+        self.assertIn('class="badge st-rolled"', body)
+
+
+class TestPositionsOrderingAndAnchors(WebTestCase):
+    def _fresh(self, ticker, **kw):
+        self.add_position(underlying=ticker, **kw)
+        return [p for p in self.positions()
+                if p.underlying == ticker.upper() and p.is_open][0]
+
+    def test_closed_view_is_most_recent_first(self):
+        early = self._fresh("erl")
+        late = self._fresh("lat")
+        self.post(f"/position/{early.id}/close",
+                  {"closed_on": "2026-02-01", "close_price": "1.00"})
+        self.post(f"/position/{late.id}/close",
+                  {"closed_on": "2026-03-01", "close_price": "1.00"})
+        body = self.get("/?show=closed")
+        self.assertLess(body.index("LAT"), body.index("ERL"))
+
+    def test_closed_legs_are_not_called_branches(self):
+        position = self._fresh("nob")
+        self.post(f"/position/{position.id}/split",
+                  {"quantity": "4", "on": "2026-02-01"})
+        halves = [p for p in self.positions()
+                  if p.underlying == "NOB" and p.is_open]
+        for half in halves:
+            self.post(f"/position/{half.id}/expire", {"on": "2026-03-20"})
+        body = self.get("/?show=closed")
+        self.assertNotIn("open in this chain", body)
+        self.assertNotIn('class="fam fam-', body)
+
+    def test_open_rows_are_anchored_and_links_target_them(self):
+        position = self._fresh("anc")
+        body = self.get("/")
+        self.assertIn(f'id="row-{position.id}"', body)
+        self.assertIn(f"&do=close#row-{position.id}", body)
+
+
+class TestChainExpansion(WebTestCase):
+    def test_expanding_a_split_shows_each_leg_exactly_once(self):
+        self.add_position(underlying="onc")
+        parent = [p for p in self.positions() if p.underlying == "ONC"][0]
+        self.post(f"/position/{parent.id}/split",
+                  {"quantity": "4", "on": "2026-02-01"})
+        halves = [p for p in self.positions()
+                  if p.underlying == "ONC" and p.is_open]
+        four = min(halves, key=lambda p: p.quantity)
+        six = max(halves, key=lambda p: p.quantity)
+
+        collapsed = self.get("/?show=open")
+        self.assertEqual(collapsed.count(f'id="row-{four.id}"'), 1)
+        self.assertEqual(collapsed.count(f'id="row-{six.id}"'), 1)
+
+        expanded = self.get(f"/?show=open&chain={four.id}")
+        # The sibling is now shown inside the chain, not also on its own.
+        for pid in (parent.id, four.id, six.id):
+            with self.subTest(row=pid[:8]):
+                self.assertEqual(expanded.count(f'id="row-{pid}"'), 1)
+        self.assertIn("split into 4 + 6", expanded)
+        # Chain rows appear in order: the split record first.
+        self.assertLess(expanded.index(f'id="row-{parent.id}"'),
+                        expanded.index(f'id="row-{four.id}"'))
+
+    def test_open_sibling_inside_an_expansion_keeps_its_actions(self):
+        self.add_position(underlying="sac")
+        parent = [p for p in self.positions() if p.underlying == "SAC"][0]
+        self.post(f"/position/{parent.id}/split",
+                  {"quantity": "4", "on": "2026-02-01"})
+        four, six = sorted([p for p in self.positions()
+                            if p.underlying == "SAC" and p.is_open],
+                           key=lambda p: p.quantity)
+        expanded = self.get(f"/?show=open&chain={four.id}")
+        self.assertIn(f"act={six.id}&do=roll", expanded)
+
+
+class TestRowColumnsAndChainBlock(WebTestCase):
+    def _fresh(self, ticker):
+        self.add_position(underlying=ticker)
+        return [p for p in self.positions()
+                if p.underlying == ticker.upper() and p.is_open][0]
+
+    def test_columns_in_the_requested_order(self):
+        body = self.get("/")
+        headers = re.findall(r"<th>(.*?)</th>", body)
+        self.assertEqual(headers, ["", "Contract", "DTE", "Status", "Open price",
+                                   "Close price", "Credit", "Closing", "Realized",
+                                   "Carry", "Break-even", "At risk", "Legs"])
+
+    def test_open_position_projects_close_to_the_target(self):
+        position = self._fresh("prj")
+        body = self.get("/")
+        row = re.search(rf'<tr id="row-{position.id}".*?</tr>', body, re.S).group(0)
+        # 1.49 target close; 1,496.50 expected closing; both marked as projections.
+        self.assertIn('<span class="proj" title="50% target">1.49</span>', row)
+        self.assertIn('title="at the 50% target">(1,496.50)</span>', row)
+        self.assertIn('<td class="unit">3.00</td>', row)     # the open price
+
+    def test_closed_position_shows_what_happened(self):
+        position = self._fresh("hap")
+        self.post(f"/position/{position.id}/close",
+                  {"closed_on": "2026-02-10", "close_price": "1.50",
+                   "close_fee": "6.50"})
+        body = self.get("/?show=closed")
+        row = re.search(rf'<tr id="row-{position.id}".*?</tr>', body, re.S).group(0)
+        self.assertIn('<td class="unit">1.50</td>', row)
+        self.assertIn("(1,506.50)", row)          # closing cash
+        self.assertIn("1,487.00", row)            # realized
+        self.assertNotIn("proj", row)
+
+    def test_assigned_row_shows_a_clean_zero_close(self):
+        position = self._fresh("zro")
+        self.post(f"/position/{position.id}/assign",
+                  {"on": "2026-03-20", "close_fee": "0", "share_fee": "0"})
+        body = self.get("/?show=closed")
+        row = re.search(rf'<tr id="row-{position.id}".*?</tr>', body, re.S).group(0)
+        self.assertIn('<td class="unit">0.00</td>', row)
+        self.assertNotIn("-0.00", row)
+        self.assertIn("2,993.50", row)            # the whole credit realized
+
+    def test_expanded_chain_has_a_header_and_a_hide_control(self):
+        position = self._fresh("hdr")
+        self.post(f"/position/{position.id}/roll",
+                  {"on": "2026-02-20", "close_price": "2.00",
+                   "new_expiry": "2026-04-17", "new_strike": "33",
+                   "new_price": "2.50"})
+        successor = [p for p in self.positions()
+                     if p.underlying == "HDR" and p.is_open][0]
+        body = self.get(f"/?show=open&chain={successor.id}")
+        self.assertIn('class="chain-head"', body)
+        self.assertIn("Chain &middot; 2 leg(s)", body)
+        # Two ways to collapse: the header, and the clicked row's own pill.
+        self.assertEqual(body.count('title="Hide the chain"'), 2)
+        self.assertIn(">&#9650;</a>", body)      # a glyph, not a word
+        self.assertNotIn(">hide</a>", body)
+
+    def test_detail_page_tags_the_position_being_viewed(self):
+        position = self._fresh("tag")
+        body = self.get(f"/position/{position.id}")
+        # The marker sits in the gutter cell, not inside the contract cell.
+        self.assertRegex(body, r'<td class="gutter"><span class="here-arrow"')
+        self.assertNotIn("&#9656;", body)   # drawn from the rail, not a character
+        self.assertNotIn("this position</span>", body)
+        self.assertRegex(body, rf'<tr id="row-{position.id}" class="[^"]*\bcurrent\b')
+
+    def test_rows_of_a_chain_toggle_it_on_click(self):
+        position = self._fresh("tgl")
+        self.post(f"/position/{position.id}/roll",
+                  {"on": "2026-02-20", "close_price": "2.00",
+                   "new_expiry": "2026-04-17", "new_strike": "33",
+                   "new_price": "2.50"})
+        successor = [p for p in self.positions()
+                     if p.underlying == "TGL" and p.is_open][0]
+        collapsed = self.get("/?show=open")
+        self.assertIn(f'data-chain="/?show=open&chain={successor.id}#row-{successor.id}"',
+                      collapsed)
+        expanded = self.get(f"/?show=open&chain={successor.id}")
+        # Every row of the expanded chain collapses it.
+        self.assertEqual(expanded.count(f'data-chain="/?show=open#row-{successor.id}"'), 2)
+
+    def test_single_leg_rows_are_not_toggles(self):
+        position = self._fresh("one")
+        body = self.get("/?show=open")
+        row = re.search(rf'<tr id="row-{position.id}"[^>]*>', body).group(0)
+        self.assertNotIn("data-chain", row)
+
+    def test_expanded_current_row_still_links_to_its_page(self):
+        position = self._fresh("lnk2")
+        body = self.get(f"/?show=open&chain={position.id}")
+        row = re.search(rf'<tr id="row-{position.id}".*?</tr>', body, re.S).group(0)
+        self.assertIn(f'href="/position/{position.id}"', row)
+
+    def test_carry_column_follows_realized(self):
+        headers = re.findall(r"<th>(.*?)</th>", self.get("/"))
+        self.assertEqual(headers.index("Carry"), headers.index("Realized") + 1)
+
+    def test_whole_contract_underlines_on_hover(self):
+        css = self.get("/static/app.css")
+        self.assertIn("a:hover .contract > :not(.qty) { text-decoration: underline; }", css)
+        self.assertNotIn("a:hover .ticker { text-decoration", css)
+
+
+class TestPartialAndProjection(WebTestCase):
+    def _fresh(self, ticker):
+        self.add_position(underlying=ticker)
+        return [p for p in self.positions()
+                if p.underlying == ticker.upper() and p.is_open][0]
+
+    def test_partial_returns_only_the_table(self):
+        self._fresh("prt")
+        body = self.get("/?show=open&partial=table")
+        self.assertTrue(body.startswith('<table class="positions"'), body[:60])
+        self.assertNotIn("<!doctype html>", body)
+        self.assertNotIn("<header>", body)
+        self.assertIn("PRT", body)
+
+    def test_partial_expansion_carries_the_chain_rows(self):
+        position = self._fresh("pch")
+        self.post(f"/position/{position.id}/roll",
+                  {"on": "2026-02-20", "close_price": "2.00",
+                   "new_expiry": "2026-04-17", "new_strike": "33",
+                   "new_price": "2.50"})
+        successor = [p for p in self.positions()
+                     if p.underlying == "PCH" and p.is_open][0]
+        body = self.get(f"/?show=open&chain={successor.id}&partial=table")
+        self.assertIn('class="chain-head"', body)
+        self.assertNotIn("<main>", body)
+
+    def test_open_row_projects_expected_realized(self):
+        position = self._fresh("exr")
+        body = self.get("/?show=open")
+        row = re.search(rf'<tr id="row-{position.id}".*?</tr>', body, re.S).group(0)
+        # 2,993.50 credit less 1,496.50 projected closing = 1,497.00, greyed.
+        self.assertIn('title="expected at the 50% target">1,497.00</span>', row)
+
+    def test_script_prefetches_and_swaps_partials(self):
+        js = self.get("/static/app.js")
+        self.assertIn("partial=table", js)
+        self.assertIn("prefetchAll", js)
+        self.assertIn("replaceWith", js)

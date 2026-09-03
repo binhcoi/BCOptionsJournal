@@ -78,6 +78,17 @@ def fmt(value) -> str:
     if value is None:
         return "-"
     value = q2(value)
+    if not value:
+        # Decimal keeps a sign on zero (-0.00 from "-0 - 0"); a report should not.
+        return "0.00"
     if value < 0:
         return f"({-value:,.2f})"
     return f"{value:,.2f}"
+
+
+def price(value) -> str:
+    """A per-share price: two decimals, no thousands separator, no sign games."""
+    if value is None:
+        return "-"
+    value = q2(value)
+    return f"{abs(value) if not value else value:.2f}"

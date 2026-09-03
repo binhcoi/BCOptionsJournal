@@ -92,6 +92,20 @@ class TestMoneyParsing(unittest.TestCase):
         self.assertEqual(fmt(D("54321.00")), "54,321.00")
         self.assertEqual(fmt(None), "-")
 
+    def test_fmt_never_shows_a_signed_zero(self):
+        """An assignment closes at 0 with a 0 fee: -(0) - 0 is Decimal -0.00."""
+        self.assertEqual(fmt(D("-0.00")), "0.00")
+        self.assertEqual(fmt(D("0")), "0.00")
+
+    def test_price_is_two_decimals(self):
+        from bcoj.domain.money import price
+
+        self.assertEqual(price(D("0")), "0.00")
+        self.assertEqual(price(D("2.5")), "2.50")
+        self.assertEqual(price(D("-0.00")), "0.00")
+        self.assertEqual(price(D("1234.5")), "1234.50")   # no thousands separator
+        self.assertEqual(price(None), "-")
+
 
 class TestPnl(unittest.TestCase):
     """One formula, four shapes of trade."""

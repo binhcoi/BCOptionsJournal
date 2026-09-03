@@ -462,7 +462,7 @@ strategy, direction and ticker; CSV and JSON export plus a full SQLite backup.
 | # | Deliverable | State |
 | --- | --- | --- |
 | M1 | Engine (P/L, chains, targets, break-even, share matching, adjusted basis) + faithful importer + reconciliation + storage. No UI | **Done.** 119 tests. A hand-computed synthetic fixture reconciles exactly, and a real five-year export reconciles to the cent bar one 25-cent fee typo |
-| ~~M2~~ | ~~Manual entry, positions list, validation, expiry queue, audit trail~~ | **Done.** 213 tests. Web UI over stdlib only; split divides chain history pro-rata; every mutation audited and revertible |
+| ~~M2~~ | ~~Manual entry, positions list, validation, expiry queue, audit trail~~ | **Done.** 221 tests. Web UI over stdlib only; split divides chain history pro-rata; every mutation audited and revertible |
 | M3 | Shares: lots, buy-write, outright buy/sell, covered-call linking, wheel view, true total P/L | Next. The actions exist and are tested; they need pages |
 | M4 | Decision support: roll panel, break-even, obligation calendar, concentration | |
 | M5 | Reporting, dashboard, filtering, saved views, notes and tags, export | |
@@ -529,5 +529,10 @@ authoritative check, and it is not in this repository because the data isn't.
 | **Close and buy-back prices pre-fill with the profit target** | It is what you were aiming at; blank when the chain has nothing to aim for |
 | **A roll form is two labelled trades** | "Close this leg" then "Open the new leg" -- it is two fills, and the form says so |
 | **A split child links only to its split parent** | One link, never both, enforced on the type. The tombstone stays in every lineage regardless of the parent's own history, so the tree's shape no longer depends on what came before |
-| **A divided position shows its whole family** | Both halves and what became of each, smaller half first, other branch greyed; "this chain" and "all branches" realized shown separately |
+| **One row renderer for positions and chains** | A chain is shown as ordinary position rows -- same columns, same figures -- on the position page and when expanded in the list. Expanding reveals the chain's legs in order where the clicked row was, under a header row with the chain's total and a Hide control; legs already in the list move into it rather than appearing twice. No labels, no tree, no "family": it is a chain |
+| **Position columns: open price, close price, credit, closing, realized, break-even, at risk** | Per-share prices beside the cash they produced. An open position's close price and closing cash are the profit target, shown as projections -- so no separate Target column. Carry stays on the position page, not in the table |
+| **The position a page is about is tagged** | "▸ this position", its own tint and rail -- distinct from the open-leg tint, so it stands out even as a closed leg among closed legs |
+| **Actions sit beneath the contract, colour-coded** | Blue closes, purple rolls, green keeps the credit, amber moves stock, grey divides |
+| **Open and closed legs look different** | Status is a coloured pill; in a chain, closed legs step back and the open leg steps forward |
+| **Open positions of one chain are marked** | A shared coloured rail and "1 of N open in this chain"; closed legs are history, not branches, and are never marked |
 | **Put risk is not shown beside capital at risk** | Identical for a short put; the former exists only to reconcile the legacy column |

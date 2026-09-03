@@ -10,11 +10,11 @@ from decimal import Decimal
 
 from ..db import store
 from ..domain.enums import Direction, Right, Status
-from ..domain.money import ZERO, fmt, parse_money, q2
+from ..domain.money import ZERO, fmt, parse_money, price, q2
 from ..domain.types import Position
 from ..engine import actions, validate
 from ..engine.chains import ChainIndex
-from ..engine.pnl import open_cash, realized_pl
+from ..engine.pnl import close_cash, open_cash, realized_pl
 from ..engine.risk import break_even, capital_at_risk, credit_to_recover
 from ..engine.targets import target
 from . import render as r
@@ -108,6 +108,158 @@ def _next(form, fallback: str) -> str:
 # positions list
 
 
+# The first column is a gutter: it holds the row markers (the arrow for the
+# position a page is about) so they never push the contract out of line.
+POSITION_COLUMNS = ["", "Contract", "DTE", "Status", "Open price", "Close price",
+                    "Credit", "Closing", "Realized", "Carry", "Break-even",
+                    "At risk", "Legs"]
+
+
+def _position_row(p, index, *, here: str = "/", act_id: str = "", which: str = "",
+                  expanded: bool = False, in_chain: bool = False,
+                  current: bool = False, siblings: int = 0, rail=None,
+                  with_actions: bool = True, collapse_to: str = "") -> str:
+    """One position as a table row. The single renderer for positions.
+
+    Used for the positions list, for the legs revealed when a chain is
+    expanded there, and for the chain on a position's own page -- so the
+    figures a chain shows are exactly the figures the list shows.
+
+    For an open position the close price and closing cash are the profit
+    target, shown as projections; once closed they are what happened.
+    """
+    carry = index.carry(p)
+    chain = index.chain(p)
+    dte = (p.expiry - date.today()).days if p.is_open else None
+    be = break_even(chain) if p.is_open else None
+    pid = r.esc(p.id)
+    anchor = f"#row-{pid}"
+
+    classes = []
+    if in_chain:
+        classes += ["chain-leg", "leg-open" if p.is_open else "leg-closed"]
+    if current:
+        classes.append("current")
+    if rail is not None and not in_chain:
+        classes.append(f"fam fam-{rail}")
+    cls = f' class="{" ".join(classes)}"' if classes else ""
+
+    note = ""
+    if p.is_superseded:
+        halves = sorted(index.successors(p), key=lambda h: h.quantity)
+        if halves:
+            note = ('<span class="fam-note">&rarr; split into '
+                    + " + ".join(str(h.quantity) for h in halves) + "</span>")
+    elif siblings > 1 and p.is_open and not in_chain:
+        note = (f'<span class="fam-note" title="This chain has {siblings} open'
+                f' positions">&#x2442; 1 of {siblings} open in this chain</span>')
+
+    family_size = len(index.family(p))
+
+    actions_html = ""
+    if with_actions and p.is_open:
+        actions_html = '<div class="row-actions">' + "".join(
+            f'<a class="act act-{k}{" here" if p.id == act_id and k == which else ""}"'
+            f' href="{here}&act={pid}&do={k}{anchor}">{label}</a>'
+            for k, label in ACTIONS
+        ) + "</div>"
+
+    if in_chain and not (current and expanded):
+        legs_html = ""      # the chain is what is being shown
+    elif family_size > 1:
+        target_url = f"{here}{anchor}" if expanded else f"{here}&chain={pid}{anchor}"
+        title = "Hide the chain" if expanded else "Show the whole chain"
+        text = "&#9650;" if expanded else str(family_size)
+        legs_html = (f'<a class="legs{" here" if expanded else ""}"'
+                     f' href="{target_url}" title="{title}">{text}</a>')
+    else:
+        legs_html = '<span class="dim">1</span>'
+
+    # Always a link, so an expanded row still leads to its page. The row being
+    # viewed is marked by an arrow in the gutter, not inline.
+    label = f'<a href="/position/{pid}">{r.contract(p)}</a>'
+    gutter = ""
+    if current:
+        # No <b> around the contract: its grid tracks are sized in ch, and a
+        # bold "0" is wider, so the whole row would drift out of line.
+        gutter = '<span class="here-arrow" title="This position"></span>'
+
+    # Clicking anywhere on a row that belongs to a chain toggles the chain;
+    # links and buttons inside it still do their own thing.
+    toggle = ""
+    if in_chain and collapse_to:
+        # Collapse lands on the row that was clicked: a closed leg's own row
+        # is gone once the chain folds, so anchoring to it would go nowhere.
+        toggle = f' data-chain="{here}#row-{r.esc(collapse_to)}"'
+    elif family_size > 1 and with_actions:
+        toggle = f' data-chain="{here}&chain={pid}{anchor}"'
+
+    # Prices and cash flows. Open positions project to the target.
+    if p.is_open:
+        tgt = target(p, carry)
+        if tgt.applicable:
+            close_price = f'<span class="proj" title="50% target">{r.esc(price(tgt.price))}</span>'
+            closing = (f'<span class="proj" title="at the 50% target">'
+                       f"{r.esc(fmt(tgt.expected_closing))}</span>")
+            # What this leg alone would realize at the target: its credit plus
+            # the projected closing. Chain carry is its own column.
+            leg_expected = q2(open_cash(p) + tgt.expected_closing)
+            realized_cell = (f'<span class="proj" title="expected at the 50% target">'
+                             f"{r.esc(fmt(leg_expected))}</span>")
+        else:
+            close_price = closing = realized_cell = '<span class="dim">-</span>'
+    elif p.is_superseded:
+        close_price = closing = realized_cell = '<span class="dim">&mdash;</span>'
+    else:
+        close_price = r.esc(price(p.close_price))
+        closing = r.money(close_cash(p))
+        realized_cell = r.money(realized_pl(p))
+
+    return (
+        f'<tr id="row-{pid}"{cls}{toggle}>'
+        f'<td class="gutter">{gutter}</td>'
+        f"<td>{label}{note}{actions_html}</td>"
+        f"<td>{r.dte_cell(dte)}</td>"
+        f"<td>{r.status_badge(p.status)}</td>"
+        f'<td class="unit">{r.esc(price(p.open_price))}</td>'
+        f'<td class="unit">{close_price}</td>'
+        f"<td>{r.money(open_cash(p))}</td>"
+        f"<td>{closing}</td>"
+        f"<td>{realized_cell}</td>"
+        f'<td>{r.money(carry, dash="0.00")}</td>'
+        f"<td>{r.money(be.price if be else None)}</td>"
+        f"<td>{r.money(capital_at_risk(p))}</td>"
+        f"<td>{legs_html}</td></tr>"
+    )
+
+
+def _chain_head_row(index, legs, clicked, here) -> str:
+    """A header for an expanded chain: what it is, its total, and Hide.
+
+    Marks where the block starts, so its rows are not mistaken for the
+    positions around them.
+    """
+    realized = q2(sum((realized_pl(leg) for leg in legs), ZERO))
+    chain = index.chain(clicked)
+    pid = r.esc(clicked.id)
+    return (
+        f'<tr class="chain-head"><td colspan="{len(POSITION_COLUMNS)}">'
+        f"<span>Chain &middot; {len(legs)} leg(s) &middot; "
+        f"realized {r.money(realized)} &middot; {chain.days} days</span>"
+        f'<a class="legs here" href="{here}#row-{pid}" title="Hide the chain">&#9650;</a>'
+        f"</td></tr>"
+    )
+
+
+def _action_row(p, index, which, token, here) -> str:
+    form_html = _action_form(p, which, token, index.carry(p), back=here)
+    return (
+        f'<tr class="action-row"><td colspan="{len(POSITION_COLUMNS)}">'
+        f'<div class="action-inline"><h3>{dict(ACTIONS).get(which, which)}'
+        f' &middot; {r.contract(p)}</h3>{form_html}</div></td></tr>'
+    )
+
+
 def positions_page(conn, query, token: str = "") -> tuple[int, str]:
     positions = store.load_positions(conn)
     index = ChainIndex(positions)
@@ -121,59 +273,67 @@ def positions_page(conn, query, token: str = "") -> tuple[int, str]:
     else:
         listed = open_ones
 
-    # An action requested inline: its form renders directly under the row.
     act_id = (query.get("act") or [""])[0]
     which = (query.get("do") or [""])[0]
+    chain_id = (query.get("chain") or [""])[0]
     here = f"/?show={show}"
+
+    if show == "closed":
+        listed = sorted(listed, key=lambda p: (p.closed_on or p.expiry, p.underlying),
+                        reverse=True)
+    elif show == "all":
+        listed = sorted(listed, key=lambda p: (p.opened_on, p.underlying),
+                        reverse=True)
+    else:
+        listed = sorted(listed, key=lambda p: (p.expiry, p.underlying, -p.quantity))
+
+    # Open positions sharing a root belong to one chain; mark them.
+    roots = {p.id: index.root(p).id for p in open_ones}
+    size: dict[str, int] = {}
+    for root_id in roots.values():
+        size[root_id] = size.get(root_id, 0) + 1
+    rail_of = {root_id: i % 4 for i, root_id in enumerate(
+        sorted(k for k, n in size.items() if n > 1))}
+
+    # An expanded chain is shown whole, in order, where its clicked row was.
+    # Its legs are then not listed again elsewhere in the table.
+    expanded_target = index.get(chain_id) if chain_id else None
+    expanded_legs = ([leg for leg, _ in index.family(expanded_target)]
+                     if expanded_target else [])
+    expanded_ids = {leg.id for leg in expanded_legs}
 
     queue = validate.expiring(open_ones)
     banner = ""
     if queue:
-        banner = (
-            f'<div class="callout"><a href="/expiring">'
-            f"{len(queue)} position(s) at or past expiry need an outcome"
-            "</a></div>"
-        )
+        banner = (f'<div class="callout"><a href="/expiring">'
+                  f"{len(queue)} position(s) at or past expiry need an outcome"
+                  "</a></div>")
 
     rows = []
-    for p in sorted(listed, key=lambda p: (p.expiry, p.underlying)):
-        carry = index.carry(p)
-        chain = index.chain(p)
-        risk = capital_at_risk(p)
-        dte = (p.expiry - date.today()).days if p.is_open else None
-        be = break_even(chain) if p.is_open else None
-        tgt = target(p, carry) if p.is_open else None
-        pid = r.esc(p.id)
+    for p in listed:
+        if p.id in expanded_ids and p.id != chain_id:
+            continue  # rendered as part of the expanded chain
 
-        links = ""
-        if p.is_open:
-            links = " ".join(
-                f'<a class="act{" here" if p.id == act_id and k == which else ""}"'
-                f' href="{here}&act={pid}&do={k}">{label}</a>'
-                for k, label in ACTIONS
-            )
+        if p.id == chain_id:
+            rows.append(_chain_head_row(index, expanded_legs, p, here))
+            for leg in expanded_legs:
+                rows.append(_position_row(
+                    leg, index, here=here, act_id=act_id, which=which,
+                    expanded=(leg.id == chain_id), in_chain=True,
+                    current=(leg.id == chain_id), collapse_to=chain_id,
+                ))
+                if leg.id == act_id and which and leg.is_open:
+                    rows.append(_action_row(leg, index, which, token, here))
+            continue
 
-        rows.append([
-            f'<a href="/position/{pid}">{r.contract(p)}</a>',
-            r.dte_cell(dte),
-            r.esc(p.status.value.title()),
-            r.money(open_cash(p)),
-            r.money(carry, dash="0.00"),
-            r.money(None if p.is_open else realized_pl(p)),
-            r.money(risk),
-            r.money(be.price if be else None),
-            r.money(tgt.price if tgt and tgt.applicable else None),
-            f'{chain.leg_count}' if chain.leg_count > 1 else '<span class="dim">1</span>',
-            links,
-        ])
-
+        root_id = roots.get(p.id)
+        rows.append(_position_row(
+            p, index, here=here, act_id=act_id, which=which,
+            siblings=size.get(root_id, 0) if root_id else 0,
+            rail=rail_of.get(root_id),
+        ))
         if p.id == act_id and which and p.is_open:
-            form_html = _action_form(p, which, token, carry, back=here)
-            rows.append(
-                f'<tr class="action-row"><td colspan="11">'
-                f'<div class="action-inline"><h3>{dict(ACTIONS).get(which, which)}'
-                f' &middot; {r.contract(p)}</h3>{form_html}</div></td></tr>'
-            )
+            rows.append(_action_row(p, index, which, token, here))
 
     totals = _portfolio_totals(conn, positions, index)
     tabs = " ".join(
@@ -181,15 +341,18 @@ def positions_page(conn, query, token: str = "") -> tuple[int, str]:
         for k, label in (("open", "Open"), ("closed", "Closed"), ("all", "All"))
     )
 
+    table_html = r.table(POSITION_COLUMNS, rows, cls="positions")
+    if (query.get("partial") or [""])[0] == "table":
+        # Just the table, for the script that swaps it in place.
+        return 200, table_html
+
     body = f"""{banner}
 {totals}
 <div class="tabs">{tabs}</div>
-{r.table(
-    ["Contract", "DTE", "Status", "Credit", "Carry", "Realized",
-     "At risk", "Break-even", "Target", "Legs", ""],
-    rows, cls="positions")}
+{table_html}
 <p class="hint">Credit is what came in on opening. Carry is what the chain
-brought forward. They are different scopes and are never added together.</p>"""
+brought forward. They are different scopes and are never added together.
+Click a row or its leg count to show the whole chain in place; again to hide.</p>"""
     return 200, r.page("Positions", body, nav_here="positions")
 
 
@@ -387,74 +550,40 @@ def position_page(conn, position_id, token, query) -> tuple[int, str]:
 
     body = f"""<div class="totals wide">{fact_rows}</div>
 {actions_block}
-{_family_block(index, position, chain)}
+{_chain_block(index, position, chain)}
 {notes}
 <p class="hint"><a href="/audit?entity={r.esc(position.id)}">History for this
 position</a></p>"""
     return 200, r.page(r.contract_text(position), body, nav_here="positions")
 
 
-def _family_block(index, position, chain) -> str:
-    """The whole tree from the root: every roll, and both halves of every split.
+def _chain_block(index, position, chain) -> str:
+    """Every leg of this position's chain, as the same rows the list uses.
 
-    A lineage shows one path and hides the sibling a split created. For a
-    position that was divided, seeing what happened to *each* half is the
-    whole point, so this shows the family and marks the path to this position.
+    A lineage shows one path; this shows the whole chain including the other
+    half of any split and what became of it, in order, with this position
+    marked. Same columns, same figures, as the positions page.
     """
-    family = index.family(position)
-    on_path = {leg.id for leg in chain.legs}
-    has_split = any(leg.is_superseded for leg, _ in family)
-
-    rows = []
-    for leg, depth in family:
-        halves = (sorted(index.successors(leg), key=lambda h: h.quantity)
-                  if leg.is_superseded else ())
-        indent = f' style="padding-left:{depth * 1.5}rem"' if depth else ""
-        label = r.contract(leg)
-        if leg.id == position.id:
-            label = f"<b>{label}</b>"
-        else:
-            label = f'<a href="/position/{r.esc(leg.id)}">{label}</a>'
-        if halves:
-            label += (' <span class="dim">&rarr; divided into '
-                      + " + ".join(str(h.quantity) for h in halves) + "</span>")
-
-        classes = []
-        if leg.is_superseded:
-            classes.append("superseded")
-        if leg.id not in on_path:
-            classes.append("branch")
-        cls = f' class="{" ".join(classes)}"' if classes else ""
-
-        credit = r.money(open_cash(leg))
-        if leg.is_superseded:
-            credit = (f'<s class="dim" title="now carried by the halves">'
-                      f"{r.esc(fmt(open_cash(leg)))}</s>")
-        realized = ("<span class=\"dim\">&mdash;</span>" if leg.is_superseded
-                    else r.money(None if leg.is_open else realized_pl(leg)))
-
-        rows.append(
-            f"<tr{cls}><td><span{indent}>{label}</span></td>"
-            f"<td>{r.esc(leg.opened_on)}</td>"
-            f"<td>{r.esc(leg.closed_on or '-')}</td>"
-            f"<td>{r.esc(leg.status.value.title())}</td>"
-            f"<td>{credit}</td><td>{realized}</td></tr>"
-        )
+    legs = [leg for leg, _ in index.family(position)]
+    has_split = any(leg.is_superseded for leg in legs)
+    rows = [
+        _position_row(leg, index, in_chain=True,
+                      current=(leg.id == position.id), with_actions=False)
+        for leg in legs
+    ]
 
     totals = [("This chain realized", r.money(chain.realized)),
               ("Days", r.num(chain.days))]
+    explain = ""
     if has_split:
-        everything = q2(sum((realized_pl(leg) for leg, _ in family), ZERO))
-        totals.insert(1, ("All branches realized", r.money(everything)))
-        explain = ('<p class="hint">A divided position stays as the record of '
-                   'the split and realizes nothing itself; its credit is carried '
-                   'by the halves. Greyed rows are the other branch.</p>')
-    else:
-        explain = ""
+        everything = q2(sum((realized_pl(leg) for leg in legs), ZERO))
+        totals.insert(1, ("All legs realized", r.money(everything)))
+        explain = ('<p class="hint">A split position stays as the record of the '
+                   'split and realizes nothing itself; its credit is carried by '
+                   'the halves, which follow it here.</p>')
 
-    title = "Family" if has_split else "Chain"
-    return f"""<h2>{title} - {len(family)} leg(s)</h2>
-{r.table(["Leg", "Opened", "Closed", "Status", "Credit", "Realized"], rows)}
+    return f"""<h2>Chain - {len(legs)} leg(s)</h2>
+{r.table(POSITION_COLUMNS, rows, cls="positions chain")}
 <div class="totals">{"".join(
     f"<div><span>{r.esc(k)}</span><b>{v}</b></div>" for k, v in totals)}</div>
 {explain}"""

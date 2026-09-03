@@ -570,3 +570,4 @@ class TestSplitLinking(unittest.TestCase):
     def test_chain_days_counts_so_far_while_open(self):
         head = position(opened_on=date.today())
         self.assertEqual(ChainIndex([head]).chain(head).days, 0)
+
