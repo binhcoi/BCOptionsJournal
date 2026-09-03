@@ -1,0 +1,23 @@
+# Self-contained: one image, one volume holding a single SQLite file.
+# Also runs bare in an LXC -- see README.
+services:
+  bcoj:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: bcoj:0.1.0
+    volumes:
+      # The journal. Back it up by copying this one file.
+      - ./data:/data
+      # Legacy exports to import, read-only.
+      - ../data:/import:ro
+    environment:
+      BCOJ_DB: /data/journal.db
+      # BCOJ_PASSWORD: set to require a password
+    # Published to loopback only; a personal app is not a service.
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    # For the CLI instead of the UI:
+    #   docker compose run --rm --entrypoint python bcoj \
+    #     -m bcoj.cli reconcile /import/export.csv
