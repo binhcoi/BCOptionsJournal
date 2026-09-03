@@ -39,6 +39,8 @@ class App:
             ("GET", r"^/new$", self._new_form),
             ("POST", r"^/new$", self._new_submit),
             ("GET", r"^/expiring$", self._expiring),
+            ("GET", r"^/risk$", self._risk),
+            ("GET", r"^/position/([0-9a-zA-Z_-]+)/roll-preview$", self._roll_preview),
             ("GET", r"^/audit$", self._audit),
             ("POST", r"^/audit/(\d+)/revert$", self._revert),
             ("GET", r"^/position/([0-9a-zA-Z_-]+)$", self._position),
@@ -139,6 +141,12 @@ class App:
 
     def _ticker(self, conn, query, form, args):
         return routes.ticker_page(conn, args[0], self.csrf, query)
+
+    def _risk(self, conn, query, form, args):
+        return routes.risk_page(conn, query)
+
+    def _roll_preview(self, conn, query, form, args):
+        return routes.roll_preview_fragment(conn, args[0], query)
 
     def _ticker_data(self, conn, query, form, args):
         return routes.ticker_data_page(conn, args[0], self.csrf, query)

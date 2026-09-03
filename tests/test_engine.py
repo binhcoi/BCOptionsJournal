@@ -690,3 +690,125 @@ class TestPinnedLotDatedAfterSale(unittest.TestCase):
         with self.assertRaises(InsufficientSharesError) as ctx:
             match([lot], [sale])
         self.assertIn("acquired on 2026-09-18, after the sale", str(ctx.exception))
+
+
+class TestRollPreview(unittest.TestCase):
+    """The roll panel is the real roll run on a copy. Figures by hand:
+
+    Leg: 10 short puts at 35, opened 3.00, fee 6.50 -> open cash 2,993.50.
+    Roll: buy back 4.00 (fee 6.50) -> close cash -4,006.50, realizes -1,013.00.
+    New: 12 puts at 34 for 5.00, fee 7.80 -> open cash 5,992.20.
+    """
+
+    def setUp(self):
+        from bcoj.engine.decide import roll_preview
+        self.roll_preview = roll_preview
+        self.leg = position(quantity=10, open_price=D("3.00"), open_fee=D("6.50"),
+                            expiry=date(2026, 2, 20))
+        self.kw = dict(close_price=D("4.00"), close_fee=D("6.50"),
+                       new_expiry=date(2026, 3, 20), new_strike=D("34"),
+                       new_price=D("5.00"), new_fee=D("7.80"), new_quantity=12,
+                       on=date(2026, 2, 6))
+
+    def test_credit_roll_that_grows(self):
+        pv = self.roll_preview([self.leg], self.leg, **self.kw)
+        self.assertEqual(pv.closing_realized, D("-1013.00"))
+        self.assertEqual(pv.this_roll, D("1985.70"))
+        self.assertTrue(pv.is_credit)
+        self.assertEqual(pv.carry_before, D("0.00"))
+        self.assertEqual(pv.carry_after, D("-1013.00"))
+        self.assertEqual(pv.net_credit_before, D("2993.50"))
+        self.assertEqual(pv.net_credit_after, D("4979.20"))
+        self.assertEqual(pv.break_even_before.price, D("32.01"))
+        self.assertEqual(pv.break_even_after.price, D("29.85"))
+        self.assertEqual(pv.at_risk_before, D("35000.00"))
+        self.assertEqual(pv.at_risk_after, D("40800.00"))
+        self.assertEqual(pv.to_recover_after, D("0.00"))
+        self.assertFalse(pv.underwater_after)
+        self.assertTrue(pv.target_after.applicable)
+        self.assertEqual(pv.size_change, 2)
+        self.assertTrue(pv.grows)
+        self.assertEqual(pv.strike_change, D("-1.00"))
+        self.assertEqual(pv.dte_after, 42)
+
+    def test_debit_roll_that_goes_underwater(self):
+        # Buy back at 8.00 and take only 3.00 for the new leg.
+        kw = dict(self.kw, close_price=D("8.00"), new_price=D("3.00"))
+        pv = self.roll_preview([self.leg], self.leg, **kw)
+        self.assertEqual(pv.closing_realized, D("-5013.00"))
+        self.assertEqual(pv.this_roll, D("-4414.30"))
+        self.assertFalse(pv.is_credit)
+        self.assertEqual(pv.net_credit_after, D("-1420.80"))
+        self.assertEqual(pv.to_recover_after, D("1420.80"))
+        self.assertTrue(pv.underwater_after)
+        self.assertFalse(pv.target_after.applicable)
+        # A net debit raises a put's break-even above the strike.
+        self.assertEqual(pv.break_even_after.price, D("35.18"))
+
+    def test_carry_from_earlier_legs_flows_through(self):
+        earlier = closed(id="p0", quantity=10, open_price=D("3.00"), open_fee=D("6.50"),
+                         close_price=D("0.50"), close_fee=D("6.50"),
+                         status=Status.ROLLED)           # realized 2,487.00
+        leg = position(quantity=10, open_price=D("3.00"), open_fee=D("6.50"),
+                       expiry=date(2026, 2, 20), rolled_from_id="p0")
+        pv = self.roll_preview([earlier, leg], leg, **self.kw)
+        self.assertEqual(pv.carry_before, D("2487.00"))
+        self.assertEqual(pv.carry_after, D("1474.00"))
+        self.assertEqual(pv.net_credit_after, D("7466.20"))   # 5,992.20 + 1,474.00
+
+    def test_the_journal_is_not_touched(self):
+        self.roll_preview([self.leg], self.leg, **self.kw)
+        self.assertTrue(self.leg.is_open)
+        self.assertIsNone(self.leg.close_price)
+
+
+class TestObligations(unittest.TestCase):
+    def test_grouped_by_expiry_with_cash_and_shares(self):
+        from bcoj.engine.decide import obligations
+        rows = [
+            position(id="a", quantity=10, strike=D("35"), expiry=date(2026, 3, 20)),
+            position(id="b", underlying="BETA", quantity=2, strike=D("20"),
+                     expiry=date(2026, 3, 20)),
+            position(id="c", right=Right.CALL, quantity=3, strike=D("50"),
+                     expiry=date(2026, 4, 17)),
+            position(id="d", direction=Direction.LONG, expiry=date(2026, 3, 20)),
+            closed(id="e", quantity=5, expiry=date(2026, 3, 20), close_price=D("0.10")),
+        ]
+        days = obligations(rows, today=date(2026, 3, 1))
+        self.assertEqual([d.expiry for d in days], [date(2026, 3, 20), date(2026, 4, 17)])
+        first, second = days
+        self.assertEqual(first.dte, 19)
+        self.assertEqual(first.cash_if_assigned, D("39000.00"))   # 35,000 + 4,000
+        self.assertEqual(first.shares_to_deliver, 0)
+        self.assertEqual(first.tickers, ("ACME", "BETA"))
+        self.assertEqual([o.position.id for o in first.items], ["a", "b"])
+        self.assertEqual(second.cash_if_assigned, D("0.00"))
+        self.assertEqual(second.shares_to_deliver, 300)
+        self.assertIsNotNone(first.items[0].break_even)
+
+
+class TestConcentration(unittest.TestCase):
+    def test_covered_calls_ride_on_their_shares_and_naked_ones_are_counted(self):
+        from bcoj.engine.decide import concentration, total_exposure
+        rows = [
+            position(id="a", quantity=10, strike=D("35"), open_price=D("3.00"),
+                     open_fee=D("6.50")),                                 # 35,000 at risk
+            position(id="b", right=Right.CALL, quantity=2, strike=D("40"),
+                     share_lot_id="lot1"),                                # covered: shares carry it
+            position(id="c", underlying="GAMMA", right=Right.CALL, quantity=1,
+                     strike=D("90")),                                     # naked
+            # 200 - 0.65 open fee - 100 buy-back, no closing fee: realized 99.35
+            closed(id="d", quantity=1, open_price=D("2.00"), close_price=D("1.00")),
+        ]
+        risks = concentration(rows, {"ACME": D("12000.00")})
+        self.assertEqual([t.underlying for t in risks], ["ACME", "GAMMA"])
+        acme, gamma = risks
+        self.assertEqual(acme.at_risk, D("35000.00"))
+        self.assertEqual(acme.shares_at_cost, D("12000.00"))
+        self.assertEqual(acme.exposure, D("47000.00"))
+        self.assertEqual(acme.naked_calls, 0)
+        self.assertEqual(acme.open_positions, 2)
+        self.assertEqual(acme.realized, D("99.35"))
+        self.assertEqual(gamma.naked_calls, 1)
+        self.assertEqual(gamma.exposure, D("0.00"))
+        self.assertEqual(total_exposure(risks), D("47000.00"))

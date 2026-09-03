@@ -12,7 +12,7 @@ from ..db import store
 from ..domain.enums import Direction, Right, Status
 from ..domain.money import ZERO, fmt, parse_money, price, q2
 from ..domain.types import Position
-from ..engine import actions, validate, wheels
+from ..engine import actions, decide, validate, wheels
 from ..engine.chains import ChainIndex
 from ..engine.shares import InsufficientSharesError, match as match_lots
 from ..engine.pnl import close_cash, open_cash, realized_pl
@@ -628,6 +628,17 @@ def _chain_block(index, position, chain) -> str:
 
     totals = [("This chain realized", r.money(chain.realized)),
               ("Days", r.num(chain.days))]
+    if len(legs) > 1:
+        root = legs[0]
+        drift = q2(position.strike - root.strike)
+        totals.append(("Strike", f"{r.esc(price(root.strike))} &rarr; "
+                                 f"{r.esc(price(position.strike))}"
+                                 + (f' <small>{"down" if drift < 0 else "up"} '
+                                    f"{r.esc(price(abs(drift)))}</small>" if drift else "")))
+        grew = position.quantity - root.quantity
+        totals.append(("Size", f"{root.quantity} &rarr; {position.quantity}"
+                               + (f' <small class="neg">x{position.quantity / root.quantity:.1f}</small>'
+                                  if grew > 0 else "")))
     explain = ""
     if has_split:
         everything = q2(sum((realized_pl(leg) for leg in legs), ZERO))
@@ -691,7 +702,9 @@ def _action_form(position, which: str, token: str, carry, back: str) -> str:
         ]), hint=f"Same side and right as the leg being closed: "
                  f"{position.direction.value.lower()} "
                  f"{position.right.value.lower()}s.")
-        return r.form(f"/position/{pid}/roll", nxt + closing + opening, token,
+        preview = (f'<div class="preview" data-preview="/position/{pid}/roll-preview">'
+                   + _roll_preview_placeholder() + "</div>")
+        return r.form(f"/position/{pid}/roll", nxt + closing + opening + preview, token,
                       submit="Roll", cls="two-part")
 
     if which == "expire":
@@ -753,6 +766,178 @@ def _action_panels(position, which: str, token: str, carry, back: str) -> str:
 
 # ---------------------------------------------------------------------------
 # action endpoints
+
+
+def _roll_preview_placeholder() -> str:
+    return ('<p class="hint">Enter the buy-back price and the new premium to see '
+            "what this roll does to the chain before recording it.</p>")
+
+
+def _roll_preview_html(pv) -> str:
+    """The decision panel: before and after, from the engine's own roll."""
+    def was(value) -> str:
+        return f"<small>was {value}</small>"
+
+    def be(b) -> str:
+        return r.money(b.price) if b else '<span class="dim">-</span>'
+
+    roll_cls = "pos" if pv.is_credit else "neg"
+    roll_word = "credit" if pv.is_credit else "debit"
+    tgt = pv.target_after
+    target_cell = (f"{r.esc(price(tgt.price))} <small>expected "
+                   f"{fmt(tgt.expected_pl)}</small>" if tgt.applicable
+                   else '<span class="dim">none: net debit</span>')
+    cells = [
+        ("This roll", f'<span class="{roll_cls}">{roll_word} {fmt(abs(pv.this_roll))}</span>'),
+        ("Closing this leg books", r.money(pv.closing_realized)),
+        ("Chain carry after", r.money(pv.carry_after, dash="0.00")
+                              + was(fmt(pv.carry_before))),
+        ("Net credit after", r.money(pv.net_credit_after) + was(fmt(pv.net_credit_before))),
+        ("Break-even after", be(pv.break_even_after)
+                             + (was(fmt(pv.break_even_before.price)) if pv.break_even_before else "")),
+        ("Capital at risk after", r.money(pv.at_risk_after)
+                                  + (was(fmt(pv.at_risk_before)) if pv.at_risk_before is not None else "")),
+        ("Target on the new leg", target_cell),
+        ("Credit still to recover", (f'<span class="neg">{fmt(pv.to_recover_after)}</span>'
+                                     if pv.underwater_after else r.money(ZERO, dash="0.00"))),
+        ("New leg", f"{pv.dte_after} DTE"),
+    ]
+    flags = []
+    if pv.grows:
+        old, new = pv.closing_leg.quantity, pv.new_leg.quantity
+        flags.append(f"<b>Size grows {old} &rarr; {new} contracts (x{new / old:.2f}).</b> "
+                     "This is how a position quietly grows several-fold, one roll "
+                     "at a time.")
+    if pv.strike_change:
+        flags.append(f"Strike {r.esc(price(pv.closing_leg.strike))} &rarr; "
+                     f"{r.esc(price(pv.new_leg.strike))} "
+                     f"({'down' if pv.strike_change < 0 else 'up'} "
+                     f"{r.esc(price(abs(pv.strike_change)))}).")
+    if pv.underwater_after:
+        flags.append(f"The chain stays under water by <b>{fmt(pv.to_recover_after)}</b> "
+                     "after this roll: that much credit is still owed before it "
+                     "nets positive.")
+    flag_html = "".join(f'<p class="callout">{f}</p>' for f in flags)
+    return ('<div class="totals">' + "".join(
+        f"<div><span>{r.esc(k)}</span><b>{v}</b></div>" for k, v in cells
+    ) + "</div>" + flag_html)
+
+
+def roll_preview_fragment(conn, position_id, query) -> tuple[int, str]:
+    """What the roll form shows as it is typed. Never an error: while a field
+    is still blank the panel just says what it is waiting for."""
+    position = store.load_position(conn, position_id)
+    if position is None or not position.is_open:
+        return 200, '<p class="hint">This position is no longer open.</p>'
+    try:
+        pv = decide.roll_preview(
+            store.load_positions(conn), position,
+            close_price=_decimal(query, "close_price", label="Buy-back price"),
+            new_expiry=_date(query, "new_expiry", label="New expiry"),
+            new_strike=_decimal(query, "new_strike", label="New strike"),
+            new_price=_decimal(query, "new_price", label="New premium"),
+            on=_date(query, "on", date.today()),
+            close_fee=_decimal(query, "close_fee", ZERO),
+            new_fee=_decimal(query, "new_fee", ZERO),
+            new_quantity=_int(query, "new_quantity", position.quantity),
+        )
+    except (BadRequest, actions.ActionError, ValueError):
+        return 200, _roll_preview_placeholder()
+    return 200, _roll_preview_html(pv)
+
+
+def risk_page(conn, query) -> tuple[int, str]:
+    """Where the capital sits and what each expiry could demand.
+
+    Everything here is worst case by construction: with no market data the app
+    cannot know what will be assigned, so it shows what would be owed if
+    everything at or below strike were.
+    """
+    positions = store.load_positions(conn)
+    index = ChainIndex(positions)
+    lots = store.load_lots(conn)
+    disposals = store.load_disposals(conn)
+    tickers = wheels.by_ticker(index, positions, lots, disposals, store.matching_rule(conn))
+    shares_at_cost = {t.underlying: t.held_cost for t in tickers if not t.error}
+    blocked = [t.underlying for t in tickers if t.error]
+
+    risks = [t for t in decide.concentration(positions, shares_at_cost)
+             if t.open_positions or t.shares_at_cost or t.naked_calls]
+    total = decide.total_exposure(risks)
+    options_at_risk = q2(sum((t.at_risk for t in risks), ZERO))
+    shares_total = q2(sum((t.shares_at_cost for t in risks), ZERO))
+    naked = sum(t.naked_calls for t in risks)
+
+    def pct(part) -> Decimal | None:
+        if total <= 0:
+            return None
+        return (part / total * 100).quantize(Decimal("0.1"))
+
+    cells = [
+        ("Total exposure", r.money(total)),
+        ("Options at risk", r.money(options_at_risk)),
+        ("Shares at cost", r.money(shares_total)),
+    ]
+    if risks and total > 0:
+        top = risks[0]
+        cells.append(("Largest", f"{r.esc(top.underlying)} <small>{pct(top.exposure)}%</small>"))
+    if naked:
+        cells.append(("Naked calls", f'<span class="neg">{naked}</span>'))
+    totals = '<div class="totals">' + "".join(
+        f"<div><span>{r.esc(k)}</span><b>{v}</b></div>" for k, v in cells) + "</div>"
+
+    conc_rows = []
+    for t in risks:
+        share = pct(t.exposure)
+        bar = ("" if share is None else
+               f'<span class="share"><span class="bar" style="width:{min(share, 100)}%"></span>'
+               f"{share}%</span>")
+        name = f'<a href="/shares/{r.esc(t.underlying)}">{r.esc(t.underlying)}</a>'
+        if t.naked_calls:
+            name += (f' <span class="badge st-blocked" title="short calls with no shares '
+                     f'behind them: no ceiling on the risk">{t.naked_calls} naked</span>')
+        if t.underlying in blocked:
+            name += ' <span class="badge st-blocked" title="share matching blocked">shares?</span>'
+        conc_rows.append([
+            name, bar, r.money(t.exposure), r.money(t.at_risk), r.money(t.shares_at_cost),
+            r.money(t.open_premium), r.money(t.carry, dash="0.00"), r.money(t.realized),
+            r.esc(t.open_positions),
+        ])
+
+    days = decide.obligations(positions)
+    cal_rows = []
+    running = ZERO
+    for day in days:
+        running = q2(running + day.cash_if_assigned)
+        items = "<br>".join(
+            f'<a href="/position/{r.esc(o.position.id)}">{r.contract(o.position)}</a>'
+            + (f' <small>break-even {fmt(o.break_even.price)}</small>' if o.break_even else "")
+            for o in day.items
+        )
+        cal_rows.append([
+            r.esc(day.expiry), r.dte_cell(day.dte),
+            r.money(day.cash_if_assigned, dash="-"), r.money(running),
+            r.esc(day.shares_to_deliver) if day.shares_to_deliver else '<span class="dim">-</span>',
+            items,
+        ])
+
+    body = f"""{totals}
+<h2>Concentration</h2>
+{r.table(["Ticker", "Share", "Exposure", "Options at risk", "Shares at cost",
+          "Open premium", "Chain carry", "Ticker realized", "Open"], conc_rows, cls="risk")}
+<p class="hint">Exposure is options at risk plus shares held at cost. A covered
+call rides on its shares and is not counted twice; a naked call has no ceiling
+and is flagged rather than summed. <b>Ticker realized</b> is every leg ever
+closed under that ticker, rolled legs included, while <b>chain carry</b> is what
+the open legs still carry forward: both are right, at different scopes.</p>
+<h2>Obligation calendar</h2>
+{r.table(["Expiry", "DTE", "Cash if puts assigned", "Cumulative", "Shares to deliver",
+          "Positions"], cal_rows, cls="calendar")}
+<p class="hint">Worst case by construction: the cash needed if every short put
+expiring that day were assigned, and the shares every short call would have to
+deliver. Cumulative is the cash needed if every expiry through that date went
+that way.</p>"""
+    return 200, r.page("Risk", body, nav_here="risk")
 
 
 def _past(on: date, label: str) -> date:

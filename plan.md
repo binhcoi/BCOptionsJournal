@@ -465,7 +465,7 @@ strategy, direction and ticker; CSV and JSON export plus a full SQLite backup.
 | M1 | Engine (P/L, chains, targets, break-even, share matching, adjusted basis) + faithful importer + reconciliation + storage. No UI | **Done.** 119 tests. A hand-computed synthetic fixture reconciles exactly, and a real five-year export reconciles to the cent bar one 25-cent fee typo |
 | ~~M2~~ | ~~Manual entry, positions list, validation, expiry queue, audit trail~~ | **Done.** 221 tests. Web UI over stdlib only; split divides chain history pro-rata; every mutation audited and revertible |
 | ~~M3~~ | ~~Shares: lots, buy-write, outright buy/sell, covered-call linking, wheel view, true total P/L~~ | **Done.** Shares and per-ticker pages, buy/sell/buy-write forms, cover/uncover, bulk linking of imported covered calls, wheel totals, true total on the dashboard |
-| M4 | Decision support: roll panel, break-even, obligation calendar, concentration | Next |
+| ~~M4~~ | ~~Decision support: roll panel, break-even, obligation calendar, concentration~~ | **Done.** Roll form previews the chain before and after as it is typed, computed by running the real roll on a copy; Risk page with concentration by ticker and a worst-case obligation calendar; strike drift and size growth on every chain |
 | M5 | Reporting, dashboard, filtering, saved views, notes and tags, export | |
 | M6 | Data health screen; packaging: backup/restore, LXC notes | |
 
@@ -538,6 +538,8 @@ authoritative check, and it is not in this repository because the data isn't.
 | **Share records are removable and the removal is undoable** | A mis-entered sale or purchase can block a ticker's matching; "remove" on the ticker page deletes it with a full audit snapshot, and History can restore it. A lot with calls written against it, or sales pinned to it, is refused |
 | **No share record may be dated in the future** | Assignments and lot re-dates are refused past today. A lot dated after today is a recording error, and a sale dated today cannot draw from it -- the engine says so by name rather than reporting an empty lot |
 | **A lot's date can be moved, and its assignment moves with it** | The one repair a future-dated assignment needs. Lot and position are updated together and each update is audited and undoable, so they never disagree about when the shares arrived |
+| **The roll preview is the roll itself, run on a copy** | The panel calls the same action and chain code the roll will use and reads the resulting chain. No second formula exists to drift. Fetched from the server as the form is typed, so the figures shown are the figures recorded |
+| **Risk is worst case by construction** | With no market data the calendar shows the cash owed if every short put were assigned and the shares every short call must deliver. A covered call rides on its shares and is not counted twice; a naked call is flagged, not summed, because it has no ceiling |
 | **Repairs live on a per-ticker raw-data page, not beside the figures** | Removing or re-dating a record is fixing a mistake, not a daily action. The ticker page shows the figures and flags a suspect record; the fix is one link away |
 | **Positions-page links carry both the expanded chain and the open action** | Opening a form no longer collapses the chain, and expanding a chain no longer closes the form. The open action's own link closes it |
 | **The three share forms are all in the page; tabs only toggle** | Switching never reloads or scrolls; without script the links still work and land on the forms |

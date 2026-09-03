@@ -1125,6 +1125,77 @@ class TestFutureDatesRefused(WebTestCase):
                             if q.underlying == "FUT1"))
 
 
+class TestDecisionSupport(WebTestCase):
+    """M4: the roll panel, the risk page, and strike drift on a chain."""
+
+    def _open(self, ticker, **kw):
+        self.add_position(underlying=ticker, **kw)
+        return [p for p in self.positions() if p.underlying == ticker.upper() and p.is_open][0]
+
+    def test_roll_form_carries_a_live_preview(self):
+        p = self._open("rpv")
+        page = self.get(f"/position/{p.id}?do=roll")
+        self.assertIn(f'data-preview="/position/{p.id}/roll-preview"', page)
+        self.assertIn("Enter the buy-back price", page)
+
+    def test_roll_preview_shows_the_engine_figures(self):
+        # Fixture leg: 10 puts at 35, 3.00, fee 6.50. Same roll as the engine test.
+        p = self._open("rpf")
+        frag = self.get(f"/position/{p.id}/roll-preview?close_price=4.00&close_fee=6.50"
+                        "&new_expiry=2026-03-20&new_strike=34&new_price=5.00"
+                        "&new_fee=7.80&new_quantity=12&on=2026-02-06")
+        self.assertIn("credit 1,985.70", frag)
+        self.assertIn("29.85", frag)           # break-even after
+        self.assertIn("40,800.00", frag)       # capital at risk after
+        self.assertIn("Size grows 10 &rarr; 12", frag)
+        self.assertIn("42 DTE", frag)
+        # The journal is untouched by previewing.
+        self.assertTrue(store.load_position(store.open_db(self.db_path), p.id).is_open)
+
+    def test_roll_preview_waits_politely_for_missing_fields(self):
+        p = self._open("rpw")
+        frag = self.get(f"/position/{p.id}/roll-preview?close_price=4.00")
+        self.assertIn("Enter the buy-back price", frag)
+
+    def test_roll_preview_flags_a_chain_left_under_water(self):
+        p = self._open("rpu")
+        frag = self.get(f"/position/{p.id}/roll-preview?close_price=8.00&close_fee=6.50"
+                        "&new_expiry=2026-03-20&new_strike=34&new_price=3.00"
+                        "&new_fee=7.80&new_quantity=12&on=2026-02-06")
+        self.assertIn("debit 4,414.30", frag)
+        self.assertIn("under water by <b>1,420.80</b>", frag)
+        self.assertIn("none: net debit", frag)
+
+    def test_risk_page_concentration_and_calendar(self):
+        self._open("acme")                                     # 10 x 35 = 35,000
+        self._open("beta", quantity="2", strike="20")          # 2 x 20 = 4,000
+        self._open("gam", right="CALL", quantity="1", strike="90", expiry="2026-04-17")
+        page = self.get("/risk")
+        # The class shares one journal, so assert per-ticker figures, not totals.
+        acme = page[page.index('href="/shares/ACME"'):]
+        self.assertIn("35,000.00", acme[:acme.index("</tr>")])
+        beta = page[page.index('href="/shares/BETA"'):]
+        self.assertIn("4,000.00", beta[:beta.index("</tr>")])
+        self.assertLess(page.index('href="/shares/ACME"'), page.index('href="/shares/BETA"'))
+        self.assertIn("1 naked", page)
+        self.assertIn("2026-03-20", page)
+        self.assertIn("2026-04-17", page)
+        self.assertIn(">100<", page)                           # shares to deliver
+        self.assertIn("break-even", page)
+
+    def test_chain_block_shows_strike_drift_and_size_growth(self):
+        p = self._open("drf")
+        status, _, _ = self.post(f"/position/{p.id}/roll", {
+            "on": "2026-02-06", "close_price": "4.00", "new_expiry": "2026-03-20",
+            "new_strike": "34", "new_price": "5.00", "new_quantity": "12"})
+        self.assertEqual(status, 303)
+        head = [q for q in self.positions() if q.underlying == "DRF" and q.is_open][0]
+        page = self.get(f"/position/{head.id}")
+        self.assertIn("35.00 &rarr; 34.00", page)
+        self.assertIn("10 &rarr; 12", page)
+        self.assertIn("x1.2", page)
+
+
 class TestShareRepairs(WebTestCase):
     """Fixing a mis-entered sale, and the guards that prevent one."""
 

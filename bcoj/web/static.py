@@ -108,6 +108,15 @@ td:first-child a { text-decoration: none; }
   letter-spacing: .04em; color: var(--dim); }
 .totals b { font-variant-numeric: tabular-nums; font-size: 1.05rem; }
 .totals.wide > div { flex: 1 1 190px; }
+.totals small { display: block; font-size: .7rem; font-weight: 400; color: var(--dim); }
+.preview { grid-column: 1 / -1; }
+.preview .totals { margin: .4rem 0 0; }
+.preview .callout { margin: .5rem 0 0; }
+.share { display: inline-flex; align-items: center; gap: .4rem; min-width: 9rem;
+  font-variant-numeric: tabular-nums; }
+.bar { display: inline-block; height: .55rem; min-width: 2px; max-width: 6rem;
+  background: var(--accent); border-radius: 3px; flex: 0 0 auto; }
+table.calendar td:last-child { line-height: 1.5; }
 
 form.grid, .grid {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
@@ -432,6 +441,26 @@ JS = """
         }
       });
     });
+  });
+
+  // A form with a preview box shows what it would do as it is typed. The
+  // figures come from the server -- the same arithmetic the action itself
+  // uses -- so the preview and the record can never disagree. Delegated, so
+  // forms swapped in later are covered too.
+  document.addEventListener('input', function (event) {
+    var form = event.target.closest('form');
+    var box = form && form.querySelector('[data-preview]');
+    if (!box || !window.fetch) return;
+    clearTimeout(box._previewTimer);
+    box._previewTimer = setTimeout(function () {
+      var params = new URLSearchParams(new FormData(form));
+      params.delete('csrf'); params.delete('next');
+      fetch(box.getAttribute('data-preview') + '?' + params.toString(),
+            { credentials: 'same-origin' })
+        .then(function (res) { return res.ok ? res.text() : ''; })
+        .then(function (html) { if (html) box.innerHTML = html; })
+        .catch(function () {});
+    }, 120);
   });
 
   var lotSelect = document.getElementById('f_lot_id');
