@@ -366,8 +366,7 @@ def position_page(conn, position_id, token, query) -> tuple[int, str]:
 {notes}
 <p class="hint"><a href="/audit?entity={r.esc(position.id)}">History for this
 position</a></p>"""
-    return 200, r.page(r.contract(position).replace("<span class=\"dim\">", ""),
-                       body, nav_here="positions")
+    return 200, r.page(r.contract_text(position), body, nav_here="positions")
 
 
 def _action_forms(position, token, query) -> str:

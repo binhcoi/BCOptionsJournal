@@ -9,6 +9,7 @@ from datetime import date
 from html import escape
 
 from ..domain.money import fmt
+from .static import VERSION
 
 APP_NAME = "BC Options Journal"
 
@@ -44,7 +45,7 @@ def page(title: str, body: str, flash: str = "", nav_here: str = "") -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)} - {esc(APP_NAME)}</title>
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/app.css?v={VERSION["app.css"]}">
 </head><body>
 <header>
   <strong>{esc(APP_NAME)}</strong>
@@ -60,7 +61,7 @@ def page(title: str, body: str, flash: str = "", nav_here: str = "") -> str:
 <h1>{esc(title)}</h1>
 {body}
 </main>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v={VERSION["app.js"]}"></script>
 </body></html>"""
 
 
@@ -155,13 +156,44 @@ def table(headers, rows, cls: str = "") -> str:
             f"<tbody>{body}</tbody></table>")
 
 
+def strike_text(value) -> str:
+    """A strike without the noise: 20 rather than 20.00, but 22.50 intact."""
+    text = fmt(value)
+    return text[:-3] if text.endswith(".00") else text
+
+
 def contract(position) -> str:
-    """A contract in the shorthand a trader reads at a glance."""
+    """One contract with each part visually distinct.
+
+    Run together as plain text -- "-10 SOFI 2026-09-18 20.00P" -- the quantity
+    disappears into the digits around it. So it gets its own pill, signed and
+    coloured by side. The rest stays in the conventional order: ticker, expiry,
+    strike, right.
+    """
+    short = position.direction.value == "SHORT"
+    side = "short" if short else "long"
+    # An inline grid with fixed tracks, so every row's expiry and strike start
+    # in the same place whatever the ticker's length. Strike and type share
+    # the last track, left-aligned, so a short strike leaves no dead space.
+    return (
+        f'<span class="contract">'
+        f'<span class="qty {side}" title="{esc(side)}'
+        f' {position.quantity} contract(s)">'
+        f'{"-" if short else "+"}{position.quantity}</span>'
+        f'<b class="ticker">{esc(position.underlying)}</b>'
+        f'<span class="exp">{esc(position.expiry)}</span>'
+        f'<span class="strike">{esc(strike_text(position.strike))} '
+        f'<span class="right">{esc(position.right.value[0])}</span></span>'
+        f'</span>'
+    )
+
+
+def contract_text(position) -> str:
+    """The same thing as plain text, for page titles and anywhere HTML is wrong."""
     side = "-" if position.direction.value == "SHORT" else "+"
     return (
-        f'{esc(side)}{position.quantity} {esc(position.underlying)} '
-        f'{esc(position.expiry)} {esc(fmt(position.strike))}'
-        f'{esc(position.right.value[0])}'
+        f"{side}{position.quantity} {position.underlying} {position.expiry} "
+        f"{strike_text(position.strike)} {position.right.value[0]}"
     )
 
 

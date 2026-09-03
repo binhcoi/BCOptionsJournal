@@ -14,12 +14,14 @@ CSS = """
   --bg: #fbfbfa; --panel: #fff; --ink: #1a1a1a; --dim: #6b7280;
   --line: #e3e3e0; --pos: #067647; --neg: #b42318; --accent: #1e4fd8;
   --warn-bg: #fffbeb; --warn-line: #f5d76e; --ok-bg: #ecfdf3;
+  --neg-tint: #fdeceb; --pos-tint: #e7f6ee;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #16171a; --panel: #1e2024; --ink: #e8e8e6; --dim: #9aa0a8;
     --line: #2e3138; --pos: #4ade80; --neg: #f87171; --accent: #7aa2ff;
     --warn-bg: #2a2312; --warn-line: #6b5a1f; --ok-bg: #12261a;
+    --neg-tint: #3a1d1d; --pos-tint: #14301f;
   }
 }
 * { box-sizing: border-box; }
@@ -58,6 +60,27 @@ tbody tr:last-child td { border-bottom: 0; }
 tbody tr:hover { background: var(--bg); }
 td:last-child, th:last-child { text-align: left; }
 .wrap { overflow-x: auto; }
+
+/* A contract is five facts, not one string. Laid out as an inline grid with
+   fixed tracks so expiry, strike and type align down the table whatever the
+   ticker's length; the quantity gets a pill so it cannot vanish into the
+   digits beside it. Order is the conventional one: ticker, expiry, strike,
+   type. */
+.contract {
+  display: inline-grid;
+  grid-template-columns: 3.4em 6ch 10.5ch auto;
+  column-gap: .55rem; align-items: baseline;
+}
+.qty {
+  text-align: right; padding: .02rem .34rem; border-radius: 4px;
+  font-variant-numeric: tabular-nums; font-weight: 700; font-size: .88em;
+}
+.qty.short { color: var(--neg); background: var(--neg-tint); }
+.qty.long { color: var(--pos); background: var(--pos-tint); }
+.exp, .strike { font-variant-numeric: tabular-nums; }
+.strike, .right { font-weight: 600; }
+td:first-child a { text-decoration: none; }
+td:first-child a:hover .ticker { text-decoration: underline; }
 
 .pos { color: var(--pos); }
 .neg { color: var(--neg); }
@@ -180,3 +203,15 @@ STATIC = {
     "app.css": ("text/css; charset=utf-8", CSS),
     "app.js": ("text/javascript; charset=utf-8", JS),
 }
+
+
+def _digest(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha1(text.encode()).hexdigest()[:10]
+
+
+# A fingerprint of the content, appended to the URL as ?v=..., so any edit to
+# the stylesheet or script reaches the browser on the next load. Without this a
+# cached copy can outlive the change by the whole cache window.
+VERSION = {name: _digest(content) for name, (_, content) in STATIC.items()}
