@@ -55,6 +55,7 @@ def page(title: str, body: str, flash: str = "", nav_here: str = "") -> str:
     {tab("/shares", "Shares", "shares")}
     {tab("/expiring", "Expiring", "expiring")}
     {tab("/risk", "Risk", "risk")}
+    {tab("/reports", "Reports", "reports")}
     {tab("/audit", "History", "audit")}
   </nav>
 </header>
@@ -129,6 +130,15 @@ def form(action: str, body: str, token: str, submit: str = "Save",
 {body}
 <div class="actions"><button type="submit"{button_cls}>{esc(submit)}</button>{cancel_html}</div>
 </form>"""
+
+
+def textarea(label: str, name: str, value="", hint: str = "", rows: int = 3) -> str:
+    note = f'<small>{esc(hint)}</small>' if hint else ""
+    return f"""<label>
+  <span>{esc(label)}</span>
+  <textarea name="{esc(name)}" id="f_{esc(name)}" rows="{rows}">{esc(value)}</textarea>
+  {note}
+</label>"""
 
 
 def fieldset(legend: str, body: str, hint: str = "") -> str:

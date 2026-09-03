@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 import sqlite3
 import uuid
 from datetime import date, datetime, timezone
@@ -136,11 +137,13 @@ def load_positions(conn, underlying: str | None = None) -> list[Position]:
         params = (underlying.upper(),)
     sql += " ORDER BY opened_on, id"
 
-    return [_position(row) for row in conn.execute(sql, params)]
+    tags = load_tags(conn)
+    return [_position(row, tags.get(row["id"], ())) for row in conn.execute(sql, params)]
 
 
-def _position(row) -> Position:
+def _position(row, tags=()) -> Position:
     return Position(
+        tags=tuple(tags),
         id=row["id"],
         underlying=row["underlying"],
         expiry=_date(row["expiry"]),
@@ -541,6 +544,8 @@ def apply(conn, result, note: str = "") -> dict[str, str]:
         for p in result.created:
             _insert_position(conn, p)
             _audit(conn, "position", p.id, "create", None, _position_dict(p), summary)
+            if p.tags:
+                set_tags(conn, p.id, p.tags)
 
     if result.lots or result.disposals:
         return rebuild_allocations(conn)
@@ -567,7 +572,7 @@ def load_position(conn, position_id: str) -> Position | None:
     row = conn.execute(
         "SELECT * FROM positions WHERE id = ?", (position_id,)
     ).fetchone()
-    return _position(row) if row else None
+    return _position(row, load_tags(conn).get(position_id, ())) if row else None
 
 
 def open_positions(conn) -> list[Position]:
@@ -578,6 +583,88 @@ def open_positions(conn) -> list[Position]:
             " ORDER BY expiry, underlying, strike"
         )
     ]
+
+
+# --------------------------------------------------------------------------
+# tags, notes and saved views
+
+
+def load_tags(conn) -> dict[str, tuple[str, ...]]:
+    out: dict[str, list[str]] = {}
+    for row in conn.execute(
+        "SELECT pt.position_id AS pid, t.name AS name FROM position_tags pt"
+        " JOIN tags t ON t.id = pt.tag_id ORDER BY t.name"
+    ):
+        out.setdefault(row["pid"], []).append(row["name"])
+    return {pid: tuple(names) for pid, names in out.items()}
+
+
+def all_tags(conn) -> list[str]:
+    return [r["name"] for r in conn.execute("SELECT name FROM tags ORDER BY name")]
+
+
+def normalize_tags(raw: str) -> tuple[str, ...]:
+    """Comma or space separated, a leading # allowed, case kept as first
+    typed, duplicates dropped regardless of case."""
+    seen: dict[str, str] = {}
+    for part in re.split(r"[,\s]+", raw or ""):
+        part = part.strip().lstrip("#")
+        if part and part.casefold() not in seen:
+            seen[part.casefold()] = part
+    return tuple(seen.values())
+
+
+def set_tags(conn, position_id: str, names) -> None:
+    """Replace a position's tags. Runs inside the caller's transaction."""
+    conn.execute("DELETE FROM position_tags WHERE position_id = ?", (position_id,))
+    for name in names:
+        row = conn.execute(
+            "SELECT id FROM tags WHERE name = ? COLLATE NOCASE", (name,)
+        ).fetchone()
+        tag_id = row["id"] if row else uuid.uuid4().hex
+        if row is None:
+            conn.execute("INSERT INTO tags (id, name) VALUES (?, ?)", (tag_id, name))
+        conn.execute(
+            "INSERT INTO position_tags (position_id, tag_id) VALUES (?, ?)",
+            (position_id, tag_id),
+        )
+
+
+def update_notes(conn, position_id: str, notes: str, tags, note: str = "notes edited") -> None:
+    p = load_position(conn, position_id)
+    if p is None:
+        raise ValueError("no such position")
+    before = dict(_position_dict(p), tags=list(p.tags))
+    after = dict(before, notes=notes, tags=list(tags))
+    with conn:
+        conn.execute("UPDATE positions SET notes = ? WHERE id = ?", (notes, position_id))
+        set_tags(conn, position_id, tags)
+        _audit(conn, "position", position_id, "update", before, after, note)
+
+
+def save_view(conn, name: str, filter_: str) -> str:
+    """Store a filter under a name; the same name overwrites."""
+    name = name.strip()
+    if not name:
+        raise ValueError("a view needs a name")
+    with conn:
+        row = conn.execute("SELECT id FROM saved_views WHERE name = ?", (name,)).fetchone()
+        view_id = row["id"] if row else uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO saved_views (id, name, filter) VALUES (?, ?, ?)"
+            " ON CONFLICT(id) DO UPDATE SET filter = excluded.filter",
+            (view_id, name, filter_),
+        )
+    return view_id
+
+
+def load_views(conn) -> list[dict]:
+    return [dict(r) for r in conn.execute("SELECT id, name, filter FROM saved_views ORDER BY name")]
+
+
+def delete_view(conn, view_id: str) -> None:
+    with conn:
+        conn.execute("DELETE FROM saved_views WHERE id = ?", (view_id,))
 
 
 def recent_underlyings(conn, limit: int = 40) -> list[str]:

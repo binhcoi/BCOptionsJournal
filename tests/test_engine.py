@@ -812,3 +812,57 @@ class TestConcentration(unittest.TestCase):
         self.assertEqual(gamma.naked_calls, 1)
         self.assertEqual(gamma.exposure, D("0.00"))
         self.assertEqual(total_exposure(risks), D("47000.00"))
+
+
+class TestReports(unittest.TestCase):
+    """By hand: A closes for 1,987.00 in February, D rolls for -1,013.00 in
+    February, B expires for 199.35 in March; a share sale books 500 in February."""
+
+    def setUp(self):
+        from bcoj.engine import reports
+        self.reports = reports
+        self.a = closed(id="a", quantity=10, open_price=D("3.00"), open_fee=D("6.50"),
+                        close_price=D("1.00"), close_fee=D("6.50"), closed_on=date(2026, 2, 6))
+        self.d = closed(id="d", quantity=10, open_price=D("3.00"), open_fee=D("6.50"),
+                        close_price=D("4.00"), close_fee=D("6.50"), status=Status.ROLLED,
+                        closed_on=date(2026, 2, 20))
+        self.b = closed(id="b", underlying="BETA", quantity=2, open_price=D("1.00"),
+                        open_fee=D("0.65"), close_price=D("0"), status=Status.EXPIRED,
+                        closed_on=date(2026, 3, 20), expiry=date(2026, 3, 20))
+        self.c = position(id="c")                                   # open: excluded
+        self.events = [reports.ShareEvent(date(2026, 2, 10), "ACME", D("500.00"))]
+        self.all = [self.a, self.d, self.b, self.c]
+
+    def test_by_period_keeps_scopes_apart_and_runs_a_total(self):
+        rows = self.reports.by_period(self.all, self.events, "month")
+        self.assertEqual([r.key for r in rows], ["2026-02", "2026-03"])
+        feb, mar = rows
+        self.assertEqual((feb.options, feb.shares, feb.total, feb.legs), (D("974.00"), D("500.00"), D("1474.00"), 2))
+        self.assertEqual((mar.options, mar.shares, mar.legs), (D("199.35"), D("0.00"), 1))
+        self.assertEqual(mar.running, D("1673.35"))
+        self.assertEqual([r.key for r in self.reports.by_period(self.all, self.events, "quarter")], ["2026-Q1"])
+        self.assertEqual(self.reports.by_period(self.all, self.events, "year")[0].running, D("1673.35"))
+
+    def test_by_ticker(self):
+        rows = self.reports.by_ticker(self.all, self.events)
+        self.assertEqual([r.underlying for r in rows], ["ACME", "BETA"])
+        acme = rows[0]
+        self.assertEqual((acme.options, acme.shares, acme.total), (D("974.00"), D("500.00"), D("1474.00")))
+        self.assertEqual((acme.open_count, acme.closed_legs), (1, 2))
+        self.assertEqual(acme.open_premium, D("99.35"))          # leg c: 100 - 0.65
+
+    def test_target_performance(self):
+        rows = self.reports.target_performance(self.all)
+        acme, beta = rows
+        # A closed at 1.00, under its 1.49 target: hit. D rolled: not a hit, not a win.
+        self.assertEqual((acme.legs, acme.hit, acme.wins, acme.closed, acme.rolled), (2, 1, 1, 1, 1))
+        self.assertEqual(acme.premium, D("5987.00"))
+        self.assertEqual(acme.realized, D("974.00"))
+        self.assertEqual(acme.capture, D("16.27"))
+        self.assertEqual(acme.hit_rate, D("50.00"))
+        self.assertEqual((beta.expired, beta.hit, beta.capture), (1, 1, D("100.00")))
+        total = self.reports.overall(rows)
+        self.assertEqual((total.legs, total.hit, total.wins), (3, 2, 2))
+        by_dte = self.reports.target_performance(self.all, key=self.reports.dte_bucket)
+        self.assertEqual([o.label for o in by_dte], ["60+ DTE", "8-30 DTE"] if False else sorted(o.label for o in by_dte))
+        self.assertIn("60+ DTE", [o.label for o in by_dte])

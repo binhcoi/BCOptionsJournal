@@ -5,6 +5,14 @@ arithmetic lives in bcoj.engine and all the writing in bcoj.db.store, so these
 are about one thing: making entry fast and mistakes hard.
 """
 
+import csv
+import io
+import json
+import os
+import sqlite3
+import tempfile
+import urllib.parse
+from dataclasses import asdict
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -12,7 +20,7 @@ from ..db import store
 from ..domain.enums import Direction, Right, Status
 from ..domain.money import ZERO, fmt, parse_money, price, q2
 from ..domain.types import Position
-from ..engine import actions, decide, validate, wheels
+from ..engine import actions, decide, reports, validate, wheels
 from ..engine.chains import ChainIndex
 from ..engine.shares import InsufficientSharesError, match as match_lots
 from ..engine.pnl import close_cash, open_cash, realized_pl
@@ -189,6 +197,7 @@ def _position_row(p, index, *, here: str = "/", act_id: str = "", which: str = "
     # Always a link, so an expanded row still leads to its page. The row being
     # viewed is marked by an arrow in the gutter, not inline.
     label = f'<a href="/position/{pid}">{r.contract(p)}</a>'
+    tags_html = "".join(f'<span class="tag">{r.esc(t)}</span>' for t in p.tags)
     gutter = ""
     if current:
         # No <b> around the contract: its grid tracks are sized in ch, and a
@@ -229,7 +238,7 @@ def _position_row(p, index, *, here: str = "/", act_id: str = "", which: str = "
     return (
         f'<tr id="row-{pid}"{cls}{toggle}>'
         f'<td class="gutter">{gutter}</td>'
-        f'<td class="main">{label}{note}</td>'
+        f'<td class="main">{label}{note}{tags_html}</td>'
         f"<td>{r.dte_cell(dte)}</td>"
         f"<td>{r.status_badge(p.status)}</td>"
         f'<td class="unit">{r.esc(price(p.open_price))}</td>'
@@ -293,11 +302,15 @@ def positions_page(conn, query, token: str = "") -> tuple[int, str]:
         listed = [p for p in positions if not p.is_open and not p.is_superseded]
     else:
         listed = open_ones
+    listed = _apply_filters(listed, query)
 
     act_id = (query.get("act") or [""])[0]
     which = (query.get("do") or [""])[0]
     chain_id = (query.get("chain") or [""])[0]
-    here = f"/?show={show}"
+    # Every link on the page keeps the filter, so opening a form or a chain
+    # never loses the view being looked at.
+    filter_qs = _filter_qs(query)
+    here = f"/?show={show}" + (f"&{filter_qs}" if filter_qs else "")
 
     if show == "closed":
         listed = sorted(listed, key=lambda p: (p.closed_on or p.expiry, p.underlying),
@@ -394,6 +407,7 @@ def positions_page(conn, query, token: str = "") -> tuple[int, str]:
     body = f"""{banner}
 {totals}
 <div class="tabs">{tabs}</div>
+{_filter_bar(conn, query, show, token)}
 {table_html}
 <p class="hint">Credit is what came in on opening. Carry is what the chain
 brought forward. They are different scopes and are never added together.
@@ -487,6 +501,8 @@ def new_position_form(conn, token, form=None, problems=()) -> tuple[int, str]:
                 kind="date", required=True),
         r.field("Notes", "notes", _one(form, "notes"),
                 hint="Why this trade, in your words"),
+        r.field("Tags", "tags", _one(form, "tags"), attrs=' list="all-tags" autocomplete="off"',
+                hint="Comma separated"),
         r.select("Cover with lot", "share_lot_id",
                  [("", "- not covered -")] + [
                      (l.id, _lot_label(l)) for l in sorted(
@@ -495,7 +511,7 @@ def new_position_form(conn, token, form=None, problems=()) -> tuple[int, str]:
                  hint="For a short call written against shares you hold"),
     ]) + "</div>"
     body = f"""{r.problems_block(problems)}
-{r.datalist("tickers", tickers)}
+{r.datalist("tickers", tickers)}{r.datalist("all-tags", store.all_tags(conn))}
 {r.form("/new", grid + rest, token, submit="Add position", cls="two-part")}
 <p class="hint">STO sells to open (short), BTO buys to open (long). Fee is
 auto-filled at {fmt(rate)} per contract and editable. Shortcuts: <kbd>+7</kbd>,
@@ -535,6 +551,7 @@ def create_position(conn, form, token) -> None:
         close_fee=_decimal(form, "open_fee", q2(rate * abs(quantity))),
         status=Status.OPEN,
         notes=_one(form, "notes"),
+        tags=store.normalize_tags(_one(form, "tags")),
         share_lot_id=_one(form, "share_lot_id") or None,
     )
 
@@ -634,8 +651,15 @@ def position_page(conn, position_id, token, query) -> tuple[int, str]:
     else:
         actions_block = '<p class="dim">This position is closed. Nothing to do.</p>'
 
-    notes = (f"<h2>Notes</h2><p>{r.esc(position.notes)}</p>"
-             if position.notes else "")
+    notes = ("<h2>Notes</h2>" + r.form(
+        f"/position/{r.esc(position.id)}/notes",
+        r.hidden("next", here)
+        + r.textarea("Notes", "notes", position.notes, hint="Why this trade, in your words")
+        + r.field("Tags", "tags", ", ".join(position.tags),
+                  attrs=' list="all-tags" autocomplete="off"',
+                  hint="Comma separated, e.g. wheel, earnings")
+        + r.datalist("all-tags", store.all_tags(conn)),
+        token, submit="Save notes", cls="grid"))
 
     body = f"""<div class="totals wide">{fact_rows}</div>
 {actions_block}
@@ -1062,6 +1086,277 @@ expiring that day were assigned, and the shares every short call would have to
 deliver. Cumulative is the cash needed if every expiry through that date went
 that way.</p>"""
     return 200, r.page("Risk", body, nav_here="risk")
+
+
+# ---------------------------------------------------------------------------
+# filtering and saved views
+
+FILTER_KEYS = ("q", "right", "side", "tag", "since", "until")
+
+
+def _filter_qs(query) -> str:
+    """The filter part of a query string, in a fixed order."""
+    parts = [(k, (query.get(k) or [""])[0].strip()) for k in FILTER_KEYS]
+    return urllib.parse.urlencode([(k, v) for k, v in parts if v])
+
+
+def _apply_filters(listed, query):
+    q = (query.get("q") or [""])[0].strip().casefold()
+    right = (query.get("right") or [""])[0].strip().upper()
+    side = (query.get("side") or [""])[0].strip().upper()
+    tag = (query.get("tag") or [""])[0].strip().casefold()
+    since = (query.get("since") or [""])[0].strip()
+    until = (query.get("until") or [""])[0].strip()
+    out = []
+    for p in listed:
+        if q and q not in p.underlying.casefold() and q not in p.notes.casefold() \
+                and not any(q in t.casefold() for t in p.tags):
+            continue
+        if right and p.right.value != right:
+            continue
+        if side and p.direction.value != side:
+            continue
+        if tag and tag not in {t.casefold() for t in p.tags}:
+            continue
+        if since and p.opened_on.isoformat() < since:
+            continue
+        if until and p.opened_on.isoformat() > until:
+            continue
+        out.append(p)
+    return out
+
+
+def _filter_bar(conn, query, show: str, token: str) -> str:
+    get = lambda k: (query.get(k) or [""])[0]  # noqa: E731
+    tags = store.all_tags(conn)
+    tag_options = [("", "any tag")] + [(t, t) for t in tags]
+    fields = "".join([
+        r.hidden("show", show),
+        r.field("Find", "q", get("q"), attrs=' placeholder="ticker, note or tag"'),
+        r.select("Right", "right", [("", "any"), ("PUT", "Put"), ("CALL", "Call")], get("right")),
+        r.select("Side", "side", [("", "any"), ("SHORT", "Short"), ("LONG", "Long")], get("side")),
+        r.select("Tag", "tag", tag_options, get("tag")) if tags else "",
+        r.field("Opened from", "since", get("since"), kind="date"),
+        r.field("to", "until", get("until"), kind="date"),
+    ])
+    active = _filter_qs(query)
+    clear = f' <a class="btn cancel" href="/?show={show}">Clear</a>' if active else ""
+    bar = (f'<form class="filters" method="get" action="/">{fields}'
+           f'<div class="actions"><button type="submit">Filter</button>{clear}</div></form>')
+
+    chips = []
+    for v in store.load_views(conn):
+        current = " here" if v["filter"] == f"show={show}" + (f"&{active}" if active else "") else ""
+        chips.append(
+            f'<span class="chip{current}"><a href="/?{r.esc(v["filter"])}">{r.esc(v["name"])}</a>'
+            + r.form(f"/views/{r.esc(v['id'])}/delete", r.hidden("next", f"/?show={show}"),
+                     token, submit="\u00d7", cls="inline") + "</span>")
+    save = ""
+    if active:
+        save = r.form("/views/save",
+                      r.hidden("next", f"/?show={show}&{active}")
+                      + r.hidden("filter", f"show={show}&{active}")
+                      + r.field("Save this view as", "name", "", required=True,
+                                attrs=' placeholder="a name"'),
+                      token, submit="Save view", cls="inline save-view")
+    views = (f'<div class="chips">{"".join(chips)}{save}</div>' if chips or save else "")
+    return bar + views
+
+
+def do_save_view(conn, form) -> None:
+    filter_ = _one(form, "filter")
+    if not filter_.startswith("show="):
+        raise BadRequest("that is not a view")
+    try:
+        store.save_view(conn, _one(form, "name"), filter_)
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from None
+    raise Redirect(_next(form, "/"), "View saved")
+
+
+def do_delete_view(conn, view_id, form) -> None:
+    store.delete_view(conn, view_id)
+    raise Redirect(_next(form, "/"), "View removed")
+
+
+def do_notes(conn, position_id, form) -> None:
+    try:
+        store.update_notes(conn, position_id, _one(form, "notes"),
+                           store.normalize_tags(_one(form, "tags")))
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from None
+    raise Redirect(_next(form, f"/position/{position_id}"), "Notes saved")
+
+
+# ---------------------------------------------------------------------------
+# reports and exports
+
+
+def reports_page(conn, query) -> tuple[int, str]:
+    positions = store.load_positions(conn)
+    index = ChainIndex(positions)
+    lots = store.load_lots(conn)
+    disposals = store.load_disposals(conn)
+    rule = store.matching_rule(conn)
+    events = reports.share_events(lots, disposals, rule)
+    tickers = wheels.by_ticker(index, positions, lots, disposals, rule)
+
+    by = (query.get("by") or ["month"])[0]
+    if by not in reports.GRANULARITIES:
+        by = "month"
+
+    open_ones = [p for p in positions if p.is_open]
+    puts = sum(1 for p in open_ones if p.right is Right.PUT)
+    calls = sum(1 for p in open_ones if p.right is Right.CALL)
+    held = sum(t.held for t in tickers if not t.error)
+    counts = '<div class="totals">' + "".join(
+        f"<div><span>{r.esc(k)}</span><b>{v}</b></div>" for k, v in (
+            ("Open puts", puts), ("Open calls", calls), ("Shares held", held),
+            ("Tickers with shares", sum(1 for t in tickers if t.held > 0)),
+        )) + "</div>"
+
+    tabs = " ".join(
+        f'<a href="/reports?by={g}" class="{"here" if by == g else ""}">{g.title()}</a>'
+        for g in reports.GRANULARITIES)
+    period_rows = [[r.esc(row.key), r.money(row.options), r.money(row.shares),
+                    f"<b>{r.money(row.total)}</b>", r.esc(row.legs), r.money(row.running)]
+                   for row in reversed(reports.by_period(positions, events, by))]
+
+    ticker_rows = [[f'<a href="/shares/{r.esc(t.underlying)}">{r.esc(t.underlying)}</a>',
+                    r.money(t.options), r.money(t.shares), f"<b>{r.money(t.total)}</b>",
+                    r.money(t.open_premium), r.money(t.at_risk), r.esc(t.open_count),
+                    r.esc(t.closed_legs)]
+                   for t in reports.by_ticker(positions, events)]
+
+    def outcome_rows(groups):
+        rows = []
+        total = reports.overall(groups)
+        for o in list(groups) + ([total] if total and len(groups) > 1 else []):
+            rows.append([
+                f"<b>{r.esc(o.label)}</b>" if o.label == "All" else r.esc(o.label),
+                r.esc(o.legs), r.esc(o.closed), r.esc(o.rolled), r.esc(o.expired), r.esc(o.assigned),
+                r.num(o.hit_rate, "-") + ("%" if o.hit_rate is not None else ""),
+                r.num(o.win_rate, "-") + ("%" if o.win_rate is not None else ""),
+                r.num(o.capture, "-") + ("%" if o.capture is not None else ""),
+                r.money(o.avg_credit), r.num(o.avg_days, "-"), r.money(o.realized),
+            ])
+        return rows
+    outcome_head = ["", "Legs", "Closed", "Rolled", "Expired", "Assigned",
+                    ("Hit", "Closed at or past the target, or expired worthless"),
+                    ("Win", "Realized above zero"),
+                    ("Capture", "Realized as a share of premium taken in"),
+                    "Avg credit", "Avg days", "Realized"]
+    by_ticker_outcomes = reports.target_performance(positions, index=index)
+    by_dte_outcomes = reports.target_performance(positions, key=reports.dte_bucket, index=index)
+
+    body = f"""{_portfolio_totals(conn, positions, index)}
+{counts}
+<h2>Realized by period</h2>
+<div class="tabs">{tabs}</div>
+{r.table(["Period", "Options", "Shares", "Total", "Legs closed", "Running total"], period_rows)}
+<p class="hint">Options are booked on the leg's close date, shares on the sale's
+date. Legs still open are not here, at any value.</p>
+<h2>By ticker</h2>
+{r.table(["Ticker", "Options", "Shares", "Total", "Open premium", "At risk", "Open", "Legs closed"],
+         ticker_rows)}
+<h2>How short legs ended</h2>
+<h3>By ticker</h3>
+{r.table(outcome_head, outcome_rows(by_ticker_outcomes))}
+<h3>By days to expiry when opened</h3>
+{r.table(outcome_head, outcome_rows(by_dte_outcomes))}
+<p class="hint">Hit means the leg ended at or past its target: closed at or
+under the target price, or expired worthless. A roll or an assignment is
+neither a hit nor a miss on its own; what the chain finally does is.</p>
+<h2>Export</h2>
+<p><a href="/export/positions.csv">positions.csv</a> &middot;
+<a href="/export/shares.csv">shares.csv</a> &middot;
+<a href="/export/journal.json">journal.json</a> &middot;
+<a href="/export/journal.db">journal.db</a> (full SQLite backup)</p>
+<p class="hint">The CSV files carry the computed columns too: realized, carry,
+break-even, capital at risk. The .db file is the whole journal; copy it
+somewhere safe.</p>"""
+    return 200, r.page("Reports", body, nav_here="reports")
+
+
+def _plain(value):
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, date):
+        return value.isoformat()
+    if hasattr(value, "value"):
+        return value.value
+    if isinstance(value, tuple):
+        return list(value)
+    return value
+
+
+def export_file(conn, name: str):
+    positions = store.load_positions(conn)
+    lots = store.load_lots(conn)
+    disposals = store.load_disposals(conn)
+
+    if name == "positions.csv":
+        index = ChainIndex(positions)
+        out = io.StringIO()
+        w = csv.writer(out)
+        w.writerow(["id", "underlying", "expiry", "strike", "right", "direction", "quantity",
+                    "multiplier", "opened_on", "open_price", "open_fee", "closed_on",
+                    "close_price", "close_fee", "status", "rolled_from_id", "split_from_id",
+                    "share_lot_id", "tags", "notes", "open_cash", "realized", "carry",
+                    "chain_root", "break_even", "capital_at_risk"])
+        for p in positions:
+            chain = index.chain(p)
+            be = break_even(chain) if p.is_open else None
+            w.writerow([p.id, p.underlying, p.expiry, p.strike, p.right.value, p.direction.value,
+                        p.quantity, p.multiplier, p.opened_on, p.open_price, p.open_fee,
+                        p.closed_on or "", p.close_price if p.close_price is not None else "",
+                        p.close_fee, p.status.value, p.rolled_from_id or "", p.split_from_id or "",
+                        p.share_lot_id or "", " ".join(p.tags), p.notes, open_cash(p),
+                        realized_pl(p), index.carry(p), chain.root.id,
+                        be.price if be else "", capital_at_risk(p) if p.is_open else ""])
+        return 200, out.getvalue(), "text/csv; charset=utf-8", name
+
+    if name == "shares.csv":
+        out = io.StringIO()
+        w = csv.writer(out)
+        w.writerow(["kind", "id", "underlying", "date", "quantity", "price_per_share", "fee",
+                    "source_or_kind", "position_id", "specific_lot_ids", "estimated", "notes"])
+        for l in lots:
+            w.writerow(["lot", l.id, l.underlying, l.acquired_on, l.quantity, l.cost_per_share,
+                        l.fee, l.source.value, l.assigning_position_id or "", "",
+                        "yes" if l.estimated else "", l.notes])
+        for d in disposals:
+            w.writerow(["disposal", d.id, d.underlying, d.disposed_on, d.quantity,
+                        d.proceeds_per_share, d.fee, d.kind.value, d.disposing_position_id or "",
+                        " ".join(d.specific_lot_ids), "", d.notes])
+        return 200, out.getvalue(), "text/csv; charset=utf-8", name
+
+    if name == "journal.json":
+        payload = {
+            "positions": [{k: _plain(v) for k, v in asdict(p).items()} for p in positions],
+            "lots": [{k: _plain(v) for k, v in asdict(l).items()} for l in lots],
+            "disposals": [{k: _plain(v) for k, v in asdict(d).items()} for d in disposals],
+        }
+        return 200, json.dumps(payload, indent=1), "application/json", name
+
+    if name == "journal.db":
+        # A consistent copy through SQLite's own backup API, never a raw file
+        # read that could catch a write half way.
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            target = sqlite3.connect(path)
+            try:
+                conn.backup(target)
+            finally:
+                target.close()
+            with open(path, "rb") as f:
+                data = f.read()
+        finally:
+            os.unlink(path)
+        return 200, data, "application/vnd.sqlite3", name
+
+    raise BadRequest("no such export")
 
 
 def _past(on: date, label: str) -> date:

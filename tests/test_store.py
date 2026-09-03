@@ -256,3 +256,49 @@ class TestFlagsAndAudit(StoreTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTagsNotesAndViews(StoreTestCase):
+    def _position(self, pid="t1", **kw):
+        from datetime import date
+        from decimal import Decimal
+        from bcoj.domain.enums import Direction, Right
+        from bcoj.domain.types import Position
+        base = dict(id=pid, underlying="ACME", expiry=date(2026, 3, 20), strike=Decimal("35"),
+                    right=Right.PUT, direction=Direction.SHORT, quantity=1,
+                    opened_on=date(2026, 1, 5), open_price=Decimal("1.00"))
+        base.update(kw)
+        return Position(**base)
+
+    def test_tags_normalize_and_round_trip(self):
+        self.assertEqual(store.normalize_tags("wheel, #earnings  Wheel,income"),
+                         ("wheel", "earnings", "income"))
+        store.save_positions(self.conn, [self._position()])
+        store.update_notes(self.conn, "t1", "sold into IV spike", ("wheel", "earnings"))
+        p = store.load_position(self.conn, "t1")
+        self.assertEqual(p.notes, "sold into IV spike")
+        self.assertEqual(p.tags, ("earnings", "wheel"))          # alphabetical
+        self.assertEqual([q.tags for q in store.load_positions(self.conn)], [("earnings", "wheel")])
+        self.assertEqual(store.all_tags(self.conn), ["earnings", "wheel"])
+        # Replacing tags drops the old links; the edit is audited.
+        store.update_notes(self.conn, "t1", "kept", ("wheel",))
+        self.assertEqual(store.load_position(self.conn, "t1").tags, ("wheel",))
+        entries = [e for e in store.audit_entries(self.conn) if e["entity_id"] == "t1"]
+        self.assertTrue(any(e["action"].startswith("update: notes") for e in entries))
+
+    def test_tags_given_at_creation_are_kept(self):
+        from bcoj.engine.actions import ActionResult
+        p = self._position("t2", tags=("income",))
+        store.apply(self.conn, ActionResult(created=[p]), "entered by hand")
+        self.assertEqual(store.load_position(self.conn, "t2").tags, ("income",))
+
+    def test_saved_views_upsert_by_name(self):
+        a = store.save_view(self.conn, "Wheels", "show=open&tag=wheel")
+        b = store.save_view(self.conn, "Wheels", "show=all&tag=wheel")
+        self.assertEqual(a, b)
+        views = store.load_views(self.conn)
+        self.assertEqual([(v["name"], v["filter"]) for v in views], [("Wheels", "show=all&tag=wheel")])
+        store.delete_view(self.conn, a)
+        self.assertEqual(store.load_views(self.conn), [])
+        with self.assertRaises(ValueError):
+            store.save_view(self.conn, "  ", "show=open")

@@ -1355,6 +1355,99 @@ class TestDecisionSupport(WebTestCase):
         self.assertIn("x1.2", page)
 
 
+class TestReportingAndViews(WebTestCase):
+    """M5: reports, filters, saved views, notes and tags, exports."""
+
+    def _open(self, ticker, **kw):
+        self.add_position(underlying=ticker, **kw)
+        return [p for p in self.positions() if p.underlying == ticker.upper() and p.is_open][0]
+
+    def test_reports_page_groups_by_period_and_ticker(self):
+        p = self._open("rep")
+        self.post(f"/position/{p.id}/close", {"closed_on": "2026-02-06", "close_price": "1.00",
+                                               "close_fee": "6.50"})       # realizes 1,987.00
+        page = self.get("/reports")
+        self.assertIn("Realized by period", page)
+        self.assertIn("2026-02", page)
+        self.assertIn("1,987.00", page)
+        self.assertIn('href="/shares/REP"', page)
+        self.assertIn("How short legs ended", page)
+        self.assertIn("60+ DTE", page)
+        year = self.get("/reports?by=year")
+        self.assertIn(">2026<", year)
+        self.assertIn("/export/positions.csv", page)
+
+    def test_filters_narrow_the_list_and_travel_with_every_link(self):
+        acme = self._open("fac")
+        beta = self._open("fbe", right="CALL")
+        page = self.get("/?show=open&q=fbe")
+        self.assertIn(f'id="row-{beta.id}"', page)
+        self.assertNotIn(f'id="row-{acme.id}"', page)
+        self.assertIn(f'href="/?show=open&q=fbe&act={beta.id}&do=close#row-{beta.id}"', page)
+        calls = self.get("/?show=open&right=CALL")
+        self.assertIn(f'id="row-{beta.id}"', calls)
+        self.assertNotIn(f'id="row-{acme.id}"', calls)
+        self.assertIn('class="filters"', page)
+        self.assertIn("Save this view as", page)              # only once a filter is active
+        self.assertNotIn("Save this view as", self.get("/?show=open"))
+
+    def test_notes_and_tags_edit_and_filter(self):
+        p = self._open("tag")
+        status, location, _ = self.post(f"/position/{p.id}/notes",
+                                        {"notes": "sold the rip", "tags": "wheel, #Earnings"})
+        self.assertEqual(status, 303)
+        self.assertIn("Notes saved", location)
+        page = self.get(f"/position/{p.id}")
+        self.assertIn("sold the rip", page)
+        self.assertIn('value="Earnings, wheel"', page)
+        rows = self.get("/?show=open&tag=wheel")
+        self.assertIn(f'id="row-{p.id}"', rows)
+        self.assertIn('<span class="tag">wheel</span>', rows)
+        self.assertNotIn(f'id="row-{p.id}"', self.get("/?show=open&tag=nothing"))
+        # Tags can be given when the position is entered.
+        self.add_position(underlying="tgn", tags="income")
+        q = [x for x in self.positions() if x.underlying == "TGN"][0]
+        self.assertEqual(q.tags, ("income",))
+
+    def test_saved_views_round_trip(self):
+        self._open("sav")
+        status, location, _ = self.post("/views/save",
+                                        {"name": "Open puts", "filter": "show=open&right=PUT"})
+        self.assertEqual(status, 303)
+        page = self.get("/?show=open")
+        self.assertIn('<a href="/?show=open&amp;right=PUT">Open puts</a>', page)
+        conn = store.open_db(self.db_path)
+        try:
+            view_id = store.load_views(conn)[0]["id"]
+        finally:
+            conn.close()
+        self.post(f"/views/{view_id}/delete", {})
+        self.assertNotIn("Open puts", self.get("/?show=open"))
+        status, _, body = self.post("/views/save", {"name": "x", "filter": "evil"})
+        self.assertEqual(status, 400)
+
+    def test_exports(self):
+        import csv, io, json
+        self._open("exp")
+        with urllib.request.urlopen(self.base + "/export/positions.csv") as res:
+            self.assertEqual(res.headers["Content-Type"], "text/csv; charset=utf-8")
+            self.assertIn('filename="positions.csv"', res.headers["Content-Disposition"])
+            rows = list(csv.reader(io.StringIO(res.read().decode())))
+        self.assertEqual(rows[0][:3], ["id", "underlying", "expiry"])
+        self.assertIn("realized", rows[0])
+        self.assertTrue(any(row[1] == "EXP" for row in rows[1:]))
+        with urllib.request.urlopen(self.base + "/export/shares.csv") as res:
+            self.assertTrue(res.read().decode().startswith("kind,id,underlying"))
+        with urllib.request.urlopen(self.base + "/export/journal.json") as res:
+            data = json.loads(res.read().decode())
+        self.assertIn("positions", data)
+        self.assertTrue(any(p["underlying"] == "EXP" for p in data["positions"]))
+        with urllib.request.urlopen(self.base + "/export/journal.db") as res:
+            blob = res.read()
+        self.assertTrue(blob.startswith(b"SQLite format 3"))
+        self.assertEqual(self.get("/export/nothing.csv", expect=404)[:9], "<!doctype")
+
+
 class TestShareRepairs(WebTestCase):
     """Fixing a mis-entered sale, and the guards that prevent one."""
 

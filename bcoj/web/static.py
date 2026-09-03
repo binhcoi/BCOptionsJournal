@@ -199,6 +199,32 @@ a.act:hover, a.act.here { border-color: currentColor; }
 /* Tabs of equal width, confirm buttons of equal width, so switching forms
    moves nothing. */
 .tabs.even a { min-width: 5.4rem; text-align: center; }
+/* Filter bar, saved-view chips, tags. */
+form.filters { display: flex; flex-wrap: wrap; gap: .5rem; align-items: flex-end;
+  margin: 0 0 .6rem; }
+form.filters label { width: auto; }
+form.filters input, form.filters select { padding: .3rem .45rem; }
+form.filters input[name=q] { width: 13rem; }
+form.filters .actions { grid-column: auto; }
+form.filters button { padding: .35rem .9rem; }
+.chips { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin: 0 0 .8rem; }
+.chip { display: inline-flex; align-items: center; gap: .2rem; border: 1px solid var(--line);
+  border-radius: 999px; padding: .05rem .2rem .05rem .6rem; font-size: .8rem; }
+.chip a { text-decoration: none; }
+.chip.here { border-color: var(--accent); background: var(--accent-tint); }
+.chip form.inline button { padding: 0 .4rem; background: none; color: var(--dim);
+  border: 0; font-size: .9rem; }
+.chip form.inline button:hover { color: var(--neg); filter: none; }
+form.save-view { display: inline-flex; align-items: flex-end; gap: .4rem; }
+form.save-view label { width: auto; }
+form.save-view input { padding: .3rem .45rem; width: 10rem; }
+form.save-view button { padding: .35rem .8rem; }
+.tag { display: inline-block; font-size: .68rem; color: var(--dim); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 4px; padding: 0 .3rem; margin-left: .3rem;
+  vertical-align: middle; }
+textarea { font: inherit; padding: .45rem .55rem; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--bg); color: var(--ink); resize: vertical; }
+textarea:focus { outline: 2px solid var(--accent); }
 /* Form tabs wear their action's colour: text when idle, fill when chosen. */
 .tabs a.tab-close  { color: var(--closed); }
 .tabs a.tab-roll   { color: var(--roll); }
@@ -554,6 +580,17 @@ JS = """
     window.addEventListener('popstate', function (event) {
       var href = (event.state && event.state.bcoj) || (here() + window.location.hash);
       full(href, false).catch(function () { window.location.reload(); });
+    });
+    // Filtering is a table change too: no page load, rows diffed in place.
+    document.addEventListener('submit', function (event) {
+      var form = event.target.closest('form.filters');
+      if (!form) return;
+      event.preventDefault();
+      var params = new URLSearchParams(new FormData(form));
+      Array.prototype.slice.call(params.keys()).forEach(function (k) {
+        if (!params.get(k)) params.delete(k);
+      });
+      full('/?' + params.toString(), true);
     });
   }
 

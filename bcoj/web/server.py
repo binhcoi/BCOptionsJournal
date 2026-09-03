@@ -41,6 +41,11 @@ class App:
             ("POST", r"^/new$", self._new_submit),
             ("GET", r"^/expiring$", self._expiring),
             ("GET", r"^/risk$", self._risk),
+            ("GET", r"^/reports$", self._reports),
+            ("GET", r"^/export/(positions\.csv|shares\.csv|journal\.json|journal\.db)$", self._export),
+            ("POST", r"^/views/save$", self._save_view),
+            ("POST", r"^/views/([0-9a-zA-Z_-]+)/delete$", self._delete_view),
+            ("POST", r"^/position/([0-9a-zA-Z_-]+)/notes$", self._notes),
             ("GET", r"^/position/([0-9a-zA-Z_-]+)/roll-preview$", self._roll_preview),
             ("GET", r"^/audit$", self._audit),
             ("POST", r"^/audit/(\d+)/revert$", self._revert),
@@ -146,6 +151,21 @@ class App:
     def _risk(self, conn, query, form, args):
         return routes.risk_page(conn, query)
 
+    def _reports(self, conn, query, form, args):
+        return routes.reports_page(conn, query)
+
+    def _export(self, conn, query, form, args):
+        return routes.export_file(conn, args[0])
+
+    def _save_view(self, conn, query, form, args):
+        routes.do_save_view(conn, form)
+
+    def _delete_view(self, conn, query, form, args):
+        routes.do_delete_view(conn, args[0], form)
+
+    def _notes(self, conn, query, form, args):
+        routes.do_notes(conn, args[0], form)
+
     def _roll_preview(self, conn, query, form, args):
         return routes.roll_preview_fragment(conn, args[0], query)
 
@@ -249,7 +269,14 @@ class Handler(BaseHTTPRequestHandler):
 
         conn = self.app.connect()
         try:
-            status, body = handler(conn, query, form, args)
+            result = handler(conn, query, form, args)
+            status, body = result[0], result[1]
+            # A download says its own type and file name; a page does not.
+            if len(result) > 2:
+                content_type, filename = result[2], result[3]
+                payload = body if isinstance(body, bytes) else body.encode()
+                return self._write(status, payload, content_type,
+                                   [("Content-Disposition", f'attachment; filename="{filename}"')])
         except routes.Redirect as redirect:
             location = redirect.location
             if redirect.flash:
