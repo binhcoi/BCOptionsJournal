@@ -428,6 +428,18 @@ class TestAuditAndUndo(WebTestCase):
 
 
 class TestPositionPage(WebTestCase):
+    def test_every_action_form_is_in_the_page_with_the_chosen_one_shown(self):
+        self.add_position(underlying="tabs")
+        p = [q for q in self.positions() if q.underlying == "TABS"][0]
+        page = self.get(f"/position/{p.id}?do=assign")
+        self.assertIn('data-tabs-for="actions"', page)
+        self.assertIn('data-form="assign">', page)
+        for key in ("close", "roll", "expire", "split"):
+            with self.subTest(form=key):
+                self.assertIn(f'data-form="{key}" hidden', page)
+        self.assertIn('data-form-tab="assign" class="here"', page)
+        self.assertEqual(page.count(f'action="/position/{p.id}/assign"'), 1)
+
     def test_open_position_shows_decision_figures(self):
         self.add_position(underlying="dec")
         position = [p for p in self.positions() if p.underlying == "DEC"][0]
@@ -1205,7 +1217,16 @@ class TestShareRepairs(WebTestCase):
         self.assertRegex(body, r'name="on" id="f_on"[^>]*value="%s"' % date.today().isoformat())
 
     def test_selling_from_a_lot_dated_after_the_sale_is_refused(self):
-        lot = self._buy("fut", 400, on="2099-09-18")
+        # A future-dated lot cannot be entered any more; write one straight
+        # into the store, as an older version or an import could have.
+        from bcoj.engine import actions
+        conn = store.open_db(self.db_path)
+        try:
+            result = actions.buy_shares("fut", 400, Decimal("10"), date(2099, 9, 18))
+            store.apply(conn, result)
+            lot = result.lots[0]
+        finally:
+            conn.close()
         status, _, body = self.post("/shares/sell", {
             "underlying": "fut", "on": "2026-09-03", "quantity": "400",
             "price": "12", "lot_id": lot.id})

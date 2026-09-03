@@ -585,10 +585,8 @@ def position_page(conn, position_id, token, query) -> tuple[int, str]:
 
     if position.is_open:
         which = (query.get("do") or [""])[0]
-        actions_block = (
-            "<h2>Actions</h2>" + _action_tabs(position, which, here)
-            + _action_form(position, which, token, carry, back=here)
-        )
+        actions_block = ("<h2>Actions</h2>"
+                         + _action_panels(position, which, token, carry, here))
         if position.right is Right.CALL and position.direction is Direction.SHORT:
             candidates = [l for l in lots if l.underlying == position.underlying]
             if candidates:
@@ -735,12 +733,22 @@ def _action_form(position, which: str, token: str, carry, back: str) -> str:
     return '<p class="hint">Pick an action.</p>'
 
 
-def _action_tabs(position, which: str, base: str) -> str:
-    links = []
+def _action_panels(position, which: str, token: str, carry, back: str) -> str:
+    """Tabs plus every action form, only the chosen one shown.
+
+    All five forms are in the page so choosing one is a toggle with nothing
+    to fetch. Without script the links still work.
+    """
+    links, panels = [], []
     for key, label in ACTIONS:
         cls = ' class="here"' if which == key else ""
-        links.append(f'<a href="{base}?do={key}"{cls}>{label}</a>')
-    return '<div class="tabs">' + " ".join(links) + "</div>"
+        links.append(f'<a href="{back}?do={key}#actions" data-form-tab="{key}"{cls}>'
+                     f"{label}</a>")
+        shown = "" if which == key else " hidden"
+        panels.append(f'<div data-form="{key}"{shown}>'
+                      + _action_form(position, key, token, carry, back) + "</div>")
+    return ('<div class="tabs" data-tabs-for="actions">' + " ".join(links) + "</div>"
+            + '<div id="actions">' + "".join(panels) + "</div>")
 
 
 # ---------------------------------------------------------------------------
@@ -1047,8 +1055,9 @@ def _share_forms(conn, kind: str, underlying: str, token: str, back: str,
         shown = "" if kind == key else " hidden"
         panels.append(f'<div class="share-form" data-form="{key}"{shown}>'
                       + _share_form_body(conn, key, underlying, token, back) + "</div>")
-    return ('<div class="tabs" id="record">' + " ".join(links) + "</div>"
-            + r.datalist("tickers", store.recent_underlyings(conn)) + "".join(panels))
+    return ('<div class="tabs" data-tabs-for="record">' + " ".join(links) + "</div>"
+            + r.datalist("tickers", store.recent_underlyings(conn))
+            + '<div id="record">' + "".join(panels) + "</div>")
 
 
 def shares_page(conn, token, query) -> tuple[int, str]:

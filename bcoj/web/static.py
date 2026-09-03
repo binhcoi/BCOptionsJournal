@@ -294,8 +294,9 @@ JS = """
 
   // "+7" in a date box means seven days from today. Faster than a picker for
   // the weekly cadence most of these trades follow.
-  document.querySelectorAll('input[type=date]').forEach(function (input) {
-    input.addEventListener('keydown', function (event) {
+  document.addEventListener('keydown', function (event) {
+      var input = event.target;
+      if (!input || input.type !== 'date') return;
       if (event.key !== 'Enter') return;
       var typed = input.value.trim();
       var relative = /^\\+(\\d+)$/.exec(typed);
@@ -304,7 +305,6 @@ JS = """
       var when = new Date();
       when.setDate(when.getDate() + parseInt(relative[1], 10));
       input.value = when.toISOString().slice(0, 10);
-    });
   });
 
   // Expanding a chain or opening an action form swaps just the positions
@@ -402,27 +402,37 @@ JS = """
   }
 
   // Selling from a specific lot: cap the quantity at what that lot holds.
-  // Buy / Sell / Buy-write tabs show forms already on the page, so choosing
-  // one neither reloads nor scrolls away from where the reader was.
-  var tabs = document.querySelectorAll('a[data-form-tab]');
-  var panels = document.querySelectorAll('.share-form[data-form]');
-  if (tabs.length && panels.length) {
+  // Tab strips (share forms, a position's actions) show forms already on
+  // the page: choosing one is a toggle, with nothing to fetch and no scroll.
+  document.querySelectorAll('.tabs[data-tabs-for]').forEach(function (strip) {
+    var box = document.getElementById(strip.getAttribute('data-tabs-for'));
+    if (!box) return;
+    var tabs = strip.querySelectorAll('a[data-form-tab]');
+    var panels = box.querySelectorAll('[data-form]');
     tabs.forEach(function (tab) {
       tab.addEventListener('click', function (event) {
+        if (event.metaKey || event.ctrlKey || event.button !== 0) return;
         event.preventDefault();
         var key = tab.getAttribute('data-form-tab');
-        tabs.forEach(function (t) { t.classList.toggle('here', t === tab); });
-        panels.forEach(function (p) { p.hidden = p.getAttribute('data-form') !== key; });
-        var first = document.querySelector(
-          '.share-form[data-form="' + key + '"] input:not([type=hidden]):not([value]), ' +
-          '.share-form[data-form="' + key + '"] input:not([type=hidden])');
-        if (first) first.focus({ preventScroll: true });
+        var closing = tab.classList.contains('here');
+        tabs.forEach(function (t) { t.classList.toggle('here', t === tab && !closing); });
+        panels.forEach(function (p) {
+          p.hidden = closing || p.getAttribute('data-form') !== key;
+        });
+        if (!closing) {
+          var shown = box.querySelector('[data-form="' + key + '"]');
+          var first = shown.querySelector('input:not([type=hidden]):not([value]), select') ||
+                      shown.querySelector('input:not([type=hidden])');
+          if (first) first.focus({ preventScroll: true });
+        }
         if (window.history.replaceState) {
-          window.history.replaceState(null, '', tab.getAttribute('href').replace(/#.*$/, ''));
+          var href = tab.getAttribute('href').replace(/#.*$/, '');
+          if (closing) href = href.replace(/[?&](do|form|kind)=[^&]*/, '').replace(/\?$/, '');
+          window.history.replaceState(null, '', href);
         }
       });
     });
-  }
+  });
 
   var lotSelect = document.getElementById('f_lot_id');
   var lotData = document.getElementById('lot-remaining');
