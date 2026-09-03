@@ -13,6 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date, timedelta
+from decimal import Decimal
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -738,6 +739,24 @@ class TestChainExpansion(WebTestCase):
         self.assertLess(expanded.index(f'id="row-{parent.id}"'),
                         expanded.index(f'id="row-{four.id}"'))
 
+    def test_an_open_action_and_an_expanded_chain_keep_each_other(self):
+        self.add_position(underlying="kep")
+        parent = [p for p in self.positions() if p.underlying == "KEP"][0]
+        self.post(f"/position/{parent.id}/split",
+                  {"quantity": "4", "on": "2026-02-01"})
+        four, six = sorted([p for p in self.positions()
+                            if p.underlying == "KEP" and p.is_open],
+                           key=lambda p: p.quantity)
+        page = self.get(f"/?show=open&chain={four.id}&act={six.id}&do=close")
+        self.assertIn('class="action-row"', page)
+        self.assertEqual(page.count(f'id="row-{parent.id}"'), 1)   # still expanded
+        # Opening another action keeps the chain expanded.
+        self.assertIn(f"chain={four.id}&act={four.id}&do=roll", page)
+        # Collapsing the chain keeps the open form.
+        self.assertIn(f'href="/?show=open&act={six.id}&do=close#row-{four.id}"', page)
+        # The open action's own link closes just the form.
+        self.assertIn(f'href="/?show=open&chain={four.id}#row-{six.id}"', page)
+
     def test_open_sibling_inside_an_expansion_keeps_its_actions(self):
         self.add_position(underlying="sac")
         parent = [p for p in self.positions() if p.underlying == "SAC"][0]
@@ -894,3 +913,398 @@ class TestPartialAndProjection(WebTestCase):
         self.assertIn("partial=table", js)
         self.assertIn("prefetchAll", js)
         self.assertIn("replaceWith", js)
+
+
+class TestShares(WebTestCase):
+    def _put_assigned(self, ticker, qty="10", strike="35"):
+        self.add_position(underlying=ticker, quantity=qty, strike=strike)
+        position = [p for p in self.positions()
+                    if p.underlying == ticker.upper() and p.is_open][0]
+        self.post(f"/position/{position.id}/assign",
+                  {"on": "2026-03-20", "close_fee": "0", "share_fee": "0"})
+        return position
+
+    def _lots(self, ticker):
+        conn = store.open_db(self.db_path)
+        try:
+            return [l for l in store.load_lots(conn) if l.underlying == ticker.upper()]
+        finally:
+            conn.close()
+
+    def test_shares_pages_render(self):
+        self._put_assigned("shr")
+        body = self.get("/shares")
+        self.assertIn("SHR", body)
+        self.assertIn("holding 1000", body)
+        page = self.get("/shares/SHR")
+        self.assertIn("Lots - 1", page)
+        self.assertIn("put assignment", page)
+        self.assertIn("Wheel total", page)
+
+    def test_unknown_ticker_is_404(self):
+        self.get("/shares/NOPE", expect=404)
+
+    def test_buy_shares_outright(self):
+        status, location, _ = self.post("/shares/buy", {
+            "underlying": "out", "on": "2026-01-05", "quantity": "300",
+            "price": "12.50", "fee": "0", "notes": "test",
+        })
+        self.assertEqual(status, 303)
+        lots = self._lots("out")
+        self.assertEqual(lots[0].quantity, 300)
+        self.assertEqual(str(lots[0].cost_per_share), "12.50")
+        self.assertEqual(lots[0].source.value, "OUTRIGHT_BUY")
+
+    def test_sell_shares_realizes_against_the_lot(self):
+        self.post("/shares/buy", {"underlying": "sel", "on": "2026-01-05",
+                                  "quantity": "300", "price": "10.00"})
+        status, location, _ = self.post("/shares/sell", {
+            "underlying": "sel", "on": "2026-06-05", "quantity": "200",
+            "price": "14.00", "fee": "0",
+        })
+        self.assertEqual(status, 303)
+        page = self.get("/shares/SEL")
+        self.assertIn("800.00", page)      # (14 - 10) x 200
+        self.assertIn("holding 100", self.get("/shares"))
+
+    def test_selling_more_than_held_is_refused(self):
+        self.post("/shares/buy", {"underlying": "shrt", "on": "2026-01-05",
+                                  "quantity": "100", "price": "10.00"})
+        status, _, body = self.post("/shares/sell", {
+            "underlying": "shrt", "on": "2026-06-05", "quantity": "150", "price": "12",
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("would leave the ticker short 50", body)
+
+    def test_buy_write_links_call_to_lot(self):
+        status, _, _ = self.post("/shares/buy-write", {
+            "underlying": "bw", "on": "2026-01-05", "shares": "300",
+            "share_price": "12.00", "share_fee": "0", "expiry": "2026-03-20",
+            "strike": "13", "call_price": "0.50", "contracts": "", "option_fee": "1.95",
+        })
+        self.assertEqual(status, 303)
+        lot = self._lots("bw")[0]
+        call = [p for p in self.positions() if p.underlying == "BW"][0]
+        self.assertEqual(call.share_lot_id, lot.id)
+        self.assertEqual(call.quantity, 3)
+        page = self.get("/shares/BW")
+        self.assertIn("300/300", page)       # fully covered
+
+    def test_assignment_creates_a_lot_and_the_put_links_to_it(self):
+        put = self._put_assigned("asn")
+        lot = self._lots("asn")[0]
+        self.assertEqual(lot.assigning_position_id, put.id)
+        body = self.get(f"/position/{put.id}")
+        self.assertIn("Shares acquired", body)
+
+    def test_naked_call_can_be_covered_and_uncovered(self):
+        self._put_assigned("cov")
+        lot = self._lots("cov")[0]
+        self.add_position(underlying="cov", right="CALL", strike="40",
+                          opened_on="2026-04-01", expiry="2026-05-15")
+        call = [p for p in self.positions() if p.underlying == "COV"
+                and p.right.value == "CALL"][0]
+        # The fact reads "nothing - naked"; the cover form's dropdown also
+        # contains the word, so assert on the fact's wording.
+        self.assertIn("nothing - naked", self.get(f"/position/{call.id}"))
+
+        status, _, _ = self.post(f"/position/{call.id}/cover", {"lot_id": lot.id})
+        self.assertEqual(status, 303)
+        page = self.get(f"/position/{call.id}")
+        self.assertIn("Covered by", page)
+        self.assertNotIn("nothing - naked", page)
+
+        self.post(f"/position/{call.id}/cover", {"lot_id": ""})
+        self.assertIn("nothing - naked", self.get(f"/position/{call.id}"))
+
+    def test_cover_refuses_a_lot_of_another_ticker(self):
+        self._put_assigned("cva")
+        self._put_assigned("cvb")
+        lot_b = self._lots("cvb")[0]
+        self.add_position(underlying="cva", right="CALL", strike="40",
+                          opened_on="2026-04-01", expiry="2026-05-15")
+        call = [p for p in self.positions() if p.underlying == "CVA"
+                and p.right.value == "CALL"][0]
+        status, _, body = self.post(f"/position/{call.id}/cover", {"lot_id": lot_b.id})
+        self.assertEqual(status, 400)
+        self.assertIn("not CVA", body)
+
+    def test_unlinked_covered_calls_are_suggested_and_linkable_in_bulk(self):
+        self._put_assigned("sug")
+        self.add_position(underlying="sug", right="CALL", strike="40",
+                          opened_on="2026-04-01", expiry="2026-05-15")
+        body = self.get("/shares/covers")
+        self.assertIn("SUG", body)
+        self.assertIn("Link all", body)
+        status, _, _ = self.post("/shares/covers/apply", {})
+        self.assertEqual(status, 303)
+        call = [p for p in self.positions() if p.underlying == "SUG"
+                and p.right.value == "CALL"][0]
+        self.assertEqual(call.share_lot_id, self._lots("sug")[0].id)
+
+    def test_new_position_form_offers_covering_lots(self):
+        self._put_assigned("nfl")
+        body = self.get("/new")
+        self.assertIn('name="share_lot_id"', body)
+        self.assertIn("NFL @ 35.00", body)
+
+    def test_dashboard_shows_true_total(self):
+        body = self.get("/")
+        for label in ("Realized options", "Realized shares", "True total"):
+            with self.subTest(label=label):
+                self.assertIn(label, body)
+
+    def test_wheel_total_on_a_full_cycle(self):
+        """Put assigned at 35 with 2,993.50 premium, called away at 40."""
+        put = self._put_assigned("whl")
+        lot = self._lots("whl")[0]
+        self.add_position(underlying="whl", right="CALL", strike="40",
+                          opened_on="2026-04-01", expiry="2026-05-15",
+                          open_price="1.00", open_fee="6.50", share_lot_id=lot.id)
+        call = [p for p in self.positions() if p.underlying == "WHL"
+                and p.right.value == "CALL"][0]
+        self.post(f"/position/{call.id}/assign",
+                  {"on": "2026-05-15", "close_fee": "0", "share_fee": "0"})
+        page = self.get("/shares/WHL")
+        # 2,993.50 (put) + 993.50 (call) + 5,000.00 (shares) = 8,987.00
+        self.assertIn("8,987.00", page)
+        self.assertIn("flat", self.get("/shares"))
+
+
+class TestFutureDatesRefused(WebTestCase):
+    """Nothing can be recorded as having happened on a day that has not come."""
+
+    def _open(self, ticker):
+        self.add_position(underlying=ticker, expiry="2099-03-20")
+        return [p for p in self.positions() if p.underlying == ticker.upper()][0]
+
+    def test_every_recording_form_refuses_a_future_date(self):
+        p = self._open("fut1")
+        self.post("/shares/buy", {"underlying": "fut1", "on": "2026-01-05",
+                                  "quantity": "200", "price": "10"})
+        cases = {
+            "new": ("/new", {"underlying": "futn", "opened_on": "2099-01-01",
+                             "expiry": "2099-03-20", "right": "PUT", "direction": "SHORT",
+                             "strike": "35", "quantity": "1", "open_price": "1.00"}),
+            "close": (f"/position/{p.id}/close",
+                      {"closed_on": "2099-01-02", "close_price": "1.00"}),
+            "expire": (f"/position/{p.id}/expire", {"on": "2099-03-20"}),
+            "assign": (f"/position/{p.id}/assign", {"on": "2099-03-20"}),
+            "roll": (f"/position/{p.id}/roll",
+                     {"on": "2099-01-02", "close_price": "1.00", "new_expiry": "2099-04-17",
+                      "new_strike": "34", "new_price": "2.00"}),
+            "split": (f"/position/{p.id}/split", {"on": "2099-01-02", "quantity": "4"}),
+            "buy": ("/shares/buy", {"underlying": "fut1", "on": "2099-01-02",
+                                    "quantity": "100", "price": "10"}),
+            "sell": ("/shares/sell", {"underlying": "fut1", "on": "2099-01-02",
+                                      "quantity": "100", "price": "12"}),
+            "buy-write": ("/shares/buy-write",
+                          {"underlying": "fut1", "on": "2099-01-02", "shares": "100",
+                           "share_price": "10", "expiry": "2099-04-17", "strike": "12",
+                           "call_price": "0.50"}),
+        }
+        for name, (path, fields) in cases.items():
+            with self.subTest(form=name):
+                status, _, body = self.post(path, fields)
+                self.assertEqual(status, 400, body[:300])
+                self.assertIn("is in the future", body)
+        # And nothing was recorded along the way.
+        self.assertTrue(all(q.is_open for q in self.positions()
+                            if q.underlying == "FUT1"))
+
+
+class TestShareRepairs(WebTestCase):
+    """Fixing a mis-entered sale, and the guards that prevent one."""
+
+    def _buy(self, ticker, qty, price="10.00", on="2026-01-05"):
+        self.post("/shares/buy", {"underlying": ticker, "on": on,
+                                  "quantity": str(qty), "price": price})
+        conn = store.open_db(self.db_path)
+        try:
+            return [l for l in store.load_lots(conn)
+                    if l.underlying == ticker.upper()][-1]
+        finally:
+            conn.close()
+
+    def test_forms_open_inline_on_the_shares_pages(self):
+        self._buy("inl", 100)
+        for base in ("/shares?", "/shares/INL?"):
+            with self.subTest(page=base):
+                page = self.get(base + "form=sell")
+                self.assertIn('action="/shares/sell"', page)
+                self.assertNotIn('href="/shares/new', page)
+                # Without a choice every form is present but none is shown.
+                plain = self.get(base.rstrip("?"))
+                self.assertIn('data-form="sell" hidden', plain)
+
+    def test_sell_dropdown_shows_what_each_lot_still_holds(self):
+        lot = self._buy("rem", 300)
+        self.post("/shares/sell", {"underlying": "rem", "on": "2026-02-01",
+                                   "quantity": "100", "price": "12"})
+        page = self.get("/shares/REM?form=sell")
+        self.assertIn("200 of 300 REM @ 10.00", page)
+        self.assertIn(f'"{lot.id}":200', page)      # for the quantity cap
+
+    def test_selling_more_than_a_pinned_lot_holds_is_refused(self):
+        lot = self._buy("pin", 100)
+        self._buy("pin", 500, price="12.00", on="2026-02-01")
+        status, _, body = self.post("/shares/sell", {
+            "underlying": "pin", "on": "2026-03-01", "quantity": "300",
+            "price": "14", "lot_id": lot.id,
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("that lot holds 100 shares", body)
+
+    def test_a_pinned_lot_from_another_ticker_is_refused(self):
+        other = self._buy("oth", 100)
+        self._buy("mine", 100)
+        status, _, body = self.post("/shares/sell", {
+            "underlying": "mine", "on": "2026-03-01", "quantity": "50",
+            "price": "14", "lot_id": other.id,
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("does not belong", body)
+
+    def test_a_bad_disposal_can_be_removed_and_matching_resumes(self):
+        # Force a pinned disposal that cannot be satisfied, by pinning to a
+        # lot and then... a pinned sale the guard would refuse today; write it
+        # straight into the store, as a legacy import or older version might.
+        lot = self._buy("bad", 100)
+        self._buy("bad", 500)   # plenty held overall: blocked, not short
+        from bcoj.engine import actions
+        conn = store.open_db(self.db_path)
+        try:
+            result = actions.sell_shares("bad", 500, Decimal("12"), date(2026, 3, 1),
+                                         specific_lot_ids=(lot.id,))
+            store.apply(conn, result)
+            disposal_id = result.disposals[0].id
+        finally:
+            conn.close()
+
+        page = self.get("/shares/BAD")
+        self.assertIn("pinned to a specific lot that holds only 100", page)
+        self.assertIn("matching blocked", self.get("/shares"))
+        self.assertNotIn("short -", self.get("/shares"))
+
+        status, location, _ = self.post(f"/shares/disposal/{disposal_id}/delete",
+                                        {"next": "/shares/BAD"})
+        self.assertEqual(status, 303)
+        self.assertIn("Sale removed", location)
+        self.assertNotIn("pinned to a specific lot", self.get("/shares/BAD"))
+
+    def test_assign_form_defaults_to_today_or_the_past_expiry(self):
+        # Default expiry in the fixture is in the past: date it to the expiry.
+        self.add_position(underlying="apst")
+        past = [p for p in self.positions() if p.underlying == "APST"][0]
+        body = self.get(f"/?show=open&act={past.id}&do=assign")
+        self.assertRegex(body, r'name="on" id="f_on"[^>]*value="%s"' % past.expiry.isoformat())
+        # A live contract is assigned early: today is the sensible default.
+        self.add_position(underlying="afut", expiry="2099-01-15")
+        future = [p for p in self.positions() if p.underlying == "AFUT"][0]
+        body = self.get(f"/?show=open&act={future.id}&do=assign")
+        self.assertRegex(body, r'name="on" id="f_on"[^>]*value="%s"' % date.today().isoformat())
+
+    def test_selling_from_a_lot_dated_after_the_sale_is_refused(self):
+        lot = self._buy("fut", 400, on="2099-09-18")
+        status, _, body = self.post("/shares/sell", {
+            "underlying": "fut", "on": "2026-09-03", "quantity": "400",
+            "price": "12", "lot_id": lot.id})
+        self.assertEqual(status, 400)
+        self.assertIn("was acquired on 2099-09-18, after the sale date", body)
+
+    def test_assigning_in_the_future_is_refused(self):
+        self.add_position(underlying="futa", expiry="2099-01-15")
+        p = [p for p in self.positions() if p.underlying == "FUTA"][0]
+        status, _, body = self.post(f"/position/{p.id}/assign",
+                                    {"on": "2099-01-15", "close_fee": "0", "share_fee": "0"})
+        self.assertEqual(status, 400)
+        self.assertIn("in the future", body)
+
+    def test_a_lot_can_be_re_dated_together_with_its_assignment(self):
+        # An assignment written straight into the store with a future date,
+        # as the old expiry default produced when a put was assigned early.
+        self.add_position(underlying="redt", expiry="2026-03-20")
+        p = [p for p in self.positions() if p.underlying == "REDT"][0]
+        from bcoj.engine import actions
+        conn = store.open_db(self.db_path)
+        try:
+            store.apply(conn, actions.assign(p, on=date(2099, 3, 20)))
+            lot = [l for l in store.load_lots(conn) if l.underlying == "REDT"][0]
+        finally:
+            conn.close()
+        self.assertIn("dated after today", self.get("/shares/REDT"))
+
+        status, location, _ = self.post(f"/shares/lot/{lot.id}/date",
+                                        {"on": "2026-03-02", "next": "/shares/REDT"})
+        self.assertEqual(status, 303)
+        self.assertIn("re-dated", location)
+        conn = store.open_db(self.db_path)
+        try:
+            lot = [l for l in store.load_lots(conn) if l.underlying == "REDT"][0]
+            self.assertEqual(lot.acquired_on, date(2026, 3, 2))
+            self.assertEqual(store.load_position(conn, p.id).closed_on, date(2026, 3, 2))
+            entry = [e for e in store.audit_entries(conn, limit=50)
+                     if e["entity_type"] == "share_lot"
+                     and e["action"].startswith("update")][0]
+        finally:
+            conn.close()
+        self.assertIn("undo", self.get("/audit").lower())
+
+        # And the re-date is itself undoable.
+        self.post(f"/audit/{entry['id']}/revert", {})
+        conn = store.open_db(self.db_path)
+        try:
+            lot = [l for l in store.load_lots(conn) if l.underlying == "REDT"][0]
+            self.assertEqual(lot.acquired_on, date(2099, 3, 20))
+        finally:
+            conn.close()
+
+    def test_all_three_forms_are_in_the_page_with_one_shown(self):
+        self._buy("tab", 100)
+        page = self.get("/shares/TAB?form=sell")
+        self.assertIn('data-form="buy" hidden', page)
+        self.assertIn('data-form="sell">', page)
+        self.assertIn('data-form="buy-write" hidden', page)
+        self.assertEqual(page.count('id="tickers"'), 1)
+        self.assertIn('data-form-tab="sell" class="here"', page)
+
+    def test_repairs_live_on_the_raw_data_page_not_the_ticker_page(self):
+        self._buy("raw", 100)
+        self.post("/shares/sell", {"underlying": "raw", "on": "2026-02-01",
+                                   "quantity": "50", "price": "12"})
+        ticker = self.get("/shares/RAW")
+        self.assertNotIn('/delete"', ticker)
+        self.assertNotIn('/date"', ticker)
+        self.assertIn('href="/shares/RAW/data"', ticker)
+        data = self.get("/shares/RAW/data")
+        self.assertEqual(data.count('/delete"'), 2)     # the lot and the sale
+        self.assertEqual(data.count('/date"'), 1)
+        self.assertIn("account rule", data)
+
+    def test_removing_a_lot_in_use_is_refused(self):
+        lot = self._buy("use", 300)
+        self.add_position(underlying="use", right="CALL", strike="12",
+                          opened_on="2026-02-01", expiry="2026-03-20",
+                          share_lot_id=lot.id)
+        status, _, body = self.post(f"/shares/lot/{lot.id}/delete", {})
+        self.assertEqual(status, 400)
+        self.assertIn("written against this lot", body)
+
+    def test_removed_share_records_can_be_undone_from_history(self):
+        lot = self._buy("und2", 100)
+        self.post(f"/shares/lot/{lot.id}/delete", {})
+        conn = store.open_db(self.db_path)
+        try:
+            self.assertFalse(any(l.id == lot.id for l in store.load_lots(conn)))
+            entry = [e for e in store.audit_entries(conn)
+                     if e["entity_id"] == lot.id and e["action"].startswith("delete")][0]
+        finally:
+            conn.close()
+        status, location, _ = self.post(f"/audit/{entry['id']}/revert", {})
+        self.assertEqual(status, 303)
+        self.assertIn("restored", location)
+        conn = store.open_db(self.db_path)
+        try:
+            self.assertTrue(any(l.id == lot.id for l in store.load_lots(conn)))
+        finally:
+            conn.close()

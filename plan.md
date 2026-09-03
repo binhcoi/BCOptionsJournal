@@ -23,7 +23,8 @@ for the import format.
 | Database | SQLite, one file, stdlib `sqlite3` | Zero admin; a few hundred rows a year. Back up by copying the file. Ten simple tables with straightforward joins do not earn an ORM. |
 | Migrations | A small versioned runner over `PRAGMA user_version` | Alembic is heavy for this and needs a package manager. Each migration runs in its own transaction. |
 | Frontend | stdlib `http.server` + hand-written HTML and CSS | Changed from FastAPI/Jinja2/HTMX. For one user on loopback there is nothing for a framework to do: no concurrency, no schema to publish, and validation is domain logic that already exists. What it buys is the deployment story -- `python3 -m bcoj.web` runs anywhere Python does, with nothing to install. |
-| JavaScript | None third-party; a few lines of progressive enhancement | Every form works with scripting off. Nothing to vendor, audit or keep current. |
+| JavaScript | None third-party; hand-written script is the primary interaction layer | Expanding, opening forms and switching tabs swap in place, prefetched on hover. Server-rendered paths stay as the fallback and as what the tests drive, but they do not limit what the UI does. Nothing to vendor, audit or keep current. |
+| Priorities | **Data integrity first, then snappiness** | Set 2026-09-03. Refuse impossible states at entry (future dates, selling before buying, over-selling a pinned lot); every write audited and undoable. No full page reload for expand, open, or switch. Integrity and data-health work is ordered ahead of reporting. |
 | Deployment | One Docker image, one volume; also bare in an LXC | Self-contained either way. |
 | Market data | None. Open positions show a **computed profit target** | Nothing to type in, nothing to fetch, works air-gapped. |
 | Data in | Manual entry for daily trades; a **one-off importer** for the legacy sheet | Import is a migration; corrections happen in the app afterwards. |
@@ -463,8 +464,8 @@ strategy, direction and ticker; CSV and JSON export plus a full SQLite backup.
 | --- | --- | --- |
 | M1 | Engine (P/L, chains, targets, break-even, share matching, adjusted basis) + faithful importer + reconciliation + storage. No UI | **Done.** 119 tests. A hand-computed synthetic fixture reconciles exactly, and a real five-year export reconciles to the cent bar one 25-cent fee typo |
 | ~~M2~~ | ~~Manual entry, positions list, validation, expiry queue, audit trail~~ | **Done.** 221 tests. Web UI over stdlib only; split divides chain history pro-rata; every mutation audited and revertible |
-| M3 | Shares: lots, buy-write, outright buy/sell, covered-call linking, wheel view, true total P/L | Next. The actions exist and are tested; they need pages |
-| M4 | Decision support: roll panel, break-even, obligation calendar, concentration | |
+| ~~M3~~ | ~~Shares: lots, buy-write, outright buy/sell, covered-call linking, wheel view, true total P/L~~ | **Done.** Shares and per-ticker pages, buy/sell/buy-write forms, cover/uncover, bulk linking of imported covered calls, wheel totals, true total on the dashboard |
+| M4 | Decision support: roll panel, break-even, obligation calendar, concentration | Next |
 | M5 | Reporting, dashboard, filtering, saved views, notes and tags, export | |
 | M6 | Data health screen; packaging: backup/restore, LXC notes | |
 
@@ -531,6 +532,18 @@ authoritative check, and it is not in this repository because the data isn't.
 | **A split child links only to its split parent** | One link, never both, enforced on the type. The tombstone stays in every lineage regardless of the parent's own history, so the tree's shape no longer depends on what came before |
 | **One row renderer for positions and chains** | A chain is shown as ordinary position rows -- same columns, same figures -- on the position page and when expanded in the list. Expanding reveals the chain's legs in order where the clicked row was, under a header row with the chain's total and a Hide control; legs already in the list move into it rather than appearing twice. No labels, no tree, no "family": it is a chain |
 | **Position columns: open price, close price, credit, closing, realized, break-even, at risk** | Per-share prices beside the cash they produced. An open position's close price and closing cash are the profit target, shown as projections -- so no separate Target column. Carry stays on the position page, not in the table |
+| **A wheel is derived, never stored** | Acquisition chain (the assigning put's whole chain), covered-call chains linked to the lot (chain heads only, so a rolled call counts once), and the share P/L matched to that lot. Total is realized only |
+| **Covered-call links are proposed, not guessed** | A short call written while exactly one lot of its ticker was held is proposed for linking; several candidate lots means no proposal, because misplacing premium between lots is worse than leaving it unlinked. Imported history has no links, so this is how it gets them |
+| **A sale pinned to a lot cannot exceed what that lot holds** | Refused at entry, with the lot's remaining shown in the dropdown and enforced as the input's maximum. A pinned sale draws only from its lot, so no later purchase can rescue it -- which is why it must be right when entered |
+| **Share records are removable and the removal is undoable** | A mis-entered sale or purchase can block a ticker's matching; "remove" on the ticker page deletes it with a full audit snapshot, and History can restore it. A lot with calls written against it, or sales pinned to it, is refused |
+| **No share record may be dated in the future** | Assignments and lot re-dates are refused past today. A lot dated after today is a recording error, and a sale dated today cannot draw from it -- the engine says so by name rather than reporting an empty lot |
+| **A lot's date can be moved, and its assignment moves with it** | The one repair a future-dated assignment needs. Lot and position are updated together and each update is audited and undoable, so they never disagree about when the shares arrived |
+| **Repairs live on a per-ticker raw-data page, not beside the figures** | Removing or re-dating a record is fixing a mistake, not a daily action. The ticker page shows the figures and flags a suspect record; the fix is one link away |
+| **Positions-page links carry both the expanded chain and the open action** | Opening a form no longer collapses the chain, and expanding a chain no longer closes the form. The open action's own link closes it |
+| **The three share forms are all in the page; tabs only toggle** | Switching never reloads or scrolls; without script the links still work and land on the forms |
+| **Assignment dates default to today, or to the expiry once it has passed** | Assignment is noticed the morning after and belongs on the expiry date; early assignment of a live contract belongs on today. Neither needs typing |
+| **A blocked ticker is not "short"** | Matching can fail with a positive share count (a pinned sale its lot cannot cover). The badge says "matching blocked" and the callout names the sale; "short" is reserved for a genuinely negative count |
+| **Shares are written before positions in a transaction** | A buy-write's call points at a lot created in the same action; the reverse never happens |
 | **The position a page is about is tagged** | "▸ this position", its own tint and rail -- distinct from the open-leg tint, so it stands out even as a closed leg among closed legs |
 | **Actions sit beneath the contract, colour-coded** | Blue closes, purple rolls, green keeps the credit, amber moves stock, grey divides |
 | **Open and closed legs look different** | Status is a coloured pill; in a chain, closed legs step back and the open leg steps forward |

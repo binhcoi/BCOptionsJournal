@@ -91,10 +91,27 @@ def _allocate_one(
 
     available = sum(state.remaining for state in candidates)
     if available < disposal.quantity:
+        if disposal.specific_lot_ids:
+            late = [s.lot for s in states
+                    if s.lot.id in disposal.specific_lot_ids
+                    and s.lot.acquired_on > disposal.disposed_on]
+            if late:
+                raise InsufficientSharesError(
+                    f"the sale of {disposal.quantity} on {disposal.disposed_on} is "
+                    f"pinned to a lot acquired on {late[0].acquired_on}, after the "
+                    "sale. Shares cannot be sold before they were bought: date the "
+                    "sale later, or correct the lot's date."
+                )
+            raise InsufficientSharesError(
+                f"the sale of {disposal.quantity} on {disposal.disposed_on} is "
+                f"pinned to a specific lot that holds only {available}. Either "
+                "the lot is wrong or the quantity is; other lots cannot cover a "
+                "pinned sale."
+            )
         raise InsufficientSharesError(
-            f"disposal {disposal.id} on {disposal.disposed_on} needs "
-            f"{disposal.quantity} shares but only {available} are held. "
-            "An acquisition is missing."
+            f"the sale of {disposal.quantity} on {disposal.disposed_on} needs "
+            f"more shares than were held on that date ({available}). "
+            "An acquisition is missing, or is dated after the sale."
         )
 
     outstanding = disposal.quantity

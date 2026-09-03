@@ -47,6 +47,19 @@ class App:
             ("POST", r"^/position/([0-9a-zA-Z_-]+)/assign$", self._assign),
             ("POST", r"^/position/([0-9a-zA-Z_-]+)/roll$", self._roll),
             ("POST", r"^/position/([0-9a-zA-Z_-]+)/split$", self._split),
+            ("POST", r"^/position/([0-9a-zA-Z_-]+)/cover$", self._cover),
+            ("GET", r"^/shares$", self._shares),
+            ("GET", r"^/shares/new$", self._share_form),
+            ("GET", r"^/shares/covers$", self._covers),
+            ("POST", r"^/shares/covers/apply$", self._cover_all),
+            ("POST", r"^/shares/buy$", self._buy_shares),
+            ("POST", r"^/shares/sell$", self._sell_shares),
+            ("POST", r"^/shares/buy-write$", self._buy_write),
+            ("POST", r"^/shares/disposal/([0-9a-zA-Z_:-]+)/delete$", self._delete_disposal),
+            ("POST", r"^/shares/lot/([0-9a-zA-Z_:-]+)/delete$", self._delete_lot),
+            ("POST", r"^/shares/lot/([0-9a-zA-Z_:-]+)/date$", self._redate_lot),
+            ("GET", r"^/shares/([A-Za-z0-9.\-]+)$", self._ticker),
+            ("GET", r"^/shares/([A-Za-z0-9.\-]+)/data$", self._ticker_data),
         ]
         self._compiled = [
             (method, re.compile(pattern), handler)
@@ -115,6 +128,52 @@ class App:
 
     def _split(self, conn, query, form, args):
         routes.do_split(conn, args[0], form)
+        return 200, ""
+
+    def _cover(self, conn, query, form, args):
+        routes.do_cover(conn, args[0], form)
+        return 200, ""
+
+    def _shares(self, conn, query, form, args):
+        return routes.shares_page(conn, self.csrf, query)
+
+    def _ticker(self, conn, query, form, args):
+        return routes.ticker_page(conn, args[0], self.csrf, query)
+
+    def _ticker_data(self, conn, query, form, args):
+        return routes.ticker_data_page(conn, args[0], self.csrf, query)
+
+    def _share_form(self, conn, query, form, args):
+        return routes.share_form(conn, self.csrf, query)
+
+    def _covers(self, conn, query, form, args):
+        return routes.covers_page(conn, self.csrf, query)
+
+    def _cover_all(self, conn, query, form, args):
+        routes.do_cover_all(conn, form)
+        return 200, ""
+
+    def _buy_shares(self, conn, query, form, args):
+        routes.do_buy_shares(conn, form)
+        return 200, ""
+
+    def _sell_shares(self, conn, query, form, args):
+        routes.do_sell_shares(conn, form)
+        return 200, ""
+
+    def _buy_write(self, conn, query, form, args):
+        routes.do_buy_write(conn, form)
+        return 200, ""
+
+    def _delete_disposal(self, conn, query, form, args):
+        routes.do_delete_disposal(conn, args[0], form)
+        return 200, ""
+
+    def _delete_lot(self, conn, query, form, args):
+        routes.do_delete_lot(conn, args[0], form)
+
+    def _redate_lot(self, conn, query, form, args):
+        routes.do_redate_lot(conn, args[0], form)
         return 200, ""
 
 

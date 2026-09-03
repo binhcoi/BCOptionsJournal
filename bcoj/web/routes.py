@@ -12,8 +12,9 @@ from ..db import store
 from ..domain.enums import Direction, Right, Status
 from ..domain.money import ZERO, fmt, parse_money, price, q2
 from ..domain.types import Position
-from ..engine import actions, validate
+from ..engine import actions, validate, wheels
 from ..engine.chains import ChainIndex
+from ..engine.shares import InsufficientSharesError, match as match_lots
 from ..engine.pnl import close_cash, open_cash, realized_pl
 from ..engine.risk import break_even, capital_at_risk, credit_to_recover
 from ..engine.targets import target
@@ -116,7 +117,7 @@ POSITION_COLUMNS = ["", "Contract", "DTE", "Status", "Open price", "Close price"
 
 
 def _position_row(p, index, *, here: str = "/", act_id: str = "", which: str = "",
-                  expanded: bool = False, in_chain: bool = False,
+                  chain_id: str = "", expanded: bool = False, in_chain: bool = False,
                   current: bool = False, siblings: int = 0, rail=None,
                   with_actions: bool = True, collapse_to: str = "") -> str:
     """One position as a table row. The single renderer for positions.
@@ -156,18 +157,28 @@ def _position_row(p, index, *, here: str = "/", act_id: str = "", which: str = "
 
     family_size = len(index.family(p))
 
+    # Every link out of a row keeps the other state the page is showing: an
+    # action link keeps the expanded chain, a chain link keeps the open form.
+    act_q = f"&act={r.esc(act_id)}&do={r.esc(which)}" if act_id and which else ""
+    chain_q = f"&chain={r.esc(chain_id)}" if chain_id else ""
+
     actions_html = ""
     if with_actions and p.is_open:
-        actions_html = '<div class="row-actions">' + "".join(
-            f'<a class="act act-{k}{" here" if p.id == act_id and k == which else ""}"'
-            f' href="{here}&act={pid}&do={k}{anchor}">{label}</a>'
-            for k, label in ACTIONS
-        ) + "</div>"
+        links = []
+        for k, label in ACTIONS:
+            is_open = p.id == act_id and k == which
+            # The open action's own link closes it again.
+            href = (f"{here}{chain_q}{anchor}" if is_open
+                    else f"{here}{chain_q}&act={pid}&do={k}{anchor}")
+            links.append(f'<a class="act act-{k}{" here" if is_open else ""}"'
+                         f' href="{href}">{label}</a>')
+        actions_html = '<div class="row-actions">' + "".join(links) + "</div>"
 
     if in_chain and not (current and expanded):
         legs_html = ""      # the chain is what is being shown
     elif family_size > 1:
-        target_url = f"{here}{anchor}" if expanded else f"{here}&chain={pid}{anchor}"
+        target_url = (f"{here}{act_q}{anchor}" if expanded
+                      else f"{here}{act_q}&chain={pid}{anchor}")
         title = "Hide the chain" if expanded else "Show the whole chain"
         text = "&#9650;" if expanded else str(family_size)
         legs_html = (f'<a class="legs{" here" if expanded else ""}"'
@@ -190,9 +201,9 @@ def _position_row(p, index, *, here: str = "/", act_id: str = "", which: str = "
     if in_chain and collapse_to:
         # Collapse lands on the row that was clicked: a closed leg's own row
         # is gone once the chain folds, so anchoring to it would go nowhere.
-        toggle = f' data-chain="{here}#row-{r.esc(collapse_to)}"'
+        toggle = f' data-chain="{here}{act_q}#row-{r.esc(collapse_to)}"'
     elif family_size > 1 and with_actions:
-        toggle = f' data-chain="{here}&chain={pid}{anchor}"'
+        toggle = f' data-chain="{here}{act_q}&chain={pid}{anchor}"'
 
     # Prices and cash flows. Open positions project to the target.
     if p.is_open:
@@ -309,31 +320,34 @@ def positions_page(conn, query, token: str = "") -> tuple[int, str]:
                   f"{len(queue)} position(s) at or past expiry need an outcome"
                   "</a></div>")
 
+    act_q = f"&act={r.esc(act_id)}&do={r.esc(which)}" if act_id and which else ""
+    chain_q = f"&chain={r.esc(chain_id)}" if chain_id else ""
+
     rows = []
     for p in listed:
         if p.id in expanded_ids and p.id != chain_id:
             continue  # rendered as part of the expanded chain
 
         if p.id == chain_id:
-            rows.append(_chain_head_row(index, expanded_legs, p, here))
+            rows.append(_chain_head_row(index, expanded_legs, p, here + act_q))
             for leg in expanded_legs:
                 rows.append(_position_row(
                     leg, index, here=here, act_id=act_id, which=which,
-                    expanded=(leg.id == chain_id), in_chain=True,
+                    chain_id=chain_id, expanded=(leg.id == chain_id), in_chain=True,
                     current=(leg.id == chain_id), collapse_to=chain_id,
                 ))
                 if leg.id == act_id and which and leg.is_open:
-                    rows.append(_action_row(leg, index, which, token, here))
+                    rows.append(_action_row(leg, index, which, token, here + chain_q))
             continue
 
         root_id = roots.get(p.id)
         rows.append(_position_row(
-            p, index, here=here, act_id=act_id, which=which,
+            p, index, here=here, act_id=act_id, which=which, chain_id=chain_id,
             siblings=size.get(root_id, 0) if root_id else 0,
             rail=rail_of.get(root_id),
         ))
         if p.id == act_id and which and p.is_open:
-            rows.append(_action_row(p, index, which, token, here))
+            rows.append(_action_row(p, index, which, token, here + chain_q))
 
     totals = _portfolio_totals(conn, positions, index)
     tabs = " ".join(
@@ -371,8 +385,19 @@ def _portfolio_totals(conn, positions, index) -> str:
     expected = q2(sum(
         (target(p, index.carry(p)).expected_pl for p in open_ones), ZERO
     ))
+    lots = store.load_lots(conn)
+    disposals = store.load_disposals(conn)
+    tickers = wheels.by_ticker(index, positions, lots, disposals, store.matching_rule(conn))
+    shares_pl = wheels.realized_shares(tickers)
+    blocked = [t.underlying for t in tickers if t.error]
+    total_cell = r.money(q2(realized + shares_pl))
+    if blocked:
+        total_cell += (f' <a href="/shares" class="neg" title="{r.esc(", ".join(blocked))}'
+                       ' cannot be matched">&#9888;</a>')
     cells = [
-        ("Realized P/L", r.money(realized)),
+        ("Realized options", r.money(realized)),
+        ("Realized shares", r.money(shares_pl)),
+        ("True total", total_cell),
         ("Open premium", r.money(premium)),
         ("Expected at target", r.money(expected)),
         ("Chain carry", r.money(carry)),
@@ -428,6 +453,12 @@ def new_position_form(conn, token, form=None, problems=()) -> tuple[int, str]:
                 hint=f"Auto-filled at {fmt(rate)}/contract; editable"),
         r.field("Notes", "notes", _one(form, "notes"),
                 hint="Why this trade, in your words"),
+        r.select("Cover with lot", "share_lot_id",
+                 [("", "- not covered -")] + [
+                     (l.id, _lot_label(l)) for l in sorted(
+                         store.load_lots(conn), key=lambda l: (l.underlying, l.acquired_on))
+                 ], _one(form, "share_lot_id"),
+                 hint="For a short call written against shares you hold"),
     ])
     body = f"""{r.problems_block(problems)}
 {r.datalist("tickers", tickers)}
@@ -463,12 +494,13 @@ def create_position(conn, form, token) -> None:
         right=Right(_one(form, "right", "PUT")),
         direction=direction,
         quantity=abs(quantity),
-        opened_on=_date(form, "opened_on", date.today()),
+        opened_on=_past(_date(form, "opened_on", date.today()), "Opened on"),
         open_price=_decimal(form, "open_price", label="Premium"),
         open_fee=_decimal(form, "open_fee", q2(rate * abs(quantity))),
         close_fee=_decimal(form, "open_fee", q2(rate * abs(quantity))),
         status=Status.OPEN,
         notes=_one(form, "notes"),
+        share_lot_id=_one(form, "share_lot_id") or None,
     )
 
     existing = store.load_positions(conn)
@@ -532,6 +564,21 @@ def position_page(conn, position_id, token, query) -> tuple[int, str]:
     else:
         facts.append(("Realized", r.money(realized_pl(position))))
 
+    lots = store.load_lots(conn)
+    lot_by_id = {l.id: l for l in lots}
+    if position.right is Right.CALL and position.direction is Direction.SHORT:
+        covering = lot_by_id.get(position.share_lot_id) if position.share_lot_id else None
+        if covering:
+            facts.append(("Covered by", f'<a href="/shares/{r.esc(covering.underlying)}">'
+                                        f"{r.esc(_lot_label(covering))}</a>"))
+        else:
+            facts.append(("Covered by", '<span class="neg">nothing - naked</span>'))
+    created = [l for l in lots if l.assigning_position_id == position.id
+               and position.right is Right.PUT]
+    if created:
+        facts.append(("Shares acquired", f'<a href="/shares/{r.esc(created[0].underlying)}">'
+                                         f"{r.esc(_lot_label(created[0]))}</a>"))
+
     fact_rows = "".join(
         f"<div><span>{r.esc(k)}</span><b>{v}</b></div>" for k, v in facts
     )
@@ -542,6 +589,15 @@ def position_page(conn, position_id, token, query) -> tuple[int, str]:
             "<h2>Actions</h2>" + _action_tabs(position, which, here)
             + _action_form(position, which, token, carry, back=here)
         )
+        if position.right is Right.CALL and position.direction is Direction.SHORT:
+            candidates = [l for l in lots if l.underlying == position.underlying]
+            if candidates:
+                options = [("", "- none (naked) -")] + [(l.id, _lot_label(l)) for l in candidates]
+                actions_block += ("<h3>Covering lot</h3>" + r.form(
+                    f"/position/{r.esc(position.id)}/cover",
+                    r.hidden("next", here) + r.select("Shares this call is written against",
+                                                      "lot_id", options, position.share_lot_id or ""),
+                    token, submit="Save", cls="grid"))
     else:
         actions_block = '<p class="dim">This position is closed. Nothing to do.</p>'
 
@@ -653,11 +709,13 @@ def _action_form(position, which: str, token: str, carry, back: str) -> str:
         moves = (f"acquire {position.shares} shares at {fmt(position.strike)}"
                  if acquiring else
                  f"deliver {position.shares} shares at {fmt(position.strike)}")
+        # Date defaults to today, or to the expiry once it has passed: an
+        # assignment is normally noticed the morning after and dated to expiry.
         return f"""<p class="callout">This will also <b>{r.esc(moves)}</b>,
         so the stock side cannot be forgotten.</p>
 {r.form(f"/position/{pid}/assign", nxt + "".join([
-    r.field("Assigned on", "on", position.expiry.isoformat(), kind="date",
-            required=True),
+    r.field("Assigned on", "on", min(date.today(), position.expiry).isoformat(),
+            kind="date", required=True),
     r.field("Option fee", "close_fee", "0.00", kind="number", step="0.01"),
     r.field("Share fee", "share_fee", "0.00", kind="number", step="0.01"),
 ]), token, submit="Record assignment", cls="grid")}"""
@@ -689,6 +747,18 @@ def _action_tabs(position, which: str, base: str) -> str:
 # action endpoints
 
 
+def _past(on: date, label: str) -> date:
+    """The journal records what has happened. A future date is a typo or a
+    form default gone wrong, and a lot or a close dated ahead of today makes
+    every figure that depends on it wrong for weeks. Refused, every time."""
+    if on > date.today():
+        raise BadRequest(
+            f"{label} {on} is in the future. The journal records what has "
+            "happened; date it today or earlier."
+        )
+    return on
+
+
 def _load_open(conn, position_id) -> Position:
     position = store.load_position(conn, position_id)
     if position is None:
@@ -700,7 +770,7 @@ def do_close(conn, position_id, form) -> None:
     position = _load_open(conn, position_id)
     result = actions.close(
         position,
-        _date(form, "closed_on", date.today()),
+        _past(_date(form, "closed_on", date.today()), "Closed on"),
         _decimal(form, "close_price", label="Close price"),
         _decimal(form, "close_fee", ZERO),
     )
@@ -712,7 +782,7 @@ def do_close(conn, position_id, form) -> None:
 
 def do_expire(conn, position_id, form) -> None:
     position = _load_open(conn, position_id)
-    result = actions.expire(position, _date(form, "on", position.expiry))
+    result = actions.expire(position, _past(_date(form, "on", position.expiry), "Expired on"))
     store.apply(conn, result)
     pl = realized_pl(result.updated[0])
     raise Redirect(_next(form, f"/position/{position_id}"),
@@ -721,9 +791,10 @@ def do_expire(conn, position_id, form) -> None:
 
 def do_assign(conn, position_id, form) -> None:
     position = _load_open(conn, position_id)
+    on = _past(_date(form, "on", position.expiry), "Assigned on")
     result = actions.assign(
         position,
-        on=_date(form, "on", position.expiry),
+        on=on,
         close_fee=_decimal(form, "close_fee", ZERO),
         share_fee=_decimal(form, "share_fee", ZERO),
     )
@@ -743,7 +814,7 @@ def do_roll(conn, position_id, form) -> None:
         new_expiry=_date(form, "new_expiry", label="New expiry"),
         new_strike=_decimal(form, "new_strike", label="New strike"),
         new_price=_decimal(form, "new_price", label="New premium"),
-        on=_date(form, "on", date.today()),
+        on=_past(_date(form, "on", date.today()), "Rolled on"),
         close_fee=_decimal(form, "close_fee", ZERO),
         new_fee=_decimal(form, "new_fee", ZERO),
         new_quantity=_int(form, "new_quantity", position.quantity),
@@ -778,7 +849,7 @@ def do_split(conn, position_id, form) -> None:
     result = actions.split(
         position,
         _int(form, "quantity", label="Contracts to peel off"),
-        on=_date(form, "on", date.today()),
+        on=_past(_date(form, "on", date.today()), "Split on"),
     )
     store.apply(conn, result)
     first, second = result.created
@@ -841,7 +912,8 @@ def audit_page(conn, token, query) -> tuple[int, str]:
     rows = []
     for e in entries:
         undo = ""
-        if e["entity_type"] == "position" and not e["action"].startswith("revert"):
+        if (e["entity_type"] in ("position", "share_lot", "share_disposal")
+                and not e["action"].startswith("revert")):
             undo = r.form(f"/audit/{e['id']}/revert", "", token,
                           submit="Undo", cls="inline")
         rows.append([
@@ -868,3 +940,554 @@ def do_revert(conn, entry_id, form) -> None:
     except ValueError as exc:
         raise Redirect("/audit", f"!{exc}") from None
     raise Redirect("/audit", f"Undone: {outcome}")
+
+
+# ---------------------------------------------------------------------------
+# shares
+
+
+def _share_context(conn):
+    positions = store.load_positions(conn)
+    index = ChainIndex(positions)
+    lots = store.load_lots(conn)
+    disposals = store.load_disposals(conn)
+    rule = store.matching_rule(conn)
+    tickers = wheels.by_ticker(index, positions, lots, disposals, rule)
+    views = [v for t in tickers for v in t.lots]
+    suggestions = wheels.suggest_covers(index, positions, views)
+    return positions, index, lots, disposals, tickers, suggestions
+
+
+def _lot_label(lot, remaining=None) -> str:
+    qty = lot.quantity if remaining is None else remaining
+    tag = " (estimated)" if lot.estimated else ""
+    held = "" if remaining is None or remaining == lot.quantity else f" of {lot.quantity}"
+    return f"{qty}{held} {lot.underlying} @ {price(lot.cost_per_share)} from {lot.acquired_on}{tag}"
+
+
+def _remaining_by_lot(conn, underlying: str) -> dict[str, int]:
+    """Shares each lot of a ticker still holds under the account rule."""
+    lots = [l for l in store.load_lots(conn) if l.underlying == underlying]
+    disposals = [d for d in store.load_disposals(conn) if d.underlying == underlying]
+    try:
+        result = match_lots(lots, disposals, store.matching_rule(conn))
+    except InsufficientSharesError:
+        return {l.id: l.quantity for l in lots}
+    return {state.lot.id: state.remaining for state in result.remaining}
+
+
+def _share_form_body(conn, kind: str, underlying: str, token: str, back: str) -> str:
+    """The buy / sell / buy-write form, for embedding on a page."""
+    rate = _fee_rate(conn)
+    common = [
+        r.field("Ticker", "underlying", underlying, required=True, autofocus=not underlying,
+                attrs=' list="tickers" autocapitalize="characters" autocomplete="off"'),
+        r.field("Date", "on", r.today_iso(), kind="date", required=True),
+    ]
+    if kind == "sell":
+        lots = [l for l in store.load_lots(conn) if not underlying or l.underlying == underlying]
+        remaining = _remaining_by_lot(conn, underlying) if underlying else {}
+        options = [("", "Account rule (FIFO)")]
+        attrs = []
+        for l in sorted(lots, key=lambda l: (l.underlying, l.acquired_on)):
+            left = remaining.get(l.id, l.quantity)
+            if left <= 0:
+                continue          # nothing left to sell from it
+            options.append((l.id, _lot_label(l, left)))
+            attrs.append(f'"{r.esc(l.id)}":{left}')
+        fields = common + [
+            r.field("Shares", "quantity", "", kind="number", step="1", required=True,
+                    attrs=' min="1"'),
+            r.field("Price / share", "price", "", kind="number", step="0.01", required=True),
+            r.field("Fee", "fee", "0.00", kind="number", step="0.01"),
+            r.select("From lot", "lot_id", options, "",
+                     hint="Leave on the account rule unless the broker matched a specific lot"),
+            f'<script type="application/json" id="lot-remaining">{{{",".join(attrs)}}}</script>',
+        ]
+        action, submit = "/shares/sell", "Record sale"
+    elif kind == "buy-write":
+        fields = common + [
+            r.field("Shares bought", "shares", "", kind="number", step="1", required=True),
+            r.field("Share price", "share_price", "", kind="number", step="0.01", required=True),
+            r.field("Share fee", "share_fee", "0.00", kind="number", step="0.01"),
+            r.field("Call expiry", "expiry", _next_friday().isoformat(), kind="date", required=True),
+            r.field("Call strike", "strike", "", kind="number", step="0.01", required=True),
+            r.field("Call premium / share", "call_price", "", kind="number", step="0.01", required=True),
+            r.field("Contracts", "contracts", "", kind="number", step="1",
+                    hint="Defaults to shares / 100"),
+            r.field("Option fee", "option_fee", str(rate), kind="number", step="0.01"),
+        ]
+        action, submit = "/shares/buy-write", "Record buy-write"
+    else:
+        fields = common + [
+            r.field("Shares", "quantity", "", kind="number", step="1", required=True),
+            r.field("Price / share", "price", "", kind="number", step="0.01", required=True),
+            r.field("Fee", "fee", "0.00", kind="number", step="0.01"),
+            r.field("Notes", "notes", ""),
+        ]
+        action, submit = "/shares/buy", "Record purchase"
+    return r.form(action, r.hidden("next", back) + "".join(fields), token,
+                  submit=submit, cls="grid")
+
+
+def _share_forms(conn, kind: str, underlying: str, token: str, back: str,
+                 base: str, param: str = "form") -> str:
+    """Tab strip plus all three forms, only the chosen one shown.
+
+    Every form is in the page, so switching is a toggle rather than a reload
+    that lands the reader back at the top. Without script the links still
+    work, and the fragment brings the reader back to the forms.
+    """
+    links, panels = [], []
+    for key, label in (("buy", "Buy shares"), ("sell", "Sell shares"),
+                       ("buy-write", "Buy-write")):
+        cls = ' class="here"' if kind == key else ""
+        links.append(f'<a href="{base}{param}={key}#record" data-form-tab="{key}"{cls}>'
+                     f"{label}</a>")
+        shown = "" if kind == key else " hidden"
+        panels.append(f'<div class="share-form" data-form="{key}"{shown}>'
+                      + _share_form_body(conn, key, underlying, token, back) + "</div>")
+    return ('<div class="tabs" id="record">' + " ".join(links) + "</div>"
+            + r.datalist("tickers", store.recent_underlyings(conn)) + "".join(panels))
+
+
+def shares_page(conn, token, query) -> tuple[int, str]:
+    positions, index, lots, disposals, tickers, suggestions = _share_context(conn)
+
+    rows = []
+    for t in tickers:
+        name = r.esc(t.underlying)
+        blended = t.blended
+        if t.error and t.held < 0:
+            state = (f'<span class="badge st-blocked" title="{r.esc(t.error)}">'
+                     f"short {-t.held} shares</span>")
+        elif t.error:
+            state = (f'<span class="badge st-blocked" title="{r.esc(t.error)}">'
+                     f"{t.held} held &middot; matching blocked</span>")
+        elif t.held > 0:
+            state = f'<span class="badge st-open">holding {t.held}</span>'
+        else:
+            state = '<span class="badge st-closed">flat</span>'
+        rows.append([
+            f'<a href="/shares/{name}"><b class="ticker">{name}</b></a>',
+            state,
+            r.money(t.held_cost if t.held > 0 else None),
+            r.money(blended.after_calls if blended else None),
+            r.money(blended.min_call_strike if blended else None),
+            r.money(t.realized if not t.error else None),
+            r.money(t.option_premium),
+            r.money(t.total if not t.error else None),
+            r.esc(len(t.lots)),
+        ])
+
+    realized = wheels.realized_shares(tickers)
+    held_cost = q2(sum((t.held_cost for t in tickers if t.held > 0 and not t.error), ZERO))
+    blocked = [t for t in tickers if t.error]
+    totals = [
+        ("Realized on shares", r.money(realized)),
+        ("Cost of shares held", r.money(held_cost)),
+        ("Tickers holding stock", r.esc(sum(1 for t in tickers if t.held > 0))),
+    ]
+    if blocked:
+        totals.append(("Blocked tickers", f'<span class="neg">{len(blocked)}</span>'))
+
+    warn = ""
+    if blocked:
+        warn = "".join(
+            f'<div class="callout"><a href="/shares/{r.esc(t.underlying)}">'
+            f"{r.esc(t.underlying)}</a>: {r.esc(t.error)}</div>" for t in blocked)
+    hint = ""
+    if suggestions:
+        hint = (f'<div class="callout"><a href="/shares/covers">{len(suggestions)} '
+                "short call(s) look like covered calls but are not linked to a lot"
+                "</a> - link them so their premium counts toward the shares' basis.</div>")
+
+    kind = (query.get("form") or [""])[0]
+    body = f"""{warn}{hint}
+<div class="totals">{"".join(f"<div><span>{r.esc(k)}</span><b>{v}</b></div>" for k, v in totals)}</div>
+{_share_forms(conn, kind, "", token, "/shares", "/shares?")}
+{r.table(["Ticker", "Position", "Held at cost", "Adj. basis", "Min call",
+          "Share P/L", "Option premium", "Wheel total", "Lots"], rows, cls="shares")}
+<p class="hint">Adjusted basis is what the shares held really cost after the
+premium that acquired them and the calls written against them. Min call is the
+lowest strike that does not lock in a loss. Wheel total is acquisition premium
+plus call premium plus share P/L, realized only.</p>"""
+    return 200, r.page("Shares", body, nav_here="shares")
+
+
+def ticker_page(conn, underlying, token, query) -> tuple[int, str]:
+    positions, index, lots, disposals, tickers, suggestions = _share_context(conn)
+    name = underlying.upper()
+    match_ = [t for t in tickers if t.underlying == name]
+    if not match_:
+        return 404, r.page("Not found", f"<p>No shares recorded for {r.esc(name)}.</p>")
+    t = match_[0]
+    by_id = {p.id: p for p in positions}
+
+    facts = [
+        ("Held", r.esc(t.held) if not t.error else f'<span class="neg">{t.held}</span>'),
+        ("Cost of shares held", r.money(t.held_cost if t.held > 0 else None)),
+        ("Share P/L realized", r.money(t.realized if not t.error else None)),
+        ("Option premium on these lots", r.money(t.option_premium)),
+        ("Wheel total", r.money(t.total if not t.error else None)),
+    ]
+    b = t.blended
+    if b:
+        facts += [("Adjusted basis", r.money(b.unit_price)),
+                  ("After covered calls", r.money(b.after_calls)),
+                  ("Min call strike", r.money(b.min_call_strike))]
+    fact_html = "".join(f"<div><span>{r.esc(k)}</span><b>{v}</b></div>" for k, v in facts)
+
+    warn = ""
+    if t.error:
+        warn = (f'<div class="callout">{r.esc(t.error)}<br>Fix it in the '
+                f'<a href="/shares/{name}/data">raw data</a>: remove or re-record the '
+                "sale, or record the missing purchase. Matching resumes once every "
+                "sale can be matched.</div>")
+
+    lot_rows = []
+    today = date.today()
+    for v in t.lots:
+        lot = v.lot
+        src = lot.source.value.replace("_", " ").lower()
+        badge = f'<span class="badge st-{"open" if v.is_open else "closed"}">{r.esc(src)}</span>'
+        if lot.estimated:
+            badge += ' <span class="badge st-split" title="reconstructed from memory">estimated</span>'
+        acq = "-"
+        if v.acquisition is not None:
+            head = v.acquisition.head
+            acq = (f'<a href="/position/{r.esc(head.id)}">{r.money(v.acq_premium)}</a>')
+        calls = r.money(v.cc_premium) if v.call_chains else '<span class="dim">-</span>'
+        if v.call_chains:
+            calls += f' <span class="dim">({len(v.call_chains)})</span>'
+        cover = ""
+        if v.is_open:
+            cover = f"{v.covered}/{v.remaining}"
+            if v.over_covered:
+                cover = f'<span class="neg" title="more calls than shares">{cover}</span>'
+            elif v.uncovered == 0 and v.covered:
+                cover = f'<span class="pos">{cover}</span>'
+        # A lot dated after today is almost always an assignment recorded on
+        # the expiry date when it happened early. Flag it; the fix is in the
+        # raw data, not among the figures.
+        when = r.esc(lot.acquired_on)
+        if lot.acquired_on > today:
+            when = (f'<a class="neg" href="/shares/{name}/data" title="dated after '
+                    f'today: an assignment recorded with the expiry date? Fix it in '
+                    f'the raw data">{when}</a>')
+        lot_rows.append([
+            when,
+            badge,
+            r.esc(lot.quantity),
+            r.esc(v.remaining) if v.is_open else '<span class="dim">0</span>',
+            r.esc(price(lot.cost_per_share)),
+            acq,
+            calls,
+            cover or '<span class="dim">-</span>',
+            r.money(v.share_realized if v.disposed else None),
+            r.money(v.basis.unit_price if v.basis.available else None),
+            r.money(v.basis.after_calls if v.basis.available else None),
+            r.money(v.total),
+            r.esc(v.days),
+        ])
+
+    disp_rows = []
+    for d in sorted(disposals, key=lambda d: d.disposed_on, reverse=True):
+        if d.underlying != name:
+            continue
+        via = by_id.get(d.disposing_position_id) if d.disposing_position_id else None
+        how = (f'<a href="/position/{r.esc(via.id)}">{r.contract(via)}</a>' if via
+               else r.esc(d.kind.value.replace("_", " ").lower()))
+        pinned = ""
+        if d.specific_lot_ids:
+            pinned = ' <span class="dim" title="pinned to a specific lot">&#128204;</span>'
+        disp_rows.append([r.esc(d.disposed_on), r.esc(d.quantity),
+                          r.esc(price(d.proceeds_per_share)), r.money(d.proceeds),
+                          how + pinned])
+
+    my_suggestions = {pid: lot_id for pid, lot_id in suggestions.items()
+                      if by_id[pid].underlying == name}
+    suggest_html = ""
+    if my_suggestions:
+        items = "".join(
+            f"<li>{r.contract(by_id[pid])} &rarr; "
+            f"{r.esc(_lot_label(next(l for l in lots if l.id == lot_id)))}"
+            f'{r.form(f"/position/{r.esc(pid)}/cover", r.hidden("lot_id", lot_id) + r.hidden("next", f"/shares/{name}"), token, submit="Link", cls="inline")}</li>'
+            for pid, lot_id in my_suggestions.items()
+        )
+        suggest_html = f"""<h2>Calls that look covered but are not linked</h2>
+<p class="hint">Each was written while exactly one lot of {r.esc(name)} was held.
+Linking it counts its premium toward that lot's basis.</p>
+<ul class="suggest">{items}</ul>"""
+
+    kind = (query.get("form") or [""])[0]
+    forms = "<h2>Record</h2>" + _share_forms(conn, kind, name, token, f"/shares/{name}",
+                                              f"/shares/{name}?")
+
+    body = f"""{warn}
+<div class="totals wide">{fact_html}</div>
+<h2>Lots - {len(t.lots)}</h2>
+{r.table(["Acquired", "Source", "Qty", "Held", "Cost/sh", "Acq. premium",
+          "Call premium", "Covered", "Share P/L", "Adj. basis", "After calls",
+          "Wheel", "Days"], lot_rows, cls="lots")}
+<h2>Disposals - {len(disp_rows)}</h2>
+{r.table(["Date", "Qty", "Price", "Proceeds", "Via"], disp_rows)}
+{suggest_html}
+{forms}
+<p class="hint">Something entered wrong? <a href="/shares/{name}/data">Fix the raw
+data</a> - remove or re-date a record there.</p>"""
+    return 200, r.page(f"{name} shares", body, nav_here="shares")
+
+
+def ticker_data_page(conn, underlying, token, query) -> tuple[int, str]:
+    """The raw share records of one ticker, with the repairs.
+
+    Removing or re-dating a record is not a daily action; it is fixing data
+    that was entered wrong. So it lives here, one link from the ticker page,
+    rather than beside the figures where it would invite misuse.
+    """
+    name = underlying.upper()
+    lots = sorted(store.load_lots(conn, name), key=lambda l: (l.acquired_on, l.id))
+    disposals = sorted(store.load_disposals(conn, name),
+                       key=lambda d: (d.disposed_on, d.id))
+    by_id = {p.id: p for p in store.load_positions(conn, name)}
+    back = f"/shares/{name}/data"
+    today = date.today()
+
+    warn = ""
+    try:
+        match_lots(lots, disposals, store.matching_rule(conn))
+    except InsufficientSharesError as exc:
+        warn = f'<div class="callout">{r.esc(exc)}</div>'
+
+    linked = {p.share_lot_id for p in by_id.values() if p.share_lot_id}
+    pinned_to = {lot_id for d in disposals for lot_id in d.specific_lot_ids}
+
+    def via(pid):
+        p = by_id.get(pid) if pid else None
+        return (f'<a href="/position/{r.esc(p.id)}">{r.contract(p)}</a>' if p
+                else '<span class="dim">-</span>')
+
+    lot_rows = []
+    for lot in lots:
+        redate = r.form(
+            f"/shares/lot/{r.esc(lot.id)}/date",
+            r.hidden("next", back)
+            + f'<input type="date" name="on" value="{min(lot.acquired_on, today)}"'
+            ' required aria-label="Acquired on">',
+            token, submit="re-date", cls="inline")
+        when = r.esc(lot.acquired_on)
+        if lot.acquired_on > today:
+            when = f'<span class="neg" title="dated after today">{when}</span>'
+        if lot.id in linked:
+            remove = '<span class="dim" title="calls are written against it">in use</span>'
+        elif lot.id in pinned_to:
+            remove = '<span class="dim" title="a sale is pinned to it">in use</span>'
+        else:
+            remove = r.form(f"/shares/lot/{r.esc(lot.id)}/delete", r.hidden("next", back),
+                            token, submit="remove", cls="inline")
+        flags = " ".join(f for f in (
+            "estimated" if lot.estimated else "", r.esc(lot.notes)) if f)
+        lot_rows.append([
+            f"{when} {redate}", r.esc(lot.source.value.replace("_", " ").lower()),
+            r.esc(lot.quantity), r.esc(price(lot.cost_per_share)), r.money(lot.fee),
+            via(lot.assigning_position_id), flags or '<span class="dim">-</span>', remove,
+        ])
+
+    disp_rows = []
+    for d in disposals:
+        lot_text = "account rule"
+        if d.specific_lot_ids:
+            names = [_lot_label(l) for l in lots if l.id in d.specific_lot_ids]
+            lot_text = "&#128204; " + r.esc("; ".join(names) or "a lot no longer present")
+        disp_rows.append([
+            r.esc(d.disposed_on), r.esc(d.kind.value.replace("_", " ").lower()),
+            r.esc(d.quantity), r.esc(price(d.proceeds_per_share)), r.money(d.fee),
+            via(d.disposing_position_id), lot_text,
+            r.form(f"/shares/disposal/{r.esc(d.id)}/delete", r.hidden("next", back),
+                   token, submit="remove", cls="inline"),
+        ])
+
+    body = f"""<p class="hint"><a href="/shares/{name}">&larr; {name} shares</a></p>
+{warn}
+<p class="hint">These are the records as entered. Remove one that is wrong, or move
+a lot's date; its assignment moves with it. Every change is logged and can be
+undone from <a href="/audit">History</a>.</p>
+<h2>Lots - {len(lot_rows)}</h2>
+{r.table(["Acquired", "Source", "Qty", "Cost/sh", "Fee", "From", "Flags", ""], lot_rows)}
+<h2>Disposals - {len(disp_rows)}</h2>
+{r.table(["Date", "Kind", "Qty", "Price", "Fee", "Via", "Lot", ""], disp_rows)}"""
+    return 200, r.page(f"{name} raw data", body, nav_here="shares")
+
+
+def covers_page(conn, token, query) -> tuple[int, str]:
+    positions, index, lots, disposals, tickers, suggestions = _share_context(conn)
+    by_id = {p.id: p for p in positions}
+    lot_by_id = {l.id: l for l in lots}
+    rows = []
+    for pid, lot_id in sorted(suggestions.items(), key=lambda kv: by_id[kv[0]].opened_on):
+        p = by_id[pid]
+        rows.append([
+            f'<a href="/position/{r.esc(pid)}">{r.contract(p)}</a>',
+            r.esc(p.opened_on),
+            r.status_badge(p.status),
+            r.esc(_lot_label(lot_by_id[lot_id])),
+            r.form(f"/position/{r.esc(pid)}/cover",
+                   r.hidden("lot_id", lot_id) + r.hidden("next", "/shares/covers"),
+                   token, submit="Link", cls="inline"),
+        ])
+    apply_all = ""
+    if suggestions:
+        apply_all = r.form("/shares/covers/apply", r.hidden("next", "/shares/covers"),
+                           token, submit=f"Link all {len(suggestions)}", cls="inline")
+    body = f"""<p class="hint">Short calls written while exactly one lot of the same
+ticker was held, and not yet linked to it. Imported history has no links at
+all, so this is how the calls written against your shares get their premium
+counted toward the shares' basis. Where several lots could fit, nothing is
+proposed - guessing would misplace premium.</p>
+{apply_all}
+{r.table(["Call", "Opened", "Status", "Proposed lot", ""], rows)}"""
+    return 200, r.page("Unlinked covered calls", body, nav_here="shares")
+
+
+def do_cover(conn, position_id, form) -> None:
+    position = store.load_position(conn, position_id)
+    if position is None:
+        raise BadRequest("no such position")
+    lot_id = _one(form, "lot_id")
+    lots = {l.id: l for l in store.load_lots(conn)}
+    if lot_id and lot_id not in lots:
+        raise BadRequest("no such lot")
+    if lot_id and lots[lot_id].underlying != position.underlying:
+        raise BadRequest(f"that lot is {lots[lot_id].underlying}, not {position.underlying}")
+    if position.right is not Right.CALL:
+        raise BadRequest("only a call can be covered by shares")
+
+    from dataclasses import replace
+    updated = replace(position, share_lot_id=lot_id or None)
+    what = "linked to lot" if lot_id else "unlinked from its lot"
+    store.apply(conn, actions.ActionResult(updated=[updated]), f"call {what}")
+    raise Redirect(_next(form, f"/position/{position_id}"),
+                   f"{r.contract_text(position)} {what}")
+
+
+def do_cover_all(conn, form) -> None:
+    positions, index, lots, disposals, tickers, suggestions = _share_context(conn)
+    by_id = {p.id: p for p in positions}
+    from dataclasses import replace
+    updated = [replace(by_id[pid], share_lot_id=lot_id) for pid, lot_id in suggestions.items()]
+    if updated:
+        store.apply(conn, actions.ActionResult(updated=updated),
+                    f"linked {len(updated)} covered call(s) to their lots")
+    raise Redirect(_next(form, "/shares"), f"Linked {len(updated)} call(s)")
+
+
+def share_form(conn, token, query) -> tuple[int, str]:
+    kind = (query.get("kind") or ["buy"])[0]
+    underlying = (query.get("underlying") or [""])[0].upper()
+    back = f"/shares/{underlying}" if underlying else "/shares"
+    body = _share_forms(conn, kind, underlying, token, back,
+                        f"/shares/new?underlying={underlying}&", param="kind")
+    return 200, r.page({"sell": "Sell shares", "buy-write": "Buy-write"}.get(kind, "Buy shares"),
+                       body, nav_here="shares")
+
+
+def _check_not_short(conn, underlying: str, selling: int) -> None:
+    lots = [l for l in store.load_lots(conn) if l.underlying == underlying]
+    disposals = [d for d in store.load_disposals(conn) if d.underlying == underlying]
+    held = sum(l.quantity for l in lots) - sum(d.quantity for d in disposals)
+    if selling > held:
+        raise BadRequest(
+            f"you hold {held} {underlying}; selling {selling} would leave the "
+            f"ticker short {selling - held}. Record the missing purchase first."
+        )
+
+
+def do_buy_shares(conn, form) -> None:
+    underlying = _one(form, "underlying").upper()
+    result = actions.buy_shares(
+        underlying, _int(form, "quantity", label="Shares"),
+        _decimal(form, "price", label="Price"), _past(_date(form, "on", date.today()), "Date"),
+        fee=_decimal(form, "fee", ZERO),
+    )
+    result.lots[0].notes = _one(form, "notes")
+    store.apply(conn, result)
+    raise Redirect(_next(form, f"/shares/{underlying}"), result.summary)
+
+
+def do_sell_shares(conn, form) -> None:
+    underlying = _one(form, "underlying").upper()
+    quantity = _int(form, "quantity", label="Shares")
+    if quantity <= 0:
+        raise BadRequest("Shares must be at least 1")
+    _check_not_short(conn, underlying, quantity)
+    on = _past(_date(form, "on", date.today()), "Date")
+    lot_id = _one(form, "lot_id")
+    if lot_id:
+        left = _remaining_by_lot(conn, underlying).get(lot_id)
+        if left is None:
+            raise BadRequest("that lot does not belong to this ticker")
+        if quantity > left:
+            raise BadRequest(
+                f"that lot holds {left} shares; selling {quantity} from it is not "
+                "possible. Sell fewer, or leave the lot on the account rule."
+            )
+        lot = next((l for l in store.load_lots(conn, underlying) if l.id == lot_id), None)
+        if lot is not None and lot.acquired_on > on:
+            raise BadRequest(
+                f"that lot was acquired on {lot.acquired_on}, after the sale date {on}. "
+                "Shares cannot be sold before they were bought: date the sale on or "
+                f"after {lot.acquired_on}, or re-date the lot on the ticker page."
+            )
+    result = actions.sell_shares(
+        underlying, quantity, _decimal(form, "price", label="Price"),
+        on, fee=_decimal(form, "fee", ZERO),
+        specific_lot_ids=(lot_id,) if lot_id else (),
+    )
+    errors = store.apply(conn, result)
+    note = result.summary + (" - matching blocked: " + "; ".join(errors.values()) if errors else "")
+    raise Redirect(_next(form, f"/shares/{underlying}"), ("!" if errors else "") + note)
+
+
+def do_buy_write(conn, form) -> None:
+    underlying = _one(form, "underlying").upper()
+    contracts = _int(form, "contracts", 0) or None
+    result = actions.buy_write(
+        underlying, shares=_int(form, "shares", label="Shares"),
+        share_price=_decimal(form, "share_price", label="Share price"),
+        expiry=_date(form, "expiry", label="Call expiry"),
+        strike=_decimal(form, "strike", label="Call strike"),
+        call_price=_decimal(form, "call_price", label="Call premium"),
+        on=_past(_date(form, "on", date.today()), "Date"), contracts=contracts,
+        share_fee=_decimal(form, "share_fee", ZERO),
+        option_fee=_decimal(form, "option_fee", ZERO),
+    )
+    store.apply(conn, result)
+    raise Redirect(_next(form, f"/shares/{underlying}"), result.summary)
+
+
+def do_delete_disposal(conn, disposal_id, form) -> None:
+    try:
+        store.delete_disposal(conn, disposal_id, "removed by hand")
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from None
+    raise Redirect(_next(form, "/shares"), "Sale removed; matching rebuilt")
+
+
+def do_delete_lot(conn, lot_id, form) -> None:
+    try:
+        store.delete_lot(conn, lot_id, "removed by hand")
+    except store.InUseError as exc:
+        raise BadRequest(str(exc)) from None
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from None
+    raise Redirect(_next(form, "/shares"), "Lot removed; matching rebuilt")
+
+
+def do_redate_lot(conn, lot_id, form) -> None:
+    on = _past(_date(form, "on", label="Acquired on"), "Acquired on")
+    try:
+        store.redate_lot(conn, lot_id, on, "re-dated by hand")
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from None
+    raise Redirect(_next(form, "/shares"), f"Lot re-dated to {on}; matching rebuilt")

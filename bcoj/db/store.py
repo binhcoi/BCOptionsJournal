@@ -519,13 +519,9 @@ def apply(conn, result, note: str = "") -> dict[str, str]:
     summary = note or getattr(result, "summary", "")
 
     with conn:
-        for p in result.updated:
-            before = _row_as_dict(conn, "positions", p.id)
-            _update_position(conn, p)
-            _audit(conn, "position", p.id, "update", before, _position_dict(p), summary)
-        for p in result.created:
-            _insert_position(conn, p)
-            _audit(conn, "position", p.id, "create", None, _position_dict(p), summary)
+        # Shares first: a created position may point at a new lot (a
+        # buy-write's call), while a lot only ever points at a position that
+        # already exists. Writing positions first trips the foreign key.
         for lot in result.lots:
             _insert_lot(conn, lot)
             _audit(conn, "share_lot", lot.id, "create", None,
@@ -538,6 +534,13 @@ def apply(conn, result, note: str = "") -> dict[str, str]:
                    {"underlying": d.underlying, "quantity": d.quantity,
                     "proceeds_per_share": str(d.proceeds_per_share),
                     "kind": d.kind.value}, summary)
+        for p in result.updated:
+            before = _row_as_dict(conn, "positions", p.id)
+            _update_position(conn, p)
+            _audit(conn, "position", p.id, "update", before, _position_dict(p), summary)
+        for p in result.created:
+            _insert_position(conn, p)
+            _audit(conn, "position", p.id, "create", None, _position_dict(p), summary)
 
     if result.lots or result.disposals:
         return rebuild_allocations(conn)
@@ -614,10 +617,33 @@ def revert_audit_entry(conn, entry_id: int) -> str:
     ).fetchone()
     if entry is None:
         raise ValueError(f"no audit entry {entry_id}")
-    if entry["entity_type"] != "position":
-        raise ValueError("only position changes can be reverted automatically")
 
     before = json.loads(entry["before"]) if entry["before"] else None
+    kind = entry["entity_type"]
+    if kind in ("share_lot", "share_disposal"):
+        table = "share_lots" if kind == "share_lot" else "share_disposals"
+        with conn:
+            if entry["action"].startswith("create"):
+                conn.execute(f"DELETE FROM {table} WHERE id = ?", (entry["entity_id"],))
+                outcome = f"removed {entry['entity_id'][:8]}"
+            elif entry["action"].startswith("delete") and before:
+                _reinsert(conn, table, before)
+                outcome = f"restored {entry['entity_id'][:8]}"
+            elif entry["action"].startswith("update") and before:
+                cols = [c for c in before if c != "id"]
+                conn.execute(
+                    f"UPDATE {table} SET {','.join(c + ' = ?' for c in cols)} WHERE id = ?",
+                    tuple(before[c] for c in cols) + (entry["entity_id"],),
+                )
+                outcome = f"restored {entry['entity_id'][:8]}"
+            else:
+                raise ValueError("that share change cannot be reverted automatically")
+            _audit(conn, kind, entry["entity_id"], "revert", None, before,
+                   f"undo of audit #{entry_id}")
+        rebuild_allocations(conn)
+        return outcome
+    if kind != "position":
+        raise ValueError("that change cannot be reverted automatically")
     with conn:
         if before is None:
             conn.execute("DELETE FROM positions WHERE id = ?", (entry["entity_id"],))
@@ -633,3 +659,77 @@ def revert_audit_entry(conn, entry_id: int) -> str:
         _audit(conn, "position", entry["entity_id"], "revert", None, before,
                f"undo of audit #{entry_id}")
     return outcome
+
+
+# --------------------------------------------------------------------------
+# removing share records
+#
+# A mis-entered sale or purchase has to be removable: a sale pinned to the
+# wrong lot blocks a ticker's matching until it goes. Removal is audited with
+# the row's full contents, so it is itself reversible.
+
+
+class InUseError(ValueError):
+    """The record is referenced by something that must be dealt with first."""
+
+
+def delete_disposal(conn, disposal_id: str, note: str = "") -> None:
+    before = _row_as_dict(conn, "share_disposals", disposal_id)
+    if before is None:
+        raise ValueError("no such disposal")
+    with conn:
+        conn.execute("DELETE FROM share_disposals WHERE id = ?", (disposal_id,))
+        _audit(conn, "share_disposal", disposal_id, "delete", before, None, note)
+    rebuild_allocations(conn)
+
+
+def delete_lot(conn, lot_id: str, note: str = "") -> None:
+    before = _row_as_dict(conn, "share_lots", lot_id)
+    if before is None:
+        raise ValueError("no such lot")
+    calls = conn.execute(
+        "SELECT COUNT(*) AS n FROM positions WHERE share_lot_id = ?", (lot_id,)
+    ).fetchone()["n"]
+    if calls:
+        raise InUseError(f"{calls} call(s) are written against this lot; unlink them first")
+    pinned = conn.execute(
+        "SELECT COUNT(*) AS n FROM share_disposals WHERE specific_lot_ids LIKE ?",
+        (f"%{lot_id}%",),
+    ).fetchone()["n"]
+    if pinned:
+        raise InUseError(f"{pinned} sale(s) are pinned to this lot; remove or repin them first")
+    with conn:
+        conn.execute("DELETE FROM share_lots WHERE id = ?", (lot_id,))
+        _audit(conn, "share_lot", lot_id, "delete", before, None, note)
+    rebuild_allocations(conn)
+
+
+def redate_lot(conn, lot_id: str, on: date, note: str = "") -> None:
+    """Move a lot's acquisition date, and the assignment that produced it.
+
+    Assignments used to default to the expiry, which is still in the future
+    when a put is assigned early -- and a sale dated today then finds a lot
+    that does not exist yet. The lot and its assigning position move together
+    so the two never disagree about when the shares arrived.
+    """
+    before = _row_as_dict(conn, "share_lots", lot_id)
+    if before is None:
+        raise ValueError("no such lot")
+    with conn:
+        conn.execute("UPDATE share_lots SET acquired_on = ? WHERE id = ?", (_iso(on), lot_id))
+        _audit(conn, "share_lot", lot_id, "update", before,
+               _row_as_dict(conn, "share_lots", lot_id), note)
+        pid = before.get("assigning_position_id")
+        p = load_position(conn, pid) if pid else None
+        if p is not None and p.closed_on is not None:
+            pbefore = _position_dict(p)
+            p.closed_on = on
+            _update_position(conn, p)
+            _audit(conn, "position", p.id, "update", pbefore, _position_dict(p), note)
+    rebuild_allocations(conn)
+
+
+def _reinsert(conn, table: str, row: dict) -> None:
+    columns = ",".join(row.keys())
+    marks = ",".join("?" * len(row))
+    conn.execute(f"INSERT INTO {table} ({columns}) VALUES ({marks})", tuple(row.values()))

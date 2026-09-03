@@ -671,3 +671,22 @@ class TestAdjustedBasis(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPinnedLotDatedAfterSale(unittest.TestCase):
+    """The message must say the lot is too new, not that it is empty."""
+
+    def test_message_names_the_late_lot(self):
+        from datetime import date
+        from decimal import Decimal
+        from bcoj.domain.types import ShareDisposal, ShareLot
+        from bcoj.engine.shares import InsufficientSharesError, match
+        lot = ShareLot(id="lot-late", underlying="ACME", quantity=400,
+                       acquired_on=date(2026, 9, 18), cost_per_share=Decimal("10"))
+        sale = ShareDisposal(id="d1", underlying="ACME", quantity=400,
+                             disposed_on=date(2026, 9, 3),
+                             proceeds_per_share=Decimal("12"),
+                             specific_lot_ids=("lot-late",))
+        with self.assertRaises(InsufficientSharesError) as ctx:
+            match([lot], [sale])
+        self.assertIn("acquired on 2026-09-18, after the sale", str(ctx.exception))

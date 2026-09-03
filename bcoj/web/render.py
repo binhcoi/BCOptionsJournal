@@ -52,6 +52,7 @@ def page(title: str, body: str, flash: str = "", nav_here: str = "") -> str:
   <nav>
     {tab("/", "Positions", "positions")}
     {tab("/new", "New", "new")}
+    {tab("/shares", "Shares", "shares")}
     {tab("/expiring", "Expiring", "expiring")}
     {tab("/audit", "History", "audit")}
   </nav>

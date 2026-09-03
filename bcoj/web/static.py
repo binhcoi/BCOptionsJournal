@@ -54,6 +54,10 @@ h2 { font-size: 1.05rem; margin: 1.8rem 0 .6rem; }
 a { color: var(--accent); }
 
 .tabs { display: flex; gap: .25rem; margin: .8rem 0; flex-wrap: wrap; }
+details.inline { display: inline-block; vertical-align: middle; }
+details.inline summary { cursor: pointer; list-style: none; opacity: .5; padding: 0 .2rem; }
+details.inline summary::-webkit-details-marker { display: none; }
+details.inline[open] summary { opacity: 1; }
 
 table { width: 100%; border-collapse: collapse; background: var(--panel);
   border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
@@ -182,6 +186,11 @@ p.hint { color: var(--dim); font-size: .86rem; max-width: 68ch; }
 .st-expired  { color: var(--pos);    background: var(--pos-tint); }
 .st-assigned { color: var(--amber);  background: var(--amber-tint); }
 .st-split    { color: var(--dim);    background: var(--bg); border: 1px dashed var(--line); }
+.st-blocked  { color: var(--neg);    background: var(--neg-tint); }
+ul.suggest { list-style: none; padding: 0; }
+ul.suggest li { padding: .4rem 0; border-bottom: 1px solid var(--line); }
+ul.suggest form.inline { margin-left: .8rem; }
+h3 { font-size: .95rem; margin: 1.2rem 0 .4rem; }
 
 /* Open positions that are branches of one family share a coloured rail. */
 tr.fam > td:first-child { border-left: 3px solid var(--line); }
@@ -328,11 +337,15 @@ JS = """
       if (!fresh) { window.location.href = href; return; }
       current.replaceWith(fresh);
       if (push) history.pushState({ bcoj: href }, '', href);
+      // Bring the opened form (or the clicked row) into view, then focus
+      // without a second scroll: one movement, never a jump.
       var anchor = partial(href).anchor;
       var row = anchor ? document.getElementById(anchor) : null;
-      if (row) row.scrollIntoView({ block: 'nearest' });
+      var form = fresh.querySelector('tr.action-row');
+      if (form) form.scrollIntoView({ block: 'nearest' });
+      else if (row) row.scrollIntoView({ block: 'nearest' });
       var focus = fresh.querySelector('[autofocus]');
-      if (focus) focus.focus();
+      if (focus) focus.focus({ preventScroll: true });
       prefetchAll(fresh);
     };
 
@@ -378,6 +391,8 @@ JS = """
     document.addEventListener('mouseover', function (event) {
       var row = event.target.closest('table.positions tr[data-chain]');
       if (row) load(row.getAttribute('data-chain')).catch(function () {});
+      var link = event.target.closest('table.positions a.act, table.positions a.legs');
+      if (link) load(link.getAttribute('href')).catch(function () {});
     });
     window.addEventListener('popstate', function (event) {
       var href = (event.state && event.state.bcoj) || (window.location.pathname + window.location.search + window.location.hash);
@@ -386,15 +401,57 @@ JS = """
     });
   }
 
+  // Selling from a specific lot: cap the quantity at what that lot holds.
+  // Buy / Sell / Buy-write tabs show forms already on the page, so choosing
+  // one neither reloads nor scrolls away from where the reader was.
+  var tabs = document.querySelectorAll('a[data-form-tab]');
+  var panels = document.querySelectorAll('.share-form[data-form]');
+  if (tabs.length && panels.length) {
+    tabs.forEach(function (tab) {
+      tab.addEventListener('click', function (event) {
+        event.preventDefault();
+        var key = tab.getAttribute('data-form-tab');
+        tabs.forEach(function (t) { t.classList.toggle('here', t === tab); });
+        panels.forEach(function (p) { p.hidden = p.getAttribute('data-form') !== key; });
+        var first = document.querySelector(
+          '.share-form[data-form="' + key + '"] input:not([type=hidden]):not([value]), ' +
+          '.share-form[data-form="' + key + '"] input:not([type=hidden])');
+        if (first) first.focus({ preventScroll: true });
+        if (window.history.replaceState) {
+          window.history.replaceState(null, '', tab.getAttribute('href').replace(/#.*$/, ''));
+        }
+      });
+    });
+  }
+
+  var lotSelect = document.getElementById('f_lot_id');
+  var lotData = document.getElementById('lot-remaining');
+  var qtyInput = lotSelect && lotSelect.form
+    ? lotSelect.form.querySelector('input[name=quantity]') : null;
+  if (lotSelect && lotData && qtyInput) {
+    var remaining = {};
+    try { remaining = JSON.parse(lotData.textContent || '{}'); } catch (e) {}
+    var cap = function () {
+      var left = remaining[lotSelect.value];
+      if (left) {
+        qtyInput.max = left;
+        if (parseInt(qtyInput.value, 10) > left) qtyInput.value = left;
+        qtyInput.title = 'That lot holds ' + left;
+      } else {
+        qtyInput.removeAttribute('max'); qtyInput.title = '';
+      }
+    };
+    lotSelect.addEventListener('change', cap); cap();
+  }
+
   // Uppercase tickers as they are typed, without moving the cursor.
-  var ticker = document.getElementById('f_underlying');
-  if (ticker) {
+  document.querySelectorAll('input[name=underlying]').forEach(function (ticker) {
     ticker.addEventListener('input', function () {
       var at = ticker.selectionStart;
       ticker.value = ticker.value.toUpperCase();
       ticker.setSelectionRange(at, at);
     });
-  }
+  });
 })();
 """
 
