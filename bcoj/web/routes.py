@@ -15,7 +15,7 @@ from ..domain.types import Position
 from ..engine import actions, validate
 from ..engine.chains import ChainIndex
 from ..engine.pnl import open_cash, realized_pl
-from ..engine.risk import break_even, capital_at_risk, credit_to_recover, put_risk
+from ..engine.risk import break_even, capital_at_risk, credit_to_recover
 from ..engine.targets import target
 from . import render as r
 
@@ -88,12 +88,27 @@ def _next_friday(from_day: date | None = None) -> date:
     day = from_day or date.today()
     return day + timedelta(days=(4 - day.weekday()) % 7 or 7)
 
+ACTIONS = (
+    ("close", "Close"),
+    ("roll", "Roll"),
+    ("expire", "Expire"),
+    ("assign", "Assign"),
+    ("split", "Split"),
+)
+
+
+def _next(form, fallback: str) -> str:
+    """Where to land after an action: the page the form was on."""
+    where = _one(form, "next")
+    # Only ever a local path; never an absolute URL from the form.
+    return where if where.startswith("/") and not where.startswith("//") else fallback
+
 
 # ---------------------------------------------------------------------------
 # positions list
 
 
-def positions_page(conn, query) -> tuple[int, str]:
+def positions_page(conn, query, token: str = "") -> tuple[int, str]:
     positions = store.load_positions(conn)
     index = ChainIndex(positions)
     open_ones = [p for p in positions if p.is_open]
@@ -105,6 +120,11 @@ def positions_page(conn, query) -> tuple[int, str]:
         listed = [p for p in positions if not p.is_open and not p.is_superseded]
     else:
         listed = open_ones
+
+    # An action requested inline: its form renders directly under the row.
+    act_id = (query.get("act") or [""])[0]
+    which = (query.get("do") or [""])[0]
+    here = f"/?show={show}"
 
     queue = validate.expiring(open_ones)
     banner = ""
@@ -123,8 +143,18 @@ def positions_page(conn, query) -> tuple[int, str]:
         dte = (p.expiry - date.today()).days if p.is_open else None
         be = break_even(chain) if p.is_open else None
         tgt = target(p, carry) if p.is_open else None
+        pid = r.esc(p.id)
+
+        links = ""
+        if p.is_open:
+            links = " ".join(
+                f'<a class="act{" here" if p.id == act_id and k == which else ""}"'
+                f' href="{here}&act={pid}&do={k}">{label}</a>'
+                for k, label in ACTIONS
+            )
+
         rows.append([
-            f'<a href="/position/{r.esc(p.id)}">{r.contract(p)}</a>',
+            f'<a href="/position/{pid}">{r.contract(p)}</a>',
             r.dte_cell(dte),
             r.esc(p.status.value.title()),
             r.money(open_cash(p)),
@@ -134,7 +164,16 @@ def positions_page(conn, query) -> tuple[int, str]:
             r.money(be.price if be else None),
             r.money(tgt.price if tgt and tgt.applicable else None),
             f'{chain.leg_count}' if chain.leg_count > 1 else '<span class="dim">1</span>',
+            links,
         ])
+
+        if p.id == act_id and which and p.is_open:
+            form_html = _action_form(p, which, token, carry, back=here)
+            rows.append(
+                f'<tr class="action-row"><td colspan="11">'
+                f'<div class="action-inline"><h3>{dict(ACTIONS).get(which, which)}'
+                f' &middot; {r.contract(p)}</h3>{form_html}</div></td></tr>'
+            )
 
     totals = _portfolio_totals(conn, positions, index)
     tabs = " ".join(
@@ -147,7 +186,7 @@ def positions_page(conn, query) -> tuple[int, str]:
 <div class="tabs">{tabs}</div>
 {r.table(
     ["Contract", "DTE", "Status", "Credit", "Carry", "Realized",
-     "At risk", "Break-even", "Target", "Legs"],
+     "At risk", "Break-even", "Target", "Legs", ""],
     rows, cls="positions")}
 <p class="hint">Credit is what came in on opening. Carry is what the chain
 brought forward. They are different scopes and are never added together.</p>"""
@@ -305,6 +344,7 @@ def position_page(conn, position_id, token, query) -> tuple[int, str]:
     index = ChainIndex(positions)
     chain = index.chain(position)
     carry = index.carry(position)
+    here = f"/position/{r.esc(position.id)}"
 
     facts = [
         ("Status", r.esc(position.status.value.title())),
@@ -313,7 +353,6 @@ def position_page(conn, position_id, token, query) -> tuple[int, str]:
         ("Credit received", r.money(open_cash(position))),
         ("Chain carry", r.money(carry, dash="0.00")),
         ("Capital at risk", r.money(capital_at_risk(position))),
-        ("Put risk", r.money(put_risk(position))),
     ]
     if position.is_open:
         tgt = target(position, carry)
@@ -334,73 +373,126 @@ def position_page(conn, position_id, token, query) -> tuple[int, str]:
         f"<div><span>{r.esc(k)}</span><b>{v}</b></div>" for k, v in facts
     )
 
-    legs = [
-        [
-            (f'<a href="/position/{r.esc(l.id)}">{r.contract(l)}</a>'
-             if l.id != position.id else f"<b>{r.contract(l)}</b>"),
-            r.esc(l.opened_on),
-            r.esc(l.closed_on or "-"),
-            r.esc(l.status.value.title()),
-            r.money(open_cash(l)),
-            r.money(None if l.is_open else realized_pl(l)),
-        ]
-        for l in chain.legs
-    ]
-    timeline = f"""<h2>Chain - {chain.leg_count} leg(s)</h2>
-{r.table(["Leg", "Opened", "Closed", "Status", "Credit", "Realized"], legs)}
-<div class="totals">
-  <div><span>Chain realized</span><b>{r.money(chain.realized)}</b></div>
-  <div><span>Days</span><b>{r.num(chain.days)}</b></div>
-</div>"""
+    if position.is_open:
+        which = (query.get("do") or [""])[0]
+        actions_block = (
+            "<h2>Actions</h2>" + _action_tabs(position, which, here)
+            + _action_form(position, which, token, carry, back=here)
+        )
+    else:
+        actions_block = '<p class="dim">This position is closed. Nothing to do.</p>'
 
-    actions_block = (
-        _action_forms(position, token, query) if position.is_open
-        else '<p class="dim">This position is closed. Nothing to do.</p>'
-    )
     notes = (f"<h2>Notes</h2><p>{r.esc(position.notes)}</p>"
              if position.notes else "")
 
     body = f"""<div class="totals wide">{fact_rows}</div>
 {actions_block}
-{timeline}
+{_family_block(index, position, chain)}
 {notes}
 <p class="hint"><a href="/audit?entity={r.esc(position.id)}">History for this
 position</a></p>"""
     return 200, r.page(r.contract_text(position), body, nav_here="positions")
 
 
-def _action_forms(position, token, query) -> str:
-    """The five things you do to an open position, plus split."""
-    which = (query.get("do") or [""])[0]
+def _family_block(index, position, chain) -> str:
+    """The whole tree from the root: every roll, and both halves of every split.
+
+    A lineage shows one path and hides the sibling a split created. For a
+    position that was divided, seeing what happened to *each* half is the
+    whole point, so this shows the family and marks the path to this position.
+    """
+    family = index.family(position)
+    on_path = {leg.id for leg in chain.legs}
+    has_split = any(leg.is_superseded for leg, _ in family)
+
+    rows = []
+    for leg, depth in family:
+        halves = (sorted(index.successors(leg), key=lambda h: h.quantity)
+                  if leg.is_superseded else ())
+        indent = f' style="padding-left:{depth * 1.5}rem"' if depth else ""
+        label = r.contract(leg)
+        if leg.id == position.id:
+            label = f"<b>{label}</b>"
+        else:
+            label = f'<a href="/position/{r.esc(leg.id)}">{label}</a>'
+        if halves:
+            label += (' <span class="dim">&rarr; divided into '
+                      + " + ".join(str(h.quantity) for h in halves) + "</span>")
+
+        classes = []
+        if leg.is_superseded:
+            classes.append("superseded")
+        if leg.id not in on_path:
+            classes.append("branch")
+        cls = f' class="{" ".join(classes)}"' if classes else ""
+
+        credit = r.money(open_cash(leg))
+        if leg.is_superseded:
+            credit = (f'<s class="dim" title="now carried by the halves">'
+                      f"{r.esc(fmt(open_cash(leg)))}</s>")
+        realized = ("<span class=\"dim\">&mdash;</span>" if leg.is_superseded
+                    else r.money(None if leg.is_open else realized_pl(leg)))
+
+        rows.append(
+            f"<tr{cls}><td><span{indent}>{label}</span></td>"
+            f"<td>{r.esc(leg.opened_on)}</td>"
+            f"<td>{r.esc(leg.closed_on or '-')}</td>"
+            f"<td>{r.esc(leg.status.value.title())}</td>"
+            f"<td>{credit}</td><td>{realized}</td></tr>"
+        )
+
+    totals = [("This chain realized", r.money(chain.realized)),
+              ("Days", r.num(chain.days))]
+    if has_split:
+        everything = q2(sum((realized_pl(leg) for leg, _ in family), ZERO))
+        totals.insert(1, ("All branches realized", r.money(everything)))
+        explain = ('<p class="hint">A divided position stays as the record of '
+                   'the split and realizes nothing itself; its credit is carried '
+                   'by the halves. Greyed rows are the other branch.</p>')
+    else:
+        explain = ""
+
+    title = "Family" if has_split else "Chain"
+    return f"""<h2>{title} - {len(family)} leg(s)</h2>
+{r.table(["Leg", "Opened", "Closed", "Status", "Credit", "Realized"], rows)}
+<div class="totals">{"".join(
+    f"<div><span>{r.esc(k)}</span><b>{v}</b></div>" for k, v in totals)}</div>
+{explain}"""
+
+
+def _action_form(position, which: str, token: str, carry, back: str) -> str:
+    """The form for one action. Used inline on the positions page and on the
+    position's own page; ``back`` is where to return afterwards."""
     pid = r.esc(position.id)
     rate = Decimal("0.65") * position.quantity
-
-    def tab(key, label):
-        cls = ' class="here"' if which == key else ""
-        return f'<a href="/position/{pid}?do={key}"{cls}>{label}</a>'
-
-    tabs = " ".join([
-        tab("close", "Close"), tab("roll", "Roll"), tab("expire", "Expire"),
-        tab("assign", "Assign"), tab("split", "Split"),
-    ])
+    tgt = target(position, carry)
+    # The profit target is the natural default for a buy-back price: it is
+    # what you were aiming at. Blank when the chain has no target to aim for.
+    suggested = str(tgt.price) if tgt.applicable else ""
+    nxt = r.hidden("next", back)
 
     if which == "close":
-        inner = r.form(f"/position/{pid}/close", "".join([
+        return r.form(f"/position/{pid}/close", nxt + "".join([
             r.field("Closed on", "closed_on", r.today_iso(), kind="date",
                     required=True),
-            r.field("Close price / share", "close_price", "", kind="number",
-                    step="0.01", required=True, autofocus=True),
+            r.field("Close price / share", "close_price", suggested,
+                    kind="number", step="0.01", required=True, autofocus=True,
+                    hint="Pre-filled with the 50% target" if suggested else ""),
             r.field("Fee", "close_fee", str(q2(rate)), kind="number",
                     step="0.01"),
         ]), token, submit="Close position", cls="grid")
-    elif which == "roll":
-        inner = r.form(f"/position/{pid}/roll", "".join([
+
+    if which == "roll":
+        closing = r.fieldset("1. Close this leg", "".join([
             r.field("Rolled on", "on", r.today_iso(), kind="date",
                     required=True),
-            r.field("Buy-back price", "close_price", "", kind="number",
-                    step="0.01", required=True, autofocus=True),
+            r.field("Buy-back price", "close_price", suggested, kind="number",
+                    step="0.01", required=True, autofocus=True,
+                    hint=f"Closes {r.contract_text(position)}"),
             r.field("Buy-back fee", "close_fee", str(q2(rate)), kind="number",
                     step="0.01"),
+        ]))
+        opening = r.fieldset("2. Open the new leg", "".join([
             r.field("New expiry", "new_expiry",
                     _next_friday(position.expiry).isoformat(), kind="date",
                     required=True),
@@ -413,41 +505,55 @@ def _action_forms(position, token, query) -> str:
             r.field("Contracts", "new_quantity", str(position.quantity),
                     kind="number", step="1",
                     hint="Rolls often resize; state it explicitly"),
-        ]), token, submit="Roll", cls="grid")
-    elif which == "expire":
-        inner = r.form(f"/position/{pid}/expire", "".join([
+        ]), hint=f"Same side and right as the leg being closed: "
+                 f"{position.direction.value.lower()} "
+                 f"{position.right.value.lower()}s.")
+        return r.form(f"/position/{pid}/roll", nxt + closing + opening, token,
+                      submit="Roll", cls="two-part")
+
+    if which == "expire":
+        return r.form(f"/position/{pid}/expire", nxt + "".join([
             r.field("Expired on", "on", position.expiry.isoformat(),
                     kind="date", required=True),
         ]), token, submit="Expired worthless", cls="grid")
-    elif which == "assign":
+
+    if which == "assign":
         acquiring = (position.direction is Direction.SHORT) == (
             position.right is Right.PUT
         )
         moves = (f"acquire {position.shares} shares at {fmt(position.strike)}"
                  if acquiring else
                  f"deliver {position.shares} shares at {fmt(position.strike)}")
-        inner = f"""<p class="callout">This will also
-        <b>{r.esc(moves)}</b>, so the stock side cannot be forgotten.</p>
-{r.form(f"/position/{pid}/assign", "".join([
+        return f"""<p class="callout">This will also <b>{r.esc(moves)}</b>,
+        so the stock side cannot be forgotten.</p>
+{r.form(f"/position/{pid}/assign", nxt + "".join([
     r.field("Assigned on", "on", position.expiry.isoformat(), kind="date",
             required=True),
     r.field("Option fee", "close_fee", "0.00", kind="number", step="0.01"),
     r.field("Share fee", "share_fee", "0.00", kind="number", step="0.01"),
 ]), token, submit="Record assignment", cls="grid")}"""
-    elif which == "split":
-        inner = f"""<p class="hint">Divide this position so the halves can take
-        different paths - part assigned, the rest rolled on. Chain history is
-        divided pro-rata, not duplicated.</p>
-{r.form(f"/position/{pid}/split", "".join([
+
+    if which == "split":
+        return f"""<p class="hint">Divide this position so the halves can take
+        different paths - part assigned, the rest rolled on. Both halves keep
+        the open date and price; chain history is divided pro-rata between
+        them, and this record stays as the account of the split.</p>
+{r.form(f"/position/{pid}/split", nxt + "".join([
     r.field("Contracts to peel off", "quantity", "",
             kind="number", step="1", required=True, autofocus=True,
             hint=f"Between 1 and {position.quantity - 1}"),
     r.field("On", "on", r.today_iso(), kind="date", required=True),
 ]), token, submit="Split", cls="grid")}"""
-    else:
-        inner = '<p class="hint">Pick an action.</p>'
 
-    return f'<h2>Actions</h2><div class="tabs">{tabs}</div>{inner}'
+    return '<p class="hint">Pick an action.</p>'
+
+
+def _action_tabs(position, which: str, base: str) -> str:
+    links = []
+    for key, label in ACTIONS:
+        cls = ' class="here"' if which == key else ""
+        links.append(f'<a href="{base}?do={key}"{cls}>{label}</a>')
+    return '<div class="tabs">' + " ".join(links) + "</div>"
 
 
 # ---------------------------------------------------------------------------
@@ -471,7 +577,8 @@ def do_close(conn, position_id, form) -> None:
     )
     store.apply(conn, result)
     pl = realized_pl(result.updated[0])
-    raise Redirect(f"/position/{position_id}", f"Closed - realized {fmt(pl)}")
+    raise Redirect(_next(form, f"/position/{position_id}"),
+                   f"Closed {r.contract_text(position)} - realized {fmt(pl)}")
 
 
 def do_expire(conn, position_id, form) -> None:
@@ -479,8 +586,8 @@ def do_expire(conn, position_id, form) -> None:
     result = actions.expire(position, _date(form, "on", position.expiry))
     store.apply(conn, result)
     pl = realized_pl(result.updated[0])
-    raise Redirect(f"/position/{position_id}",
-                   f"Expired worthless - kept {fmt(pl)}")
+    raise Redirect(_next(form, f"/position/{position_id}"),
+                   f"{r.contract_text(position)} expired worthless - kept {fmt(pl)}")
 
 
 def do_assign(conn, position_id, form) -> None:
@@ -492,11 +599,11 @@ def do_assign(conn, position_id, form) -> None:
         share_fee=_decimal(form, "share_fee", ZERO),
     )
     errors = store.apply(conn, result)
-    note = result.summary
+    note = f"{r.contract_text(position)} {result.summary}"
     if errors:
         note = "!" + note + " - share matching blocked: " + \
                "; ".join(errors.values())
-    raise Redirect(f"/position/{position_id}", note)
+    raise Redirect(_next(form, f"/position/{position_id}"), note)
 
 
 def do_roll(conn, position_id, form) -> None:
@@ -517,8 +624,11 @@ def do_roll(conn, position_id, form) -> None:
         successor, store.load_positions(conn), _fee_rate(conn)
     )
     if validate.errors(problems):
+        back = _next(form, f"/position/{position_id}")
+        joiner = "&" if "?" in back else "?"
         raise Redirect(
-            f"/position/{position_id}?do=roll",
+            f"{back}{joiner}act={position_id}&do=roll" if back.startswith("/?")
+            else f"/position/{position_id}?do=roll",
             "!Roll refused: " + "; ".join(
                 p.message for p in validate.errors(problems)
             ),
@@ -528,9 +638,9 @@ def do_roll(conn, position_id, form) -> None:
     index = ChainIndex(store.load_positions(conn))
     chain = index.chain(store.load_position(conn, successor.id))
     raise Redirect(
-        f"/position/{successor.id}",
-        f"{result.summary}. Chain now carries {fmt(chain.carry)},"
-        f" net credit {fmt(chain.net_credit)}",
+        _next(form, f"/position/{successor.id}"),
+        f"{r.contract_text(position)} {result.summary}. Chain now carries "
+        f"{fmt(chain.carry)}, net credit {fmt(chain.net_credit)}",
     )
 
 
@@ -544,9 +654,9 @@ def do_split(conn, position_id, form) -> None:
     store.apply(conn, result)
     first, second = result.created
     raise Redirect(
-        f"/position/{first.id}",
-        f"{result.summary}. Both halves are now open;"
-        f" the other is {second.quantity} contracts",
+        _next(form, f"/position/{first.id}"),
+        f"{r.contract_text(position)} {result.summary}. Both halves are open"
+        f" and can now take different paths",
     )
 
 

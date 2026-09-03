@@ -495,3 +495,78 @@ class TestExpiryQueue(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSplitLinking(unittest.TestCase):
+    """A split child links to its split parent only, so the tree is stable."""
+
+    def _rolled_then_split(self):
+        prior = position(
+            id="prior", open_price=D("1.00"), open_fee=D("0"),
+            close_price=D("2.00"), close_fee=D("0"),
+            status=Status.ROLLED, closed_on=date(2026, 1, 5),
+        )
+        parent = position(id="parent", rolled_from_id="prior",
+                          opened_on=date(2026, 1, 5))
+        result = actions.split(parent, 4, ids=("a", "b"))
+        return prior, parent, result
+
+    def test_children_carry_only_the_split_link(self):
+        _, _, result = self._rolled_then_split()
+        for child in result.created:
+            self.assertEqual(child.split_from_id, "parent")
+            self.assertIsNone(child.rolled_from_id)
+
+    def test_a_position_never_has_both_links(self):
+        with self.assertRaises(ValueError):
+            position(rolled_from_id="x", split_from_id="y", split_from_quantity=2)
+
+    def test_the_tombstone_stays_in_the_lineage_after_a_rolled_parent(self):
+        """Before the fix a rolled-then-split parent vanished from its
+        children's lineage, because the roll link was preferred."""
+        prior, parent, result = self._rolled_then_split()
+        index = ChainIndex([prior] + result.positions)
+        lineage = [leg.id for leg in index.lineage(result.created[0])]
+        self.assertEqual(lineage, ["prior", "parent", "a"])
+
+    def test_carry_flows_through_the_tombstone_unchanged(self):
+        prior, parent, result = self._rolled_then_split()
+        index = ChainIndex([prior] + result.positions)
+        # prior realized -1,000 (100 credit, 200 debit x10? no: 1.00 -> 2.00 on
+        # 10 contracts is 1,000 - 2,000 = -1,000), split 4/10 and 6/10.
+        self.assertEqual(index.carry(parent), D("-1000.00"))
+        self.assertEqual(index.carry(result.created[0]), D("-400.00"))
+        self.assertEqual(index.carry(result.created[1]), D("-600.00"))
+
+    def test_family_shows_both_halves_under_the_tombstone(self):
+        prior, parent, result = self._rolled_then_split()
+        a, b = result.created
+        rolled = actions.roll(
+            b, close_price=D("1.00"), new_expiry=date(2026, 4, 17),
+            new_strike=D("30"), new_price=D("2.00"), on=date(2026, 2, 1),
+            new_id_="b2",
+        )
+        everything = [prior] + result.positions[:1] + [a] + rolled.positions
+        index = ChainIndex(everything)
+
+        family = index.family(a)
+        ids = [(leg.id, depth) for leg, depth in family]
+        # Rolls stay flat; the split's halves indent one level under the
+        # tombstone, smaller first. Depth-first, so b's own roll (b2) sits
+        # under b rather than after both halves.
+        self.assertEqual(
+            ids, [("prior", 0), ("parent", 0), ("a", 1), ("b", 1), ("b2", 1)]
+        )
+
+    def test_roll_successor_assumes_a_closing_fee(self):
+        """Leaving it at zero skews the profit target by the fee."""
+        result = actions.roll(
+            position(), close_price=D("1.00"), new_expiry=date(2026, 4, 17),
+            new_strike=D("33"), new_price=D("2.00"), on=D and date(2026, 2, 1),
+            new_fee=D("6.50"),
+        )
+        self.assertEqual(result.created[0].close_fee, D("6.50"))
+
+    def test_chain_days_counts_so_far_while_open(self):
+        head = position(opened_on=date.today())
+        self.assertEqual(ChainIndex([head]).chain(head).days, 0)

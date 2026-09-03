@@ -462,7 +462,7 @@ strategy, direction and ticker; CSV and JSON export plus a full SQLite backup.
 | # | Deliverable | State |
 | --- | --- | --- |
 | M1 | Engine (P/L, chains, targets, break-even, share matching, adjusted basis) + faithful importer + reconciliation + storage. No UI | **Done.** 119 tests. A hand-computed synthetic fixture reconciles exactly, and a real five-year export reconciles to the cent bar one 25-cent fee typo |
-| ~~M2~~ | ~~Manual entry, positions list, validation, expiry queue, audit trail~~ | **Done.** 196 tests. Web UI over stdlib only; split divides chain history pro-rata; every mutation audited and revertible |
+| ~~M2~~ | ~~Manual entry, positions list, validation, expiry queue, audit trail~~ | **Done.** 213 tests. Web UI over stdlib only; split divides chain history pro-rata; every mutation audited and revertible |
 | M3 | Shares: lots, buy-write, outright buy/sell, covered-call linking, wheel view, true total P/L | Next. The actions exist and are tested; they need pages |
 | M4 | Decision support: roll panel, break-even, obligation calendar, concentration | |
 | M5 | Reporting, dashboard, filtering, saved views, notes and tags, export | |
@@ -525,3 +525,9 @@ authoritative check, and it is not in this repository because the data isn't.
 | **A split keeps the parent as a `SPLIT` record** | A journal should not delete something that happened; the tombstone realizes nothing, so no total moves |
 | **Split divides chain carry pro-rata by quantity** | Duplicating it onto both halves would double-count and wreck break-even |
 | **Refused actions are 400, not 500** | "Split must be between 1 and 9" is the user's mistake, not a crash |
+| **Actions happen on the positions page** | Close / roll / expire / assign / split open inline beneath the row; the detail page is for reading a chain, not for acting |
+| **Close and buy-back prices pre-fill with the profit target** | It is what you were aiming at; blank when the chain has nothing to aim for |
+| **A roll form is two labelled trades** | "Close this leg" then "Open the new leg" -- it is two fills, and the form says so |
+| **A split child links only to its split parent** | One link, never both, enforced on the type. The tombstone stays in every lineage regardless of the parent's own history, so the tree's shape no longer depends on what came before |
+| **A divided position shows its whole family** | Both halves and what became of each, smaller half first, other branch greyed; "this chain" and "all branches" realized shown separately |
+| **Put risk is not shown beside capital at risk** | Identical for a short put; the former exists only to reconcile the legacy column |

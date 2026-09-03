@@ -501,3 +501,113 @@ class TestPassword(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestInlineActions(WebTestCase):
+    """Actions happen on the positions page itself, not on a separate one."""
+
+    def _fresh(self, ticker):
+        self.add_position(underlying=ticker)
+        return [p for p in self.positions()
+                if p.underlying == ticker.upper() and p.is_open][0]
+
+    def test_rows_carry_action_links(self):
+        self._fresh("lnk")
+        body = self.get("/")
+        for action in ("close", "roll", "expire", "assign", "split"):
+            with self.subTest(action=action):
+                self.assertIn(f"&do={action}", body)
+
+    def test_requesting_an_action_opens_its_form_under_the_row(self):
+        position = self._fresh("inl")
+        body = self.get(f"/?show=open&act={position.id}&do=close")
+        self.assertIn('class="action-row"', body)
+        self.assertIn("Close price / share", body)
+        # And the form returns to this page, not to a detail page.
+        self.assertIn('name="next" value="/?show=open"', body)
+
+    def test_close_price_is_prefilled_with_the_target(self):
+        position = self._fresh("pre")
+        body = self.get(f"/?show=open&act={position.id}&do=close")
+        # 10 contracts at 3.00 less 6.50 fee is 2,993.50; half of it back at
+        # 6.50 closing fee is a 1.49 buy-back.
+        self.assertIn('name="close_price" id="f_close_price"\n         value="1.49"',
+                      body)
+        self.assertIn("Pre-filled with the 50% target", body)
+
+    def test_roll_form_is_two_labelled_trades(self):
+        position = self._fresh("two")
+        body = self.get(f"/?show=open&act={position.id}&do=roll")
+        self.assertIn("<legend>1. Close this leg</legend>", body)
+        self.assertIn("<legend>2. Open the new leg</legend>", body)
+        self.assertLess(body.index("1. Close this leg"),
+                        body.index("2. Open the new leg"))
+
+    def test_submitting_inline_returns_to_the_positions_page(self):
+        position = self._fresh("ret")
+        status, location, _ = self.post(
+            f"/position/{position.id}/close",
+            {"closed_on": "2026-02-10", "close_price": "1.50",
+             "next": "/?show=open"},
+        )
+        self.assertEqual(status, 303)
+        self.assertTrue(location.startswith("/?show=open"))
+        self.assertIn("RET", location)   # the flash names the contract
+
+    def test_next_must_be_a_local_path(self):
+        position = self._fresh("ext")
+        status, location, _ = self.post(
+            f"/position/{position.id}/expire",
+            {"on": "2026-03-20", "next": "https://evil.example/"},
+        )
+        self.assertEqual(status, 303)
+        self.assertTrue(location.startswith("/position/"))
+
+    def test_put_risk_no_longer_duplicates_capital_at_risk(self):
+        position = self._fresh("dup")
+        body = self.get(f"/position/{position.id}")
+        self.assertIn("Capital at risk", body)
+        self.assertNotIn("Put risk", body)
+
+
+class TestFamilyTree(WebTestCase):
+    def test_split_shows_both_halves_and_what_became_of_each(self):
+        self.add_position(underlying="fam")
+        parent = [p for p in self.positions() if p.underlying == "FAM"][0]
+        self.post(f"/position/{parent.id}/split", {"quantity": "4",
+                                                    "on": "2026-02-01"})
+        halves = sorted([p for p in self.positions()
+                         if p.underlying == "FAM" and p.is_open],
+                        key=lambda p: p.quantity)
+        four, six = halves
+        self.post(f"/position/{four.id}/assign",
+                  {"on": "2026-03-20", "close_fee": "0", "share_fee": "0"})
+        self.post(f"/position/{six.id}/roll",
+                  {"on": "2026-02-20", "close_price": "2.00",
+                   "new_expiry": "2026-04-17", "new_strike": "33",
+                   "new_price": "2.50", "new_quantity": "6"})
+
+        # From the assigned half, the whole family is visible.
+        body = self.get(f"/position/{four.id}")
+        self.assertIn("Family - 4 leg(s)", body)
+        self.assertIn("divided into 4 + 6", body)
+        self.assertIn('class="superseded"', body)
+        self.assertIn("All branches realized", body)
+        # The other branch is present and greyed, with its successor.
+        self.assertIn('class="branch"', body)
+        self.assertIn("2026-04-17", body)
+
+    def test_a_plain_chain_is_still_called_a_chain(self):
+        self.add_position(underlying="pln")
+        position = [p for p in self.positions() if p.underlying == "PLN"][0]
+        body = self.get(f"/position/{position.id}")
+        self.assertIn("Chain - 1 leg(s)", body)
+        self.assertNotIn("All branches", body)
+
+    def test_days_show_while_open(self):
+        self.add_position(underlying="dys",
+                          opened_on=(date.today() - timedelta(days=12)).isoformat(),
+                          expiry=(date.today() + timedelta(days=30)).isoformat())
+        position = [p for p in self.positions() if p.underlying == "DYS"][0]
+        body = self.get(f"/position/{position.id}")
+        self.assertIn("<span>Days</span><b>12</b>", body)

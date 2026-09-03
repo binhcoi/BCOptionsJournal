@@ -125,6 +125,12 @@ def form(action: str, body: str, token: str, submit: str = "Save",
 </form>"""
 
 
+def fieldset(legend: str, body: str, hint: str = "") -> str:
+    note = f'<p class="hint">{esc(hint)}</p>' if hint else ""
+    return (f'<fieldset class="grid"><legend>{esc(legend)}</legend>'
+            f"{note}{body}</fieldset>")
+
+
 def datalist(list_id: str, values) -> str:
     items = "".join(f'<option value="{esc(v)}">' for v in values)
     return f'<datalist id="{esc(list_id)}">{items}</datalist>'
@@ -146,9 +152,14 @@ def problems_block(problems) -> str:
 
 
 def table(headers, rows, cls: str = "") -> str:
+    """Rows are lists of cells. A row given as a string is emitted verbatim,
+    which is how an action form gets slotted in directly beneath its position."""
     head = "".join(f"<th>{esc(h)}</th>" for h in headers)
-    body = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>"
-                   for r in rows)
+    body = "".join(
+        r if isinstance(r, str)
+        else "<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>"
+        for r in rows
+    )
     if not rows:
         body = (f'<tr><td colspan="{len(headers)}" class="dim">'
                 "nothing here yet</td></tr>")
@@ -165,7 +176,7 @@ def strike_text(value) -> str:
 def contract(position) -> str:
     """One contract with each part visually distinct.
 
-    Run together as plain text -- "-10 SOFI 2026-09-18 20.00P" -- the quantity
+    Run together as plain text -- "-10 ACME 2026-09-18 20.00P" -- the quantity
     disappears into the digits around it. So it gets its own pill, signed and
     coloured by side. The rest stays in the conventional order: ticker, expiry,
     strike, right.

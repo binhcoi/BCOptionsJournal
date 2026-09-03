@@ -10,7 +10,7 @@ See [plan.md](plan.md) for the design and [docs/legacy-format.md](docs/legacy-fo
 for the import format.
 
 > **Status: M2.** The P/L engine, importer, reconciliation, storage and the
-> entry UI are done and tested (196 tests). Share pages and reporting are next.
+> entry UI are done and tested (213 tests). Share pages and reporting are next.
 
 ---
 
@@ -40,7 +40,7 @@ A spreadsheet can track option premium well enough. What it cannot do:
 Python 3.10+ and the standard library. Nothing to install.
 
 ```bash
-python3 -m unittest discover -s tests -q          # 196 tests
+python3 -m unittest discover -s tests -q          # 213 tests
 python3 -m bcoj.web --db journal.db               # then open the URL it prints
 ```
 

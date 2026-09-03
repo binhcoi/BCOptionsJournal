@@ -234,6 +234,9 @@ def roll(
         opened_on=when,
         open_price=q2(new_price),
         open_fee=q2(new_fee),
+        # Assume closing will cost what opening did, until it actually closes.
+        # Leaving this at zero skews the profit target by the fee.
+        close_fee=q2(new_fee),
         status=Status.OPEN,
         rolled_from_id=position.id,
         share_lot_id=position.share_lot_id,
@@ -305,7 +308,10 @@ def split(
                 position.close_fee * Decimal(qty) / Decimal(total)
             ),
             status=Status.OPEN,
-            rolled_from_id=position.rolled_from_id,
+            # Only the split link. The parent keeps its own roll history and
+            # passes it down through the carry, so a child needs no second
+            # pointer -- and having one would let the tombstone drop out of
+            # the tree whenever the parent had itself been rolled.
             split_from_id=position.id,
             split_from_quantity=total,
             share_lot_id=position.share_lot_id,

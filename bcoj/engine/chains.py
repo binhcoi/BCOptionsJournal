@@ -120,11 +120,11 @@ class Chain:
         return self.head.closed_on
 
     @property
-    def days(self) -> int | None:
-        """Duration of the whole chain, not of one leg."""
-        end = self.head.closed_on
-        if end is None:
-            return None
+    def days(self) -> int:
+        """Duration of the whole chain, not of one leg. Days so far if open."""
+        from datetime import date
+
+        end = self.head.closed_on or date.today()
         return (end - self.root.opened_on).days
 
 
@@ -212,3 +212,35 @@ class ChainIndex:
 
     def chains(self) -> tuple[Chain, ...]:
         return tuple(self.chain(head) for head in self.heads())
+
+    def root(self, position: Position) -> Position:
+        return self.lineage(position)[0]
+
+    def family(self, position: Position) -> tuple[tuple[Position, int], ...]:
+        """Everything descended from this position's root, as (leg, depth).
+
+        A lineage shows one path -- ancestors of one leg. A family shows the
+        whole tree, which is what a split needs: both halves and whatever
+        happened to each of them afterwards, not just the half you clicked on.
+        Depth-first, so each half's descendants sit under it.
+        """
+        out: list[tuple[Position, int]] = []
+        seen: set[str] = set()
+
+        def walk(node: Position, depth: int) -> None:
+            if node.id in seen:
+                return
+            seen.add(node.id)
+            out.append((node, depth))
+            # Deterministic: a split's halves share a date, and dict order
+            # follows UUIDs. Smaller half first -- the part peeled off.
+            children = sorted(
+                self.successors(node),
+                key=lambda p: (p.opened_on, p.quantity, p.id),
+            )
+            # A roll continues at the same depth; a split's halves indent.
+            for child in children:
+                walk(child, depth + (1 if child.split_from_id == node.id else 0))
+
+        walk(self.root(position), 0)
+        return tuple(out)

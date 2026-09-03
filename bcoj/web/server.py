@@ -70,7 +70,7 @@ class App:
     # --- handlers -------------------------------------------------------
 
     def _positions(self, conn, query, form, args):
-        return routes.positions_page(conn, query)
+        return routes.positions_page(conn, query, self.csrf)
 
     def _new_form(self, conn, query, form, args):
         return routes.new_position_form(conn, self.csrf)

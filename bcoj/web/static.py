@@ -145,6 +145,35 @@ ul.problems li {
 ul.problems li.error { border-color: var(--neg); color: var(--neg); }
 
 p.hint { color: var(--dim); font-size: .86rem; max-width: 68ch; }
+
+/* Row-level action links, and the form that opens beneath a row. */
+td a.act {
+  font-size: .82rem; margin-right: .5rem; text-decoration: none;
+  color: var(--dim);
+}
+td a.act:hover { color: var(--accent); text-decoration: underline; }
+td a.act.here { color: var(--accent); font-weight: 600; }
+tr.action-row > td { padding: 0; background: var(--bg); white-space: normal; }
+tr.action-row:hover { background: var(--bg); }
+.action-inline { padding: .8rem .9rem 1rem; border-left: 3px solid var(--accent); }
+.action-inline h3 { margin: 0 0 .6rem; font-size: .95rem; }
+.action-inline .callout, .action-inline p.hint { margin-top: 0; }
+
+/* A roll is two trades. Show it as two. */
+form.two-part { display: grid; gap: .8rem; }
+fieldset.grid { margin: 0; min-width: 0; }
+legend {
+  font-size: .78rem; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--dim); font-weight: 700; padding: 0 .3rem;
+}
+fieldset p.hint { grid-column: 1 / -1; margin: 0; }
+
+/* The family tree: greyed rows are the other branch of a split; a struck
+   credit belongs to a divided position and is now carried by its halves. */
+tr.superseded td { color: var(--dim); }
+tr.branch td { color: var(--dim); }
+tr.branch a { color: var(--dim); }
+s { text-decoration-color: var(--dim); }
 kbd { border: 1px solid var(--line); border-bottom-width: 2px;
   border-radius: 4px; padding: 0 .3rem; font-size: .85em; background: var(--bg); }
 """

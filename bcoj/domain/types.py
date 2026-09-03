@@ -51,6 +51,10 @@ class Position:
             )
         if self.multiplier <= 0:
             raise ValueError(f"{self.id}: multiplier must be positive")
+        if self.rolled_from_id and self.split_from_id:
+            raise ValueError(
+                f"{self.id}: a position descends from a roll or a split, never both"
+            )
 
     @property
     def signed_quantity(self) -> int:
