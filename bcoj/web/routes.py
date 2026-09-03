@@ -111,9 +111,10 @@ def _next(form, fallback: str) -> str:
 
 # The first column is a gutter: it holds the row markers (the arrow for the
 # position a page is about) so they never push the contract out of line.
-POSITION_COLUMNS = ["", "Contract", "DTE", "Status", "Open price", "Close price",
-                    "Credit", "Closing", "Realized", "Carry", "Break-even",
-                    "At risk", "Legs"]
+POSITION_COLUMNS = ["", "Contract", "DTE", "Status", ("Open", "Open price / share"),
+                    ("Close", "Close price / share"), "Credit", "Closing", "Realized",
+                    "Carry", ("B/E", "Break-even for the chain"),
+                    ("At risk", "Capital at risk"), "", "Legs"]
 
 
 def _position_row(p, index, *, here: str = "/", act_id: str = "", which: str = "",
@@ -149,11 +150,12 @@ def _position_row(p, index, *, here: str = "/", act_id: str = "", which: str = "
     if p.is_superseded:
         halves = sorted(index.successors(p), key=lambda h: h.quantity)
         if halves:
-            note = ('<span class="fam-note">&rarr; split into '
-                    + " + ".join(str(h.quantity) for h in halves) + "</span>")
+            parts = [str(h.quantity) for h in halves]
+            note = (f'<span class="fam-note" title="split into {" + ".join(parts)}">'
+                    f'&#x2442; {"+".join(parts)}</span>')
     elif siblings > 1 and p.is_open and not in_chain:
-        note = (f'<span class="fam-note" title="This chain has {siblings} open'
-                f' positions">&#x2442; 1 of {siblings} open in this chain</span>')
+        note = (f'<span class="fam-note" title="1 of {siblings} open in this chain">'
+                f"&#x2442;{siblings}</span>")
 
     family_size = len(index.family(p))
 
@@ -164,15 +166,13 @@ def _position_row(p, index, *, here: str = "/", act_id: str = "", which: str = "
 
     actions_html = ""
     if with_actions and p.is_open:
-        links = []
-        for k, label in ACTIONS:
-            is_open = p.id == act_id and k == which
-            # The open action's own link closes it again.
-            href = (f"{here}{chain_q}{anchor}" if is_open
-                    else f"{here}{chain_q}&act={pid}&do={k}{anchor}")
-            links.append(f'<a class="act act-{k}{" here" if is_open else ""}"'
-                         f' href="{href}">{label}</a>')
-        actions_html = '<div class="row-actions">' + "".join(links) + "</div>"
+        # One small button per row. It opens the Close form; the form's own
+        # tabs switch to any other action. Clicking it again closes the form.
+        is_open = bool(p.id == act_id and which)
+        href = (f"{here}{chain_q}{anchor}" if is_open
+                else f"{here}{chain_q}&act={pid}&do=close{anchor}")
+        actions_html = (f'<a class="act act-close{" here" if is_open else ""}" href="{href}"'
+                        ' title="Close, roll, expire, assign or split">Close</a>')
 
     if in_chain and not (current and expanded):
         legs_html = ""      # the chain is what is being shown
@@ -184,7 +184,7 @@ def _position_row(p, index, *, here: str = "/", act_id: str = "", which: str = "
         legs_html = (f'<a class="legs{" here" if expanded else ""}"'
                      f' href="{target_url}" title="{title}">{text}</a>')
     else:
-        legs_html = '<span class="dim">1</span>'
+        legs_html = ""        # a lone position has no chain to show
 
     # Always a link, so an expanded row still leads to its page. The row being
     # viewed is marked by an arrow in the gutter, not inline.
@@ -229,7 +229,7 @@ def _position_row(p, index, *, here: str = "/", act_id: str = "", which: str = "
     return (
         f'<tr id="row-{pid}"{cls}{toggle}>'
         f'<td class="gutter">{gutter}</td>'
-        f"<td>{label}{note}{actions_html}</td>"
+        f'<td class="main">{label}{note}</td>'
         f"<td>{r.dte_cell(dte)}</td>"
         f"<td>{r.status_badge(p.status)}</td>"
         f'<td class="unit">{r.esc(price(p.open_price))}</td>'
@@ -240,6 +240,7 @@ def _position_row(p, index, *, here: str = "/", act_id: str = "", which: str = "
         f'<td>{r.money(carry, dash="0.00")}</td>'
         f"<td>{r.money(be.price if be else None)}</td>"
         f"<td>{r.money(capital_at_risk(p))}</td>"
+        f'<td class="acts">{actions_html}</td>'
         f"<td>{legs_html}</td></tr>"
     )
 
@@ -263,11 +264,20 @@ def _chain_head_row(index, legs, clicked, here) -> str:
 
 
 def _action_row(p, index, which, token, here) -> str:
-    form_html = _action_form(p, which, token, index.carry(p), back=here)
+    """Every action form for one row, with tabs to switch between them in
+    place. ``here`` already carries the page's chain state."""
+    pid = r.esc(p.id)
+    dismiss = f"{here}#row-{pid}"
+    panels = _action_panels(
+        p, which, token, index.carry(p), back=here, box_id=f"actions-{pid}",
+        tab_href=lambda key: f"{here}&act={pid}&do={key}#row-{pid}",
+        dismiss_href=dismiss, dismiss_attrs="", panel_close=False,
+    )
+    close = (f'<a class="close-form" href="{dismiss}" '
+             'title="Close this form" aria-label="Close this form">&times;</a>')
     return (
         f'<tr class="action-row"><td colspan="{len(POSITION_COLUMNS)}">'
-        f'<div class="action-inline"><h3>{dict(ACTIONS).get(which, which)}'
-        f' &middot; {r.contract(p)}</h3>{form_html}</div></td></tr>'
+        f'<div class="action-inline">{close}<h3>{r.contract(p)}</h3>{panels}</div></td></tr>'
     )
 
 
@@ -323,31 +333,52 @@ def positions_page(conn, query, token: str = "") -> tuple[int, str]:
     act_q = f"&act={r.esc(act_id)}&do={r.esc(which)}" if act_id and which else ""
     chain_q = f"&chain={r.esc(chain_id)}" if chain_id else ""
 
+    # Where the expanded chain and the open form land in ``rows``: the script
+    # asks for just those slices, so expanding a chain in a 500-row list moves
+    # a few kilobytes rather than the whole table again.
     rows = []
+    block = (0, 0)
+    act_row_at = action_at = None
     for p in listed:
         if p.id in expanded_ids and p.id != chain_id:
             continue  # rendered as part of the expanded chain
 
         if p.id == chain_id:
+            start = len(rows)
             rows.append(_chain_head_row(index, expanded_legs, p, here + act_q))
             for leg in expanded_legs:
+                if leg.id == act_id:
+                    act_row_at = len(rows)
                 rows.append(_position_row(
                     leg, index, here=here, act_id=act_id, which=which,
                     chain_id=chain_id, expanded=(leg.id == chain_id), in_chain=True,
                     current=(leg.id == chain_id), collapse_to=chain_id,
                 ))
                 if leg.id == act_id and which and leg.is_open:
+                    action_at = len(rows)
                     rows.append(_action_row(leg, index, which, token, here + chain_q))
+            block = (start, len(rows))
             continue
 
         root_id = roots.get(p.id)
+        if p.id == act_id:
+            act_row_at = len(rows)
         rows.append(_position_row(
             p, index, here=here, act_id=act_id, which=which, chain_id=chain_id,
             siblings=size.get(root_id, 0) if root_id else 0,
             rail=rail_of.get(root_id),
         ))
         if p.id == act_id and which and p.is_open:
+            action_at = len(rows)
             rows.append(_action_row(p, index, which, token, here + chain_q))
+
+    partial = (query.get("partial") or [""])[0]
+    if partial == "block":
+        return 200, "".join(rows[block[0]:block[1]])
+    if partial == "action":
+        if act_row_at is None or action_at is None:
+            return 200, ""
+        return 200, rows[act_row_at] + rows[action_at]
 
     totals = _portfolio_totals(conn, positions, index)
     tabs = " ".join(
@@ -356,7 +387,7 @@ def positions_page(conn, query, token: str = "") -> tuple[int, str]:
     )
 
     table_html = r.table(POSITION_COLUMNS, rows, cls="positions")
-    if (query.get("partial") or [""])[0] == "table":
+    if partial == "table":
         # Just the table, for the script that swaps it in place.
         return 200, table_html
 
@@ -425,32 +456,35 @@ def new_position_form(conn, token, form=None, problems=()) -> tuple[int, str]:
     except ValueError:
         default_fee = str(rate)
 
-    fields = "".join([
-        r.field("Ticker", "underlying", _one(form, "underlying"),
-                required=True, autofocus=True,
-                attrs=' list="tickers" autocapitalize="characters"'
-                      ' autocomplete="off"'),
+    side = _one(form, "direction", "SHORT")
+    side_select = (
+        '<select name="direction" id="f_direction" aria-label="Side" title="Side">'
+        + "".join(f'<option value="{v}"{" selected" if v == side else ""}>{t}</option>'
+                  for v, t in (("SHORT", "STO"), ("LONG", "BTO")))
+        + "</select>")
+    right = _one(form, "right", "PUT")
+    right_select = (
+        '<select name="right" id="f_right" aria-label="Right" title="Right">'
+        + "".join(f'<option value="{v}"{" selected" if v == right else ""}>{t}</option>'
+                  for v, t in (("PUT", "Put"), ("CALL", "Call")))
+        + "</select>")
+    leg = [
+        side_select,
+        _box("underlying", _one(form, "underlying"), kind="text", label="Ticker",
+             autofocus=True, attrs=' list="tickers" autocapitalize="characters"'
+                                   ' autocomplete="off"'),
+        _box("expiry", _one(form, "expiry", _next_friday().isoformat()), kind="date",
+             label="Expiry"),
+        _box("strike", _one(form, "strike"), step="0.5", label="Strike"),
+        right_select,
+        _box("quantity", quantity, step="1", label="Contracts", attrs=' min="1"'),
+        _box("open_price", _one(form, "open_price"), label="Premium / share"),
+        _box("open_fee", _one(form, "open_fee", default_fee), label="Fee", required=False),
+    ]
+    grid = _leg_grid([leg], attrs=f' data-fee-rate="{r.esc(rate)}"')
+    rest = '<div class="grid">' + "".join([
         r.field("Opened", "opened_on", _one(form, "opened_on", r.today_iso()),
                 kind="date", required=True),
-        r.field("Expiry", "expiry",
-                _one(form, "expiry", _next_friday().isoformat()),
-                kind="date", required=True,
-                hint="Defaults to the coming Friday"),
-        r.select("Right", "right",
-                 [("PUT", "Put"), ("CALL", "Call")], _one(form, "right", "PUT")),
-        r.select("Side", "direction",
-                 [("SHORT", "Short (sold to open)"),
-                  ("LONG", "Long (bought to open)")],
-                 _one(form, "direction", "SHORT")),
-        r.field("Strike", "strike", _one(form, "strike"), kind="number",
-                step="0.01", required=True),
-        r.field("Contracts", "quantity", quantity, kind="number", step="1",
-                required=True),
-        r.field("Premium / share", "open_price", _one(form, "open_price"),
-                kind="number", step="0.01", required=True),
-        r.field("Fee", "open_fee", _one(form, "open_fee", default_fee),
-                kind="number", step="0.01",
-                hint=f"Auto-filled at {fmt(rate)}/contract; editable"),
         r.field("Notes", "notes", _one(form, "notes"),
                 hint="Why this trade, in your words"),
         r.select("Cover with lot", "share_lot_id",
@@ -459,13 +493,14 @@ def new_position_form(conn, token, form=None, problems=()) -> tuple[int, str]:
                          store.load_lots(conn), key=lambda l: (l.underlying, l.acquired_on))
                  ], _one(form, "share_lot_id"),
                  hint="For a short call written against shares you hold"),
-    ])
+    ]) + "</div>"
     body = f"""{r.problems_block(problems)}
 {r.datalist("tickers", tickers)}
-{r.form("/new", f'<div class="grid" data-fee-rate="{r.esc(rate)}">{fields}</div>',
-        token, submit="Add position")}
-<p class="hint">Shortcuts: <kbd>+7</kbd>, <kbd>+14</kbd>, <kbd>+30</kbd> in the
-expiry box jump that many days out. Submitting leaves you on a fresh form.</p>"""
+{r.form("/new", grid + rest, token, submit="Add position", cls="two-part")}
+<p class="hint">STO sells to open (short), BTO buys to open (long). Fee is
+auto-filled at {fmt(rate)} per contract and editable. Shortcuts: <kbd>+7</kbd>,
+<kbd>+14</kbd>, <kbd>+30</kbd> in the expiry box jump that many days out.
+Submitting leaves you on a fresh form.</p>"""
     return 200, r.page("New position", body, nav_here="new")
 
 
@@ -654,10 +689,13 @@ def _chain_block(index, position, chain) -> str:
 {explain}"""
 
 
-def _action_form(position, which: str, token: str, carry, back: str) -> str:
+def _action_form(position, which: str, token: str, carry, back: str,
+                 cancel: str = "", cancel_attrs: str = "") -> str:
     """The form for one action. Used inline on the positions page and on the
-    position's own page; ``back`` is where to return afterwards."""
+    position's own page; ``back`` is where to return afterwards and ``cancel``
+    where to go without acting."""
     pid = r.esc(position.id)
+    dismiss = dict(cancel=cancel, cancel_attrs=cancel_attrs)
     rate = Decimal("0.65") * position.quantity
     tgt = target(position, carry)
     # The profit target is the natural default for a buy-back price: it is
@@ -666,52 +704,32 @@ def _action_form(position, which: str, token: str, carry, back: str) -> str:
     nxt = r.hidden("next", back)
 
     if which == "close":
-        return r.form(f"/position/{pid}/close", nxt + "".join([
-            r.field("Closed on", "closed_on", r.today_iso(), kind="date",
-                    required=True),
-            r.field("Close price / share", "close_price", suggested,
-                    kind="number", step="0.01", required=True, autofocus=True,
-                    hint="Pre-filled with the 50% target" if suggested else ""),
-            r.field("Fee", "close_fee", str(q2(rate)), kind="number",
-                    step="0.01"),
-        ]), token, submit="Close position", cls="grid")
+        row = [_closing_tag(position), *_fixed_terms(position),
+               _box("close_price", suggested, label="Close price / share", autofocus=True),
+               _box("close_fee", str(q2(rate)), label="Fee", required=False)]
+        hint = ('<p class="hint">Pre-filled with the 50% target.</p>' if suggested
+                else '<p class="hint">Closes the leg at the price entered.</p>')
+        when = r.field("Closed on", "closed_on", r.today_iso(), kind="date", required=True)
+        return r.form(f"/position/{pid}/close", nxt + when + _leg_grid([row]) + hint,
+                      token, submit="Close position", cls="two-part",
+                      submit_cls="btn-close", **dismiss)
 
     if which == "roll":
-        closing = r.fieldset("1. Close this leg", "".join([
-            r.field("Rolled on", "on", r.today_iso(), kind="date",
-                    required=True),
-            r.field("Buy-back price", "close_price", suggested, kind="number",
-                    step="0.01", required=True, autofocus=True,
-                    hint=f"Closes {r.contract_text(position)}"),
-            r.field("Buy-back fee", "close_fee", str(q2(rate)), kind="number",
-                    step="0.01"),
-        ]))
-        opening = r.fieldset("2. Open the new leg", "".join([
-            r.field("New expiry", "new_expiry",
-                    _next_friday(position.expiry).isoformat(), kind="date",
-                    required=True),
-            r.field("New strike", "new_strike", str(position.strike),
-                    kind="number", step="0.01", required=True),
-            r.field("New premium", "new_price", "", kind="number", step="0.01",
-                    required=True),
-            r.field("New fee", "new_fee", str(q2(rate)), kind="number",
-                    step="0.01"),
-            r.field("Contracts", "new_quantity", str(position.quantity),
-                    kind="number", step="1",
-                    hint="Rolls often resize; state it explicitly"),
-        ]), hint=f"Same side and right as the leg being closed: "
-                 f"{position.direction.value.lower()} "
-                 f"{position.right.value.lower()}s.")
+        grid = _roll_grid(position, suggested, q2(rate))
+        when = r.field("Rolled on", "on", r.today_iso(), kind="date", required=True)
         preview = (f'<div class="preview" data-preview="/position/{pid}/roll-preview">'
                    + _roll_preview_placeholder() + "</div>")
-        return r.form(f"/position/{pid}/roll", nxt + closing + opening + preview, token,
-                      submit="Roll", cls="two-part")
+        return r.form(f"/position/{pid}/roll", nxt + when + grid + preview, token,
+                      submit="Roll", cls="two-part", submit_cls="btn-roll", **dismiss)
 
     if which == "expire":
-        return r.form(f"/position/{pid}/expire", nxt + "".join([
-            r.field("Expired on", "on", position.expiry.isoformat(),
-                    kind="date", required=True),
-        ]), token, submit="Expired worthless", cls="grid")
+        row = [_tag("EXP", "Expired worthless", "expire"), *_fixed_terms(position),
+               _fixed("0.00"), _blank()]
+        when = r.field("Expired on", "on", position.expiry.isoformat(), kind="date",
+                       required=True)
+        hint = '<p class="hint">Books the full premium; nothing changes hands.</p>'
+        return r.form(f"/position/{pid}/expire", nxt + when + _leg_grid([row]) + hint, token, submit="Expired worthless", cls="two-part",
+                      submit_cls="btn-expire", **dismiss)
 
     if which == "assign":
         acquiring = (position.direction is Direction.SHORT) == (
@@ -720,48 +738,134 @@ def _action_form(position, which: str, token: str, carry, back: str) -> str:
         moves = (f"acquire {position.shares} shares at {fmt(position.strike)}"
                  if acquiring else
                  f"deliver {position.shares} shares at {fmt(position.strike)}")
+        option_row = [_tag("ASG", "Assigned", "assign"), *_fixed_terms(position),
+                      _fixed("0.00"),
+                      _box("close_fee", "0.00", label="Option fee", required=False)]
+        share_row = [_tag("BUY" if acquiring else "SELL",
+                          "Shares " + ("bought" if acquiring else "delivered"), "shares"),
+                     _fixed(r.esc(position.underlying)), _blank(), _blank(),
+                     _fixed("Shares"), _fixed(r.esc(position.shares)),
+                     _fixed(r.esc(price(position.strike))),
+                     _box("share_fee", "0.00", label="Share fee", required=False)]
         # Date defaults to today, or to the expiry once it has passed: an
         # assignment is normally noticed the morning after and dated to expiry.
-        return f"""<p class="callout">This will also <b>{r.esc(moves)}</b>,
-        so the stock side cannot be forgotten.</p>
-{r.form(f"/position/{pid}/assign", nxt + "".join([
-    r.field("Assigned on", "on", min(date.today(), position.expiry).isoformat(),
-            kind="date", required=True),
-    r.field("Option fee", "close_fee", "0.00", kind="number", step="0.01"),
-    r.field("Share fee", "share_fee", "0.00", kind="number", step="0.01"),
-]), token, submit="Record assignment", cls="grid")}"""
+        hint = f'<p class="hint">Also records the shares: {r.esc(moves)}.</p>'
+        return f"""{r.form(f"/position/{pid}/assign", nxt
+        + r.field("Assigned on", "on", min(date.today(), position.expiry).isoformat(),
+                  kind="date", required=True)
+        + _leg_grid([option_row, share_row]) + hint, token, submit="Record assignment", cls="two-part", submit_cls="btn-assign",
+        **dismiss)}"""
 
     if which == "split":
-        return f"""<p class="hint">Divide this position so the halves can take
-        different paths - part assigned, the rest rolled on. Both halves keep
-        the open date and price; chain history is divided pro-rata between
-        them, and this record stays as the account of the split.</p>
-{r.form(f"/position/{pid}/split", nxt + "".join([
-    r.field("Contracts to peel off", "quantity", "",
-            kind="number", step="1", required=True, autofocus=True,
-            hint=f"Between 1 and {position.quantity - 1}"),
-    r.field("On", "on", r.today_iso(), kind="date", required=True),
-]), token, submit="Split", cls="grid")}"""
+        row = [_tag("SPLIT", "Split the position", "split"), *_fixed_terms(position)[:4],
+               _box("quantity", "", step="1", label="Contracts to peel off", autofocus=True,
+                    attrs=f' min="1" max="{position.quantity - 1}"'),
+               _blank(), _blank()]
+        hint = (f'<p class="hint">Peel off 1 to {position.quantity - 1} of '
+                f"{position.quantity} contracts so the halves can take different paths; "
+                "history is divided pro-rata.</p>")
+        return r.form(f"/position/{pid}/split", nxt
+                      + r.field("On", "on", r.today_iso(), kind="date", required=True)
+                      + _leg_grid([row]) + hint,
+                      token, submit="Split", cls="two-part", submit_cls="btn-split", **dismiss)
 
     return '<p class="hint">Pick an action.</p>'
 
 
-def _action_panels(position, which: str, token: str, carry, back: str) -> str:
+LEG_COLUMNS = ("", "Ticker", "Expiry", "Strike", "Right", "Qty", "Price", "Fee")
+
+
+def _fixed(text) -> str:
+    """A term that belongs to an existing contract and cannot change."""
+    return f'<span class="fixed">{text}</span>'
+
+
+def _blank() -> str:
+    return '<span class="fixed dim">-</span>'
+
+
+def _tag(tag: str, full: str, cls: str) -> str:
+    return f'<b class="leg-tag {cls}" title="{r.esc(full)}">{r.esc(tag)}</b>'
+
+
+def _box(name, value, *, label, step="0.01", kind="number", required=True,
+         autofocus=False, attrs="") -> str:
+    req = " required" if required else ""
+    auto = " autofocus" if autofocus else ""
+    stp = f' step="{step}"' if kind == "number" else ""
+    return (f'<input type="{kind}" name="{name}" id="f_{name}" value="{r.esc(value)}"'
+            f'{stp} aria-label="{r.esc(label)}" title="{r.esc(label)}"{req}{auto}{attrs}>')
+
+
+def _leg_grid(rows, attrs: str = "") -> str:
+    """Trades laid out as a broker shows them: one row per leg, one column
+    per term. Fixed terms are grey text, open ones are inputs, and every form
+    that records a trade uses the same columns so the eye never re-learns."""
+    head = "".join(f"<span>{h}</span>" for h in LEG_COLUMNS)
+    body = "".join(f'<div class="rg-row">{"".join(row)}</div>' for row in rows)
+    return f'<div class="leg-grid"{attrs}><div class="rg-head">{head}</div>{body}</div>'
+
+
+def _fixed_terms(position) -> list[str]:
+    """Ticker, expiry, strike, right and quantity of an existing contract."""
+    return [_fixed(r.esc(position.underlying)), _fixed(r.esc(position.expiry)),
+            _fixed(r.esc(price(position.strike))), _fixed(r.esc(position.right.value.title())),
+            _fixed(r.esc(position.quantity))]
+
+
+def _closing_tag(position) -> str:
+    short = position.direction is Direction.SHORT
+    return (_tag("BTC", "Buy to close", "close") if short
+            else _tag("STC", "Sell to close", "close"))
+
+
+def _roll_grid(position, suggested: str, fee) -> str:
+    """Two legs: close the current contract, open its successor."""
+    short = position.direction is Direction.SHORT
+    open_tag = (_tag("STO", "Sell to open", "open") if short
+                else _tag("BTO", "Buy to open", "open"))
+    closing = [_closing_tag(position), *_fixed_terms(position),
+               _box("close_price", suggested, label="Buy-back price", autofocus=True),
+               _box("close_fee", str(fee), label="Buy-back fee", required=False)]
+    opening = [open_tag, _fixed(r.esc(position.underlying)),
+               _box("new_expiry", _next_friday(position.expiry).isoformat(),
+                    kind="date", label="New expiry"),
+               _box("new_strike", str(position.strike), step="0.5", label="New strike"),
+               _fixed(r.esc(position.right.value.title())),
+               _box("new_quantity", str(position.quantity), step="1", label="Contracts",
+                    required=False, attrs=' min="1"'),
+               _box("new_price", "", label="New premium"),
+               _box("new_fee", str(fee), label="New fee", required=False)]
+    return _leg_grid([closing, opening])
+
+
+def _action_panels(position, which: str, token: str, carry, back: str, *,
+                   box_id: str = "actions", tab_href=None, dismiss_href: str = "",
+                   dismiss_attrs: str = " data-form-close", panel_close: bool = True) -> str:
     """Tabs plus every action form, only the chosen one shown.
 
-    All five forms are in the page so choosing one is a toggle with nothing
-    to fetch. Without script the links still work.
+    All five forms are in the page so switching is a toggle with nothing to
+    fetch. Without script the tab links still work. On a position's own page
+    each panel carries its own x; inside the positions table the row's header
+    has one, and dismissing goes through the table swap instead.
     """
+    tab_href = tab_href or (lambda key: f"{back}?do={key}#{box_id}")
+    dismiss_href = dismiss_href or f"{back}#{box_id}"
     links, panels = [], []
     for key, label in ACTIONS:
-        cls = ' class="here"' if which == key else ""
-        links.append(f'<a href="{back}?do={key}#actions" data-form-tab="{key}"{cls}>'
-                     f"{label}</a>")
+        cls = f' class="tab-{key}{" here" if which == key else ""}"'
+        links.append(f'<a href="{tab_href(key)}" data-form-tab="{key}"{cls}>{label}</a>')
         shown = "" if which == key else " hidden"
-        panels.append(f'<div data-form="{key}"{shown}>'
-                      + _action_form(position, key, token, carry, back) + "</div>")
-    return ('<div class="tabs" data-tabs-for="actions">' + " ".join(links) + "</div>"
-            + '<div id="actions">' + "".join(panels) + "</div>")
+        close = ""
+        if panel_close:
+            close = (f'<a class="close-form" href="{dismiss_href}" data-form-close '
+                     'title="Close this form" aria-label="Close this form">&times;</a>')
+        panels.append(f'<div data-form="{key}"{shown}>{close}'
+                      + _action_form(position, key, token, carry, back,
+                                     cancel=dismiss_href, cancel_attrs=dismiss_attrs)
+                      + "</div>")
+    return (f'<div class="tabs even" data-tabs-for="{box_id}">' + " ".join(links) + "</div>"
+            + f'<div id="{box_id}" class="form-box">' + "".join(panels) + "</div>")
 
 
 # ---------------------------------------------------------------------------
@@ -769,37 +873,57 @@ def _action_panels(position, which: str, token: str, carry, back: str) -> str:
 
 
 def _roll_preview_placeholder() -> str:
-    return ('<p class="hint">Enter the buy-back price and the new premium to see '
-            "what this roll does to the chain before recording it.</p>")
+    return '<p class="hint">The chain before and after appears here as you type.</p>'
 
 
 def _roll_preview_html(pv) -> str:
     """The decision panel: before and after, from the engine's own roll."""
-    def was(value) -> str:
-        return f"<small>was {value}</small>"
+    def was(before, after, better) -> str:
+        """The change, coloured by whether it is good news. ``better`` says
+        which direction is good for this figure; None means neither."""
+        if before is None:
+            return ""
+        delta = q2(after - before)
+        if delta == 0:
+            return f"<small>unchanged from {fmt(before)}</small>"
+        cls = "dim" if better is None else ("pos" if (delta > 0) == better else "neg")
+        arrow = "&uarr;" if delta > 0 else "&darr;"
+        return (f'<small class="{cls}">{arrow} {fmt(abs(delta))} '
+                f"<span class=\"dim\">was {fmt(before)}</span></small>")
 
-    def be(b) -> str:
-        return r.money(b.price) if b else '<span class="dim">-</span>'
+    def signed(value) -> str:
+        return r.money(value, dash="0.00")
 
     roll_cls = "pos" if pv.is_credit else "neg"
     roll_word = "credit" if pv.is_credit else "debit"
     tgt = pv.target_after
-    target_cell = (f"{r.esc(price(tgt.price))} <small>expected "
+    target_cell = (f'<span class="pos">{r.esc(price(tgt.price))}</span> <small>expected '
                    f"{fmt(tgt.expected_pl)}</small>" if tgt.applicable
-                   else '<span class="dim">none: net debit</span>')
+                   else '<span class="neg">none: net debit</span>')
+    # For a short put a lower break-even is better; for a short call, higher.
+    be_better_up = pv.new_leg.right is Right.CALL
+    be_after = pv.break_even_after.price if pv.break_even_after else None
+    be_before = pv.break_even_before.price if pv.break_even_before else None
+    be_cls = "dim"
+    if be_after is not None and be_before is not None and be_after != be_before:
+        be_cls = "pos" if (be_after > be_before) == be_better_up else "neg"
     cells = [
         ("This roll", f'<span class="{roll_cls}">{roll_word} {fmt(abs(pv.this_roll))}</span>'),
-        ("Closing this leg books", r.money(pv.closing_realized)),
-        ("Chain carry after", r.money(pv.carry_after, dash="0.00")
-                              + was(fmt(pv.carry_before))),
-        ("Net credit after", r.money(pv.net_credit_after) + was(fmt(pv.net_credit_before))),
-        ("Break-even after", be(pv.break_even_after)
-                             + (was(fmt(pv.break_even_before.price)) if pv.break_even_before else "")),
-        ("Capital at risk after", r.money(pv.at_risk_after)
-                                  + (was(fmt(pv.at_risk_before)) if pv.at_risk_before is not None else "")),
+        ("Closing this leg books", signed(pv.closing_realized)),
+        ("Chain carry after", signed(pv.carry_after) + was(pv.carry_before, pv.carry_after, True)),
+        ("Net credit after", signed(pv.net_credit_after)
+                             + was(pv.net_credit_before, pv.net_credit_after, True)),
+        ("Break-even after", (f'<span class="{be_cls}">{fmt(be_after)}</span>' if be_after is not None
+                              else '<span class="dim">-</span>')
+                             + (was(be_before, be_after, be_better_up)
+                                if be_after is not None and be_before is not None else "")),
+        ("Capital at risk after", (f'<span class="{"neg" if pv.at_risk_before is not None and pv.at_risk_after is not None and pv.at_risk_after > pv.at_risk_before else "dim"}">'
+                                   f"{fmt(pv.at_risk_after) if pv.at_risk_after is not None else '-'}</span>"
+                                   + (was(pv.at_risk_before, pv.at_risk_after, False)
+                                      if pv.at_risk_before is not None and pv.at_risk_after is not None else ""))),
         ("Target on the new leg", target_cell),
         ("Credit still to recover", (f'<span class="neg">{fmt(pv.to_recover_after)}</span>'
-                                     if pv.underwater_after else r.money(ZERO, dash="0.00"))),
+                                     if pv.underwater_after else '<span class="pos">0.00</span>')),
         ("New leg", f"{pv.dte_after} DTE"),
     ]
     flags = []
@@ -1204,7 +1328,7 @@ def _share_form_body(conn, kind: str, underlying: str, token: str, back: str) ->
             r.field("Share price", "share_price", "", kind="number", step="0.01", required=True),
             r.field("Share fee", "share_fee", "0.00", kind="number", step="0.01"),
             r.field("Call expiry", "expiry", _next_friday().isoformat(), kind="date", required=True),
-            r.field("Call strike", "strike", "", kind="number", step="0.01", required=True),
+            r.field("Call strike", "strike", "", kind="number", step="0.5", required=True),
             r.field("Call premium / share", "call_price", "", kind="number", step="0.01", required=True),
             r.field("Contracts", "contracts", "", kind="number", step="1",
                     hint="Defaults to shares / 100"),
@@ -1220,7 +1344,8 @@ def _share_form_body(conn, kind: str, underlying: str, token: str, back: str) ->
         ]
         action, submit = "/shares/buy", "Record purchase"
     return r.form(action, r.hidden("next", back) + "".join(fields), token,
-                  submit=submit, cls="grid")
+                  submit=submit, cls="grid", cancel=f"{back}#record",
+                  cancel_attrs=" data-form-close")
 
 
 def _share_forms(conn, kind: str, underlying: str, token: str, back: str,
@@ -1238,11 +1363,13 @@ def _share_forms(conn, kind: str, underlying: str, token: str, back: str,
         links.append(f'<a href="{base}{param}={key}#record" data-form-tab="{key}"{cls}>'
                      f"{label}</a>")
         shown = "" if kind == key else " hidden"
-        panels.append(f'<div class="share-form" data-form="{key}"{shown}>'
+        close = (f'<a class="close-form" href="{back}#record" data-form-close '
+                 'title="Close this form" aria-label="Close this form">&times;</a>')
+        panels.append(f'<div class="share-form" data-form="{key}"{shown}>{close}'
                       + _share_form_body(conn, key, underlying, token, back) + "</div>")
     return ('<div class="tabs" data-tabs-for="record">' + " ".join(links) + "</div>"
             + r.datalist("tickers", store.recent_underlyings(conn))
-            + '<div id="record">' + "".join(panels) + "</div>")
+            + '<div id="record" class="form-box">' + "".join(panels) + "</div>")
 
 
 def shares_page(conn, token, query) -> tuple[int, str]:

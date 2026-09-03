@@ -12,6 +12,7 @@ Two protections that a localhost app genuinely needs:
 * **Loopback binding**, with an optional password. Not a service.
 """
 
+import gzip
 import os
 import re
 import secrets
@@ -186,14 +187,28 @@ class App:
 
 
 class Handler(BaseHTTPRequestHandler):
+    # HTTP/1.1 so the browser keeps a few connections open and reuses them.
+    # Under HTTP/1.0 every fetch opened a new connection, and a hover-plus-
+    # prefetch burst overflowed the listen backlog: the kernel dropped the
+    # extra connections and the browser retried them a full second later.
+    # Every response sets Content-Length, which keep-alive requires.
+    protocol_version = "HTTP/1.1"
+
     server_version = "bcoj"
     sys_version = ""
     app: App = None  # set by serve()
 
     def log_message(self, format, *args):  # noqa: A002 - stdlib signature
         # One tidy line per request; the default is noisy and leaks nothing
-        # useful for a local app.
-        print(f"  {self.command} {self.path} -> {args[1]}")
+        # useful for a local app. The stdlib also logs here when a kept-alive
+        # connection delivers something that is not a request line -- before
+        # any path exists -- so never assume one.
+        command = getattr(self, "command", None) or "-"
+        path = getattr(self, "path", None) or "-"
+        if format == '"%s" %s %s' and len(args) >= 2:   # the stdlib's per-request line
+            print(f"  {command} {path} -> {args[1]}")
+        else:
+            print(f"  {command} {path} -> " + (format % args if args else format))
 
     def do_GET(self):
         self._handle("GET")
@@ -297,9 +312,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
+            self.close_connection = True   # the unread body must not be parsed as a request
             self._send(400, r.page("Bad request", "<p>Bad length.</p>"))
             return None
         if length > MAX_BODY:
+            self.close_connection = True
             self._send(413, r.page("Too large", "<p>Form too large.</p>"))
             return None
         raw = self.rfile.read(length).decode("utf-8", "replace")
@@ -310,23 +327,31 @@ class Handler(BaseHTTPRequestHandler):
         if asset is None:
             return self._send(404, "not found", "text/plain")
         content_type, content = asset
-        body = content.encode()
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
         # The URL carries a content fingerprint, so this can be cached hard:
         # a changed file is a changed URL.
-        self.send_header("Cache-Control", "max-age=31536000, immutable")
-        self.end_headers()
-        self.wfile.write(body)
+        self._write(200, content.encode(), content_type,
+                    [("Cache-Control", "max-age=31536000, immutable")])
 
     def _send(self, status: int, body: str, content_type="text/html; charset=utf-8"):
-        payload = body.encode()
+        self._write(status, body.encode(), content_type,
+                    [("X-Content-Type-Options", "nosniff"), ("Referrer-Policy", "no-referrer")])
+
+    def _write(self, status: int, payload: bytes, content_type: str, headers=()) -> None:
+        """Gzip anything worth gzipping. A 500-row table is half a megabyte
+        raw and a twentieth of that compressed; over a forwarded port that is
+        the difference between seconds and nothing."""
+        accepts = self.headers.get("Accept-Encoding", "") if hasattr(self, "headers") else ""
+        encoded = len(payload) > 1024 and "gzip" in accepts
+        if encoded:
+            payload = gzip.compress(payload, compresslevel=5)
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "no-referrer")
+        if encoded:
+            self.send_header("Content-Encoding", "gzip")
+        self.send_header("Vary", "Accept-Encoding")
+        for name, value in headers:
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(payload)
 
@@ -334,6 +359,15 @@ class Handler(BaseHTTPRequestHandler):
 def _flash(message: str) -> str:
     level = "warn" if message.startswith("!") else "ok"
     return f'<div class="flash {level}">{r.esc(message.lstrip("!"))}</div>\n'
+
+
+class Server(ThreadingHTTPServer):
+    """One thread per connection, a backlog deep enough for a browser's burst
+    of parallel fetches, and threads that do not keep the process alive."""
+
+    request_queue_size = 128
+    daemon_threads = True
+    allow_reuse_address = True
 
 
 def serve(db_path: str, host: str = "127.0.0.1", port: int = 8000) -> None:
@@ -344,7 +378,7 @@ def serve(db_path: str, host: str = "127.0.0.1", port: int = 8000) -> None:
     # than on the first request.
     app.connect().close()
 
-    httpd = ThreadingHTTPServer((host, port), Handler)
+    httpd = Server((host, port), Handler)
     print(f"{r.APP_NAME}")
     print(f"  journal : {db_path}")
     print(f"  address : http://{host}:{port}/")

@@ -118,12 +118,16 @@ def hidden(name: str, value) -> str:
 
 
 def form(action: str, body: str, token: str, submit: str = "Save",
-         method: str = "post", cls: str = "") -> str:
+         method: str = "post", cls: str = "", submit_cls: str = "",
+         cancel: str = "", cancel_attrs: str = "") -> str:
+    button_cls = f' class="{esc(submit_cls)}"' if submit_cls else ""
+    cancel_html = (f' <a class="btn cancel" href="{esc(cancel)}"{cancel_attrs}>Cancel</a>'
+                   if cancel else "")
     return f"""<form method="{esc(method)}" action="{esc(action)}"
       class="{esc(cls)}">
 {hidden("csrf", token)}
 {body}
-<div class="actions"><button type="submit">{esc(submit)}</button></div>
+<div class="actions"><button type="submit"{button_cls}>{esc(submit)}</button>{cancel_html}</div>
 </form>"""
 
 
@@ -156,7 +160,11 @@ def problems_block(problems) -> str:
 def table(headers, rows, cls: str = "") -> str:
     """Rows are lists of cells. A row given as a string is emitted verbatim,
     which is how an action form gets slotted in directly beneath its position."""
-    head = "".join(f"<th>{esc(h)}</th>" for h in headers)
+    head = "".join(
+        f'<th title="{esc(h[1])}"><abbr>{esc(h[0])}</abbr></th>' if isinstance(h, tuple)
+        else f"<th>{esc(h)}</th>"
+        for h in headers
+    )
     body = "".join(
         r if isinstance(r, str)
         else "<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>"

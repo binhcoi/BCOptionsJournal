@@ -16,6 +16,7 @@ CSS = """
   --warn-bg: #fffbeb; --warn-line: #f5d76e; --ok-bg: #ecfdf3;
   --neg-tint: #fdeceb; --pos-tint: #e7f6ee;
   --accent-tint: #e8eefc; --roll: #6d28d9; --roll-tint: #efe9fb;
+  --closed: #be185d; --closed-tint: #fce7f3;
   --amber: #b45309; --amber-tint: #fdf1de;
   --chain-bg: #f3f3f1; --current-tint: #fff7d6;
 }
@@ -26,6 +27,7 @@ CSS = """
     --warn-bg: #2a2312; --warn-line: #6b5a1f; --ok-bg: #12261a;
     --neg-tint: #3a1d1d; --pos-tint: #14301f;
     --accent-tint: #1c2540; --roll: #b79cff; --roll-tint: #2a2140;
+    --closed: #f472b6; --closed-tint: #3b1a2b;
     --amber: #fbbf24; --amber-tint: #3a2e12;
     --chain-bg: #1a1c21; --current-tint: #2e2a14;
   }
@@ -64,6 +66,7 @@ table { width: 100%; border-collapse: collapse; background: var(--panel);
 th, td { padding: .5rem .6rem; text-align: right; white-space: nowrap;
   border-bottom: 1px solid var(--line); }
 th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+th abbr { text-decoration: none; cursor: help; border-bottom: 1px dotted var(--line); }
 th { font-size: .78rem; text-transform: uppercase; letter-spacing: .04em;
   color: var(--dim); font-weight: 600; }
 tbody tr:last-child td { border-bottom: 0; }
@@ -138,6 +141,17 @@ button {
   font-weight: 600; cursor: pointer; padding: .5rem 1.1rem;
 }
 button:hover { filter: brightness(1.08); }
+/* A confirm button wears its action's colour, the same one its pill wears. */
+button.btn-close  { background: var(--closed); }
+button.btn-roll   { background: var(--roll); }
+button.btn-expire { background: var(--pos); }
+button.btn-assign { background: var(--amber); }
+button.btn-split  { background: var(--dim); }
+/* The x that closes an open form, top right of its panel. */
+.close-form { float: right; text-decoration: none; color: var(--dim); font-size: 1.25rem;
+  line-height: 1; padding: .1rem .45rem; border-radius: 6px; }
+.close-form:hover { color: var(--ink); background: var(--bg); }
+[data-form] { position: relative; }
 form.inline { display: inline; background: none; border: 0; padding: 0; }
 form.inline .actions { display: inline; }
 form.inline button {
@@ -170,19 +184,41 @@ p.hint { color: var(--dim); font-size: .86rem; max-width: 68ch; }
 /* Actions sit beneath the contract, colour-coded by what they do:
    blue closes, purple rolls, green keeps the credit, amber moves stock,
    grey divides. */
-.row-actions { margin-top: .3rem; display: flex; gap: .35rem; flex-wrap: wrap; }
-.row-actions a.act {
+/* One button per row, in a column of its own, always visible. */
+td.acts { width: 0; padding-left: .2rem; padding-right: .2rem; }
+a.act {
   font-size: .76rem; padding: .05rem .5rem; border-radius: 999px;
   text-decoration: none; font-weight: 600; border: 1px solid transparent;
 }
-.act-close  { color: var(--accent); background: var(--accent-tint); }
+.act-close  { color: var(--closed); background: var(--closed-tint); }
 .act-roll   { color: var(--roll);   background: var(--roll-tint); }
 .act-expire { color: var(--pos);    background: var(--pos-tint); }
 .act-assign { color: var(--amber);  background: var(--amber-tint); }
 .act-split  { color: var(--dim);    background: var(--bg); border-color: var(--line); }
-.row-actions a.act:hover, .row-actions a.act.here {
-  border-color: currentColor;
-}
+a.act:hover, a.act.here { border-color: currentColor; }
+/* Tabs of equal width, confirm buttons of equal width, so switching forms
+   moves nothing. */
+.tabs.even a { min-width: 5.4rem; text-align: center; }
+/* Form tabs wear their action's colour: text when idle, fill when chosen. */
+.tabs a.tab-close  { color: var(--closed); }
+.tabs a.tab-roll   { color: var(--roll); }
+.tabs a.tab-expire { color: var(--pos); }
+.tabs a.tab-assign { color: var(--amber); }
+.tabs a.tab-split  { color: var(--dim); }
+.tabs a.tab-close:hover  { background: var(--closed-tint); color: var(--closed); }
+.tabs a.tab-roll:hover   { background: var(--roll-tint);   color: var(--roll); }
+.tabs a.tab-expire:hover { background: var(--pos-tint);    color: var(--pos); }
+.tabs a.tab-assign:hover { background: var(--amber-tint);  color: var(--amber); }
+.tabs a.tab-split:hover  { background: var(--bg);          color: var(--ink); }
+.tabs a.tab-close.here,  .tabs a.tab-close.here:hover  { background: var(--closed); color: #fff; }
+.tabs a.tab-roll.here,   .tabs a.tab-roll.here:hover   { background: var(--roll);   color: #fff; }
+.tabs a.tab-expire.here, .tabs a.tab-expire.here:hover { background: var(--pos);    color: #fff; }
+.tabs a.tab-assign.here, .tabs a.tab-assign.here:hover { background: var(--amber);  color: #fff; }
+.tabs a.tab-split.here,  .tabs a.tab-split.here:hover  { background: var(--dim);    color: #fff; }
+.form-box .actions button { min-width: 11rem; }
+.form-box > [data-form] { min-height: 17.5rem; }
+.form-box > [data-form] > form { min-height: 100%; }
+.action-inline .tabs { margin: .2rem 0 .7rem; }
 
 /* Status pills. Open is the one that matters; everything else is history. */
 .badge {
@@ -190,8 +226,8 @@ p.hint { color: var(--dim); font-size: .86rem; max-width: 68ch; }
   font-size: .76rem; font-weight: 600; letter-spacing: .01em;
 }
 .st-open     { color: var(--accent); background: var(--accent-tint); }
-.st-rolled   { color: var(--dim);    background: var(--bg); border: 1px solid var(--line); }
-.st-closed   { color: var(--dim);    background: var(--bg); border: 1px solid var(--line); }
+.st-rolled   { color: var(--roll);   background: var(--roll-tint); }
+.st-closed   { color: var(--closed); background: var(--closed-tint); }
 .st-expired  { color: var(--pos);    background: var(--pos-tint); }
 .st-assigned { color: var(--amber);  background: var(--amber-tint); }
 .st-split    { color: var(--dim);    background: var(--bg); border: 1px dashed var(--line); }
@@ -207,7 +243,8 @@ tr.fam-0 > td:first-child { border-left-color: var(--accent); }
 tr.fam-1 > td:first-child { border-left-color: var(--roll); }
 tr.fam-2 > td:first-child { border-left-color: var(--amber); }
 tr.fam-3 > td:first-child { border-left-color: var(--pos); }
-.fam-note { display: block; font-size: .74rem; color: var(--dim); margin-top: .1rem; }
+.fam-note { display: inline; font-size: .72rem; color: var(--dim); margin-left: .5rem;
+  cursor: help; }
 a.legs { text-decoration: none; font-weight: 600; padding: .05rem .45rem;
   border-radius: 999px; border: 1px solid var(--line);
   display: inline-block; min-width: 1.9em; text-align: center; }
@@ -261,7 +298,43 @@ tr.action-row:hover { background: var(--bg); }
 .action-inline .callout, .action-inline p.hint { margin-top: 0; }
 
 /* A roll is two trades. Show it as two. */
-form.two-part { display: grid; gap: .8rem; }
+form.two-part { display: grid; gap: .8rem; justify-items: start; }
+form.two-part > label { width: 13rem; }
+form.two-part > .leg-grid, form.two-part > .preview, form.two-part > .actions,
+form.two-part > p.hint { justify-self: stretch; }
+form.two-part > p.hint { margin: -.4rem 0 0; }
+/* The roll as two legs with matching columns. */
+.leg-grid { display: grid;
+  grid-template-columns: 4.8rem 6.5rem 9.5rem 6.5rem 5rem 4.5rem 6rem 5.5rem;
+  gap: .35rem .5rem; align-items: center; overflow-x: auto; padding-bottom: .2rem; }
+.leg-grid .rg-head, .leg-grid .rg-row { display: contents; }
+.leg-grid .rg-head span { font-size: .72rem; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--dim); font-weight: 600; }
+.leg-grid .fixed { color: var(--dim); font-variant-numeric: tabular-nums;
+  display: inline-flex; align-items: center; min-height: 2.45rem;
+  padding: 0 calc(.45rem + 1px); box-sizing: border-box; }
+.leg-grid .leg-tag { display: inline-flex; align-items: center; justify-content: center;
+  min-height: 1.6rem; }
+.leg-grid input, .leg-grid select { width: 100%; min-width: 0; padding-left: .45rem;
+  padding-right: .3rem; }
+a.btn.cancel { padding: .5rem 1rem; font-size: inherit; color: var(--dim); }
+a.btn.cancel:hover { background: var(--bg); color: var(--ink); }
+.leg-tag { font-size: .72rem; font-weight: 700; letter-spacing: .04em; padding: .15rem .4rem;
+  border-radius: 4px; text-align: center; }
+/* One colour per outcome, everywhere it appears: the status pill, the row
+   button, the form tab, the confirm button and the leg tag all agree.
+   Closed teal, rolled purple, expired green, assigned amber, split grey; an
+   opening leg wears the blue of an open position. */
+.leg-tag.close  { color: var(--closed); background: var(--closed-tint); }
+.leg-tag.open   { color: var(--accent); background: var(--accent-tint); }
+.leg-tag.expire { color: var(--pos);    background: var(--pos-tint); }
+.leg-tag.assign { color: var(--amber);  background: var(--amber-tint); }
+.leg-tag.split  { color: var(--dim);    background: var(--bg); border: 1px dashed var(--line); }
+.leg-tag.shares { color: var(--ink);    background: var(--bg); border: 1px solid var(--line); }
+.preview .totals b .pos { color: var(--pos); }
+.preview .totals b .neg { color: var(--neg); }
+.preview .totals small.pos { color: var(--pos); }
+.preview .totals small.neg { color: var(--neg); }
 fieldset.grid { margin: 0; min-width: 0; }
 legend {
   font-size: .78rem; text-transform: uppercase; letter-spacing: .04em;
@@ -316,76 +389,158 @@ JS = """
       input.value = when.toISOString().slice(0, 10);
   });
 
-  // Expanding a chain or opening an action form swaps just the positions
-  // table -- fetched as a bare table, and prefetched ahead of the click, so
-  // the swap is instant. Links still work as plain navigation without this.
+  // The positions table updates in place. Opening a form fetches the row and
+  // its form; expanding a chain fetches that chain's rows; closing a form
+  // fetches nothing at all. Only when the whole list may have changed is the
+  // full table fetched, and then rows are diffed rather than replaced. Nothing
+  // is fetched speculatively: over a forwarded port a 500-row table is slow,
+  // and a prefetch of it would queue ahead of the click that matters.
   var table = document.querySelector('table.positions');
-  if (table && window.fetch && window.DOMParser) {
-    var cache = {};
-
-    var partial = function (href) {
-      var parts = href.split('#');
-      var url = parts[0] + (parts[0].indexOf('?') >= 0 ? '&' : '?') + 'partial=table';
-      return { url: url, anchor: parts[1] || null };
+  if (table && window.fetch) {
+    var cache = {}, order = [], pending = {};
+    var remember = function (href, html) {
+      if (!cache[href]) order.push(href);
+      cache[href] = html;
+      while (order.length > 12) delete cache[order.shift()];
     };
-
-    var load = function (href) {
-      if (cache[href]) return Promise.resolve(cache[href]);
-      var target = partial(href);
-      return fetch(target.url, { credentials: 'same-origin' })
+    var current = function () { return document.querySelector('table.positions'); };
+    var here = function () { return window.location.pathname + window.location.search; };
+    var param = function (href, name) {
+      var m = new RegExp('[?&]' + name + '=([^&#]*)').exec(href);
+      return m ? decodeURIComponent(m[1]) : null;
+    };
+    var get = function (href, partial) {
+      if (partial === 'table' && cache[href]) return Promise.resolve(cache[href]);
+      var key = partial + ' ' + href;
+      if (pending[key]) return pending[key];
+      var base = href.split('#')[0];
+      var url = base + (base.indexOf('?') >= 0 ? '&' : '?') + 'partial=' + partial;
+      pending[key] = fetch(url, { credentials: 'same-origin' })
         .then(function (res) { if (!res.ok) throw new Error(res.status); return res.text(); })
-        .then(function (html) { cache[href] = html; return html; });
+        .then(function (html) {
+          if (partial === 'table') remember(href, html);
+          delete pending[key]; return html;
+        })
+        .catch(function (err) { delete pending[key]; throw err; });
+      return pending[key];
     };
-
-    var render = function (href, html, push) {
-      var current = document.querySelector('table.positions');
-      if (!current) { window.location.href = href; return; }
-      var holder = document.createElement('div');
-      holder.innerHTML = html;
-      var fresh = holder.querySelector('table.positions');
-      if (!fresh) { window.location.href = href; return; }
-      current.replaceWith(fresh);
+    var rowsOf = function (html) {
+      var t = document.createElement('table');
+      t.innerHTML = '<tbody>' + html + '</tbody>';
+      return Array.prototype.slice.call(t.tBodies[0].children);
+    };
+    var settle = function (href, push) {
       if (push) history.pushState({ bcoj: href }, '', href);
-      // Bring the opened form (or the clicked row) into view, then focus
-      // without a second scroll: one movement, never a jump.
-      var anchor = partial(href).anchor;
+      var body = current();
+      var form = body.querySelector('tr.action-row');
+      var anchor = href.split('#')[1];
       var row = anchor ? document.getElementById(anchor) : null;
-      var form = fresh.querySelector('tr.action-row');
       if (form) form.scrollIntoView({ block: 'nearest' });
       else if (row) row.scrollIntoView({ block: 'nearest' });
-      var focus = fresh.querySelector('[autofocus]');
+      var focus = form && form.querySelector('[autofocus]');
       if (focus) focus.focus({ preventScroll: true });
-      prefetchAll(fresh);
+    };
+
+    // Bring the rows on screen in line with a freshly fetched table, keeping
+    // every row whose markup is unchanged.
+    var patchRows = function (cur, fresh) {
+      var a = cur.tBodies[0], b = fresh.tBodies[0];
+      if (!a || !b) return false;
+      var have = a.children, want = Array.prototype.slice.call(b.children);
+      var i = 0;
+      for (var j = 0; j < want.length; j++) {
+        var w = want[j], found = -1;
+        for (var k = i; k < have.length && k < i + 40; k++) {
+          if (have[k].outerHTML === w.outerHTML) { found = k; break; }
+        }
+        if (found < 0) { a.insertBefore(w, have[i] || null); i++; }
+        else { var gone = found - i; while (gone-- > 0) a.removeChild(have[i]); i++; }
+      }
+      while (have.length > i) a.removeChild(have[have.length - 1]);
+      return true;
+    };
+
+    var full = function (href, push) {
+      var cur = current();
+      if (cur && !cache[here()]) remember(here(), cur.outerHTML);
+      return get(href, 'table').then(function (html) {
+        var holder = document.createElement('div');
+        holder.innerHTML = html;
+        var fresh = holder.querySelector('table.positions');
+        if (!fresh) { window.location.href = href; return; }
+        if (!patchRows(cur, fresh)) cur.replaceWith(fresh);
+        settle(href, push);
+      }).catch(function () { window.location.href = href; });
+    };
+
+    // Drop any open form and return its row's button to "open my form".
+    var closeForms = function () {
+      var tb = current().tBodies[0];
+      tb.querySelectorAll('tr.action-row').forEach(function (r) { r.remove(); });
+      tb.querySelectorAll('a.act.here').forEach(function (a) {
+        a.classList.remove('here');
+        var id = a.closest('tr').id.replace(/^row-/, '');
+        var base = a.getAttribute('href').split('#')[0];
+        a.setAttribute('href', base + '&act=' + id + '&do=close#row-' + id);
+      });
+    };
+
+    var openForm = function (href, push) {
+      var target = document.getElementById('row-' + param(href, 'act'));
+      if (!target) return full(href, push);
+      var cur = current();
+      if (!cache[here()]) remember(here(), cur.outerHTML);
+      return get(href, 'action').then(function (html) {
+        var rows = rowsOf(html);
+        if (rows.length < 2) return full(href, push);
+        closeForms();
+        target.replaceWith(rows[0]);
+        rows[0].after(rows[1]);
+        settle(href, push);
+      }).catch(function () { return full(href, push); });
+    };
+
+    var expand = function (href, push) {
+      var target = document.getElementById('row-' + param(href, 'chain'));
+      if (!target) return full(href, push);
+      var cur = current();
+      if (!cache[here()]) remember(here(), cur.outerHTML);
+      return get(href, 'block').then(function (html) {
+        var rows = rowsOf(html);
+        if (!rows.length) return full(href, push);
+        var ids = {};
+        rows.forEach(function (r) { if (r.id) ids[r.id] = true; });
+        var tb = cur.tBodies[0];
+        var marker = document.createElement('tr');
+        target.before(marker);
+        Array.prototype.slice.call(tb.children).forEach(function (r) {
+          if (r.id && ids[r.id]) r.remove();     // legs listed on their own
+        });
+        rows.forEach(function (r) { marker.before(r); });
+        marker.remove();
+        settle(href, push);
+      }).catch(function () { return full(href, push); });
     };
 
     var swap = function (href, push) {
-      // Remember the table we are leaving, so coming back is instant too.
-      var here = window.location.pathname + window.location.search;
-      var current = document.querySelector('table.positions');
-      if (current && !cache[here]) cache[here] = current.outerHTML;
-      load(href).then(function (html) { render(href, html, push); })
-        .catch(function () { window.location.href = href; });
+      var tb = current().tBodies[0];
+      var chainOpen = !!tb.querySelector('tr.chain-head');
+      var formOpen = !!tb.querySelector('tr.action-row');
+      var wantsChain = param(href, 'chain') !== null;
+      var wantsForm = param(href, 'act') !== null && param(href, 'do') !== null;
+      if (wantsChain === chainOpen) {
+        if (wantsForm) return openForm(href, push);            // a form, chain as is
+        if (formOpen) { closeForms(); settle(href, push); return; }   // just close it
+      }
+      if (wantsChain && !chainOpen && !formOpen) return expand(href, push);
+      return full(href, push);                                  // collapse and the rest
     };
-
-    // Warm the cache for every toggle target in view, a few at a time.
-    var prefetchAll = function (root) {
-      var targets = [];
-      root.querySelectorAll('tr[data-chain], a.legs').forEach(function (el) {
-        var href = el.getAttribute('data-chain') || el.getAttribute('href');
-        if (href && !cache[href] && targets.indexOf(href) < 0) targets.push(href);
-      });
-      var i = 0;
-      var next = function () {
-        if (i >= targets.length || i >= 24) return;
-        load(targets[i++]).catch(function () {}).then(next);
-      };
-      next(); next();  // two in flight
-    };
-    prefetchAll(table);
 
     document.addEventListener('click', function (event) {
       if (event.metaKey || event.ctrlKey || event.button !== 0) return;
-      var link = event.target.closest('table.positions a.legs, table.positions a.act');
+      var link = event.target.closest(
+        'table.positions a.legs, table.positions a.act, table.positions a.close-form, ' +
+        'table.positions a.cancel');
       if (link) {
         event.preventDefault();
         swap(link.getAttribute('href'), true);
@@ -396,51 +551,49 @@ JS = """
       if (!row) return;
       swap(row.getAttribute('data-chain'), true);
     });
-    // Hovering a row is a strong hint it is about to be clicked.
-    document.addEventListener('mouseover', function (event) {
-      var row = event.target.closest('table.positions tr[data-chain]');
-      if (row) load(row.getAttribute('data-chain')).catch(function () {});
-      var link = event.target.closest('table.positions a.act, table.positions a.legs');
-      if (link) load(link.getAttribute('href')).catch(function () {});
-    });
     window.addEventListener('popstate', function (event) {
-      var href = (event.state && event.state.bcoj) || (window.location.pathname + window.location.search + window.location.hash);
-      load(href).then(function (html) { render(href, html, false); })
-        .catch(function () { window.location.reload(); });
+      var href = (event.state && event.state.bcoj) || (here() + window.location.hash);
+      full(href, false).catch(function () { window.location.reload(); });
     });
   }
 
-  // Selling from a specific lot: cap the quantity at what that lot holds.
-  // Tab strips (share forms, a position's actions) show forms already on
-  // the page: choosing one is a toggle, with nothing to fetch and no scroll.
-  document.querySelectorAll('.tabs[data-tabs-for]').forEach(function (strip) {
-    var box = document.getElementById(strip.getAttribute('data-tabs-for'));
-    if (!box) return;
+  // Delegated, so tab strips inside a freshly swapped-in row work too.
+  document.addEventListener('click', function (event) {
+    if (event.metaKey || event.ctrlKey || event.button !== 0) return;
+    var tab = event.target.closest('a[data-form-tab]');
+    var closer = tab ? null : event.target.closest('[data-form-close]');
+    if (!tab && !closer) return;
+    var strip, box;
+    if (tab) {
+      strip = tab.closest('.tabs[data-tabs-for]');
+      box = strip && document.getElementById(strip.getAttribute('data-tabs-for'));
+    } else {
+      box = closer.closest('.form-box');
+      strip = box && document.querySelector('.tabs[data-tabs-for="' + box.id + '"]');
+    }
+    if (!box || !strip) return;
+    // Inside the positions table the header x closes the form via the table
+    // swap; a re-click on the open tab there is simply nothing to do.
+    var inTable = !!box.closest('table.positions');
+    var closing = tab ? tab.classList.contains('here') : true;
+    if (closing && inTable) { event.preventDefault(); return; }
+    event.preventDefault();
+    var key = tab ? tab.getAttribute('data-form-tab') : null;
     var tabs = strip.querySelectorAll('a[data-form-tab]');
-    var panels = box.querySelectorAll('[data-form]');
-    tabs.forEach(function (tab) {
-      tab.addEventListener('click', function (event) {
-        if (event.metaKey || event.ctrlKey || event.button !== 0) return;
-        event.preventDefault();
-        var key = tab.getAttribute('data-form-tab');
-        var closing = tab.classList.contains('here');
-        tabs.forEach(function (t) { t.classList.toggle('here', t === tab && !closing); });
-        panels.forEach(function (p) {
-          p.hidden = closing || p.getAttribute('data-form') !== key;
-        });
-        if (!closing) {
-          var shown = box.querySelector('[data-form="' + key + '"]');
-          var first = shown.querySelector('input:not([type=hidden]):not([value]), select') ||
-                      shown.querySelector('input:not([type=hidden])');
-          if (first) first.focus({ preventScroll: true });
-        }
-        if (window.history.replaceState) {
-          var href = tab.getAttribute('href').replace(/#.*$/, '');
-          if (closing) href = href.replace(/[?&](do|form|kind)=[^&]*/, '').replace(/\?$/, '');
-          window.history.replaceState(null, '', href);
-        }
-      });
-    });
+    var panels = box.querySelectorAll(':scope > [data-form]');
+    tabs.forEach(function (t) { t.classList.toggle('here', !closing && t === tab); });
+    panels.forEach(function (p) { p.hidden = closing || p.getAttribute('data-form') !== key; });
+    if (!closing) {
+      var shown = box.querySelector(':scope > [data-form="' + key + '"]');
+      var first = shown.querySelector('input:not([type=hidden]):not([value]), select') ||
+                  shown.querySelector('input:not([type=hidden])');
+      if (first) first.focus({ preventScroll: true });
+    }
+    if (window.history.replaceState) {
+      var href = (tab || closer).getAttribute('href').replace(/#.*$/, '');
+      if (closing && tab) href = href.replace(/[?&](do|form|kind)=[^&]*/, '').replace(/\?$/, '');
+      window.history.replaceState(null, '', href);
+    }
   });
 
   // A form with a preview box shows what it would do as it is typed. The

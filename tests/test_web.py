@@ -19,6 +19,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from bcoj.db import store
+from bcoj.web.server import Handler as _Handler
+
+# The suites silence request logging by replacing the method on the class;
+# keep the real one so it can be tested.
+_ORIGINAL_LOG_MESSAGE = _Handler.__dict__["log_message"]
 from bcoj.web.server import App, Handler
 
 
@@ -437,8 +442,15 @@ class TestPositionPage(WebTestCase):
         for key in ("close", "roll", "expire", "split"):
             with self.subTest(form=key):
                 self.assertIn(f'data-form="{key}" hidden', page)
-        self.assertIn('data-form-tab="assign" class="here"', page)
+        self.assertIn('data-form-tab="assign" class="tab-assign here"', page)
         self.assertEqual(page.count(f'action="/position/{p.id}/assign"'), 1)
+        # Every panel can be dismissed by its x or its Cancel, and each
+        # confirm wears its colour.
+        self.assertEqual(page.count("data-form-close"), 10)
+        self.assertEqual(page.count('class="btn cancel"'), 5)
+        for cls in ("btn-close", "btn-roll", "btn-expire", "btn-assign", "btn-split"):
+            with self.subTest(button=cls):
+                self.assertIn(f'class="{cls}"', page)
 
     def test_open_position_shows_decision_figures(self):
         self.add_position(underlying="dec")
@@ -524,12 +536,21 @@ class TestInlineActions(WebTestCase):
         return [p for p in self.positions()
                 if p.underlying == ticker.upper() and p.is_open][0]
 
-    def test_rows_carry_action_links(self):
-        self._fresh("lnk")
+    def test_rows_carry_one_button_and_the_open_form_carries_the_tabs(self):
+        position = self._fresh("lnk")
         body = self.get("/")
+        self.assertIn(f"act={position.id}&do=close", body)
+        self.assertNotIn("&do=roll", body)           # one button per row, not five
+        opened = self.get(f"/?show=open&act={position.id}&do=close")
         for action in ("close", "roll", "expire", "assign", "split"):
             with self.subTest(action=action):
-                self.assertIn(f"&do={action}", body)
+                self.assertIn(f'href="/?show=open&act={position.id}&do={action}#row-{position.id}"'
+                              f' data-form-tab="{action}"', opened)
+        # All five forms are in the row; only the chosen one is shown.
+        self.assertIn('data-form="close">', opened)
+        self.assertIn('data-form="roll" hidden', opened)
+        self.assertIn('class="tabs even"', opened)
+        self.assertIn('data-form-tab="roll" class="tab-roll"', opened)   # colour-coded
 
     def test_requesting_an_action_opens_its_form_under_the_row(self):
         position = self._fresh("inl")
@@ -544,17 +565,67 @@ class TestInlineActions(WebTestCase):
         body = self.get(f"/?show=open&act={position.id}&do=close")
         # 10 contracts at 3.00 less 6.50 fee is 2,993.50; half of it back at
         # 6.50 closing fee is a 1.49 buy-back.
-        self.assertIn('name="close_price" id="f_close_price"\n         value="1.49"',
-                      body)
+        self.assertIn('name="close_price" id="f_close_price" value="1.49"', body)
         self.assertIn("Pre-filled with the 50% target", body)
 
-    def test_roll_form_is_two_labelled_trades(self):
+    def test_roll_form_is_two_legs_with_matching_columns(self):
         position = self._fresh("two")
         body = self.get(f"/?show=open&act={position.id}&do=roll")
-        self.assertIn("<legend>1. Close this leg</legend>", body)
-        self.assertIn("<legend>2. Open the new leg</legend>", body)
-        self.assertLess(body.index("1. Close this leg"),
-                        body.index("2. Open the new leg"))
+        # A short position rolls as buy-to-close then sell-to-open.
+        self.assertIn(">BTC</b>", body)
+        self.assertIn(">STO</b>", body)
+        self.assertLess(body.index(">BTC</b>"), body.index(">STO</b>"))
+        # The closing leg's terms are fixed text; the new leg's are inputs.
+        self.assertIn('<span class="fixed">35.00</span>', body)
+        self.assertIn('name="new_strike" id="f_new_strike" value="35" step="0.5"', body)
+        self.assertIn('class="btn-roll"', body)
+        # And the form can be dismissed without acting, by x or by Cancel.
+        self.assertIn(f'class="close-form" href="/?show=open#row-{position.id}"', body)
+        self.assertIn(f'class="btn cancel" href="/?show=open#row-{position.id}"', body)
+
+    def test_close_expire_and_assign_use_the_same_leg_grid(self):
+        position = self._fresh("grd")
+        close = self.get(f"/?show=open&act={position.id}&do=close")
+        self.assertIn(">BTC</b>", close)
+        self.assertIn('aria-label="Close price / share"', close)
+        expire = self.get(f"/?show=open&act={position.id}&do=expire")
+        self.assertIn(">EXP</b>", expire)
+        self.assertIn('<span class="fixed">0.00</span>', expire)
+        assign = self.get(f"/?show=open&act={position.id}&do=assign")
+        self.assertIn(">ASG</b>", assign)
+        self.assertIn(">BUY</b>", assign)                   # the share leg
+        self.assertIn('<span class="fixed">1000</span>', assign)
+        # All five forms in the row share the grid, so switching is not jarring.
+        for body in (close, expire, assign):
+            self.assertEqual(body.count('class="leg-grid"'), 5)
+        self.assertIn(">SPLIT</b>", close)
+        self.assertIn('aria-label="Contracts to peel off"', close)
+
+    def test_new_position_form_is_a_leg_row(self):
+        body = self.get("/new")
+        self.assertIn('class="leg-grid" data-fee-rate=', body)
+        self.assertIn('<option value="SHORT" selected>STO</option>', body)
+        self.assertIn('<option value="LONG">BTO</option>', body)
+        self.assertIn('id="f_quantity"', body)
+        self.assertIn('id="f_open_fee"', body)
+        self.assertIn('name="strike" id="f_strike" value="" step="0.5"', body)
+
+    def test_long_position_rolls_as_sell_to_close_then_buy_to_open(self):
+        self.add_position(underlying="lng", direction="LONG")
+        position = [p for p in self.positions() if p.underlying == "LNG"][0]
+        body = self.get(f"/?show=open&act={position.id}&do=roll")
+        self.assertLess(body.index(">STC</b>"), body.index(">BTO</b>"))
+
+    def test_short_column_headers_keep_their_full_name_as_a_title(self):
+        body = self.get("/?show=open")
+        self.assertIn('<th title="Open price / share"><abbr>Open</abbr></th>', body)
+        self.assertIn('<th title="Break-even for the chain"><abbr>B/E</abbr></th>', body)
+
+    def test_row_actions_mark_the_open_one(self):
+        position = self._fresh("opn")
+        body = self.get(f"/?show=open&act={position.id}&do=close")
+        self.assertIn('class="act act-close here"', body)
+        self.assertIn('<td class="main">', body)
 
     def test_submitting_inline_returns_to_the_positions_page(self):
         position = self._fresh("ret")
@@ -609,7 +680,7 @@ class TestChainView(WebTestCase):
         self.assertIn("All legs realized", body)
         self.assertIn("2026-04-17", body)          # the other half's roll
         # Same columns as the positions page: one renderer.
-        self.assertIn("<th>Break-even</th>", body)
+        self.assertIn("<abbr>B/E</abbr>", body)
         self.assertIn("<th>Legs</th>", body)
         # The row being looked at is marked, and still a link to itself.
         self.assertRegex(body, r'<tr id="row-%s" class="[^"]*\bcurrent\b' % four.id)
@@ -637,14 +708,16 @@ class TestPositionsPageLayout(WebTestCase):
         return [p for p in self.positions()
                 if p.underlying == ticker.upper() and p.is_open][0]
 
-    def test_actions_sit_beneath_the_contract_and_are_colour_coded(self):
+    def test_actions_have_their_own_cell_and_are_colour_coded(self):
         self._fresh("lay")
         body = self.get("/")
-        cell = re.search(r'<td><a href="/position/[^"]+">.*?</td>', body, re.S).group(0)
-        self.assertIn('class="row-actions"', cell)
-        for action in ("close", "roll", "expire", "assign", "split"):
-            with self.subTest(action=action):
-                self.assertIn(f'class="act act-{action}', cell)
+        # The contract cell holds the contract only; the actions sit in theirs.
+        contract = re.search(r'<td class="main"><a href="/position/[^"]+">.*?</td>', body, re.S).group(0)
+        self.assertNotIn("row-actions", contract)
+        cell = re.search(r'<td class="acts">.*?</td>', body, re.S).group(0)
+        self.assertIn('class="act act-close"', cell)
+        self.assertEqual(cell.count("<a "), 1)
+        self.assertNotIn("row-actions", cell)
 
     def test_status_is_a_badge(self):
         self._fresh("bdg")
@@ -762,8 +835,8 @@ class TestChainExpansion(WebTestCase):
         page = self.get(f"/?show=open&chain={four.id}&act={six.id}&do=close")
         self.assertIn('class="action-row"', page)
         self.assertEqual(page.count(f'id="row-{parent.id}"'), 1)   # still expanded
-        # Opening another action keeps the chain expanded.
-        self.assertIn(f"chain={four.id}&act={four.id}&do=roll", page)
+        # Opening another row's form keeps the chain expanded.
+        self.assertIn(f"chain={four.id}&act={four.id}&do=close", page)
         # Collapsing the chain keeps the open form.
         self.assertIn(f'href="/?show=open&act={six.id}&do=close#row-{four.id}"', page)
         # The open action's own link closes just the form.
@@ -778,7 +851,7 @@ class TestChainExpansion(WebTestCase):
                             if p.underlying == "SAC" and p.is_open],
                            key=lambda p: p.quantity)
         expanded = self.get(f"/?show=open&chain={four.id}")
-        self.assertIn(f"act={six.id}&do=roll", expanded)
+        self.assertIn(f"act={six.id}&do=close", expanded)
 
 
 class TestRowColumnsAndChainBlock(WebTestCase):
@@ -789,10 +862,10 @@ class TestRowColumnsAndChainBlock(WebTestCase):
 
     def test_columns_in_the_requested_order(self):
         body = self.get("/")
-        headers = re.findall(r"<th>(.*?)</th>", body)
-        self.assertEqual(headers, ["", "Contract", "DTE", "Status", "Open price",
-                                   "Close price", "Credit", "Closing", "Realized",
-                                   "Carry", "Break-even", "At risk", "Legs"])
+        headers = re.findall(r"<th(?: [^>]*)?>(?:<abbr>)?(.*?)(?:</abbr>)?</th>", body)
+        self.assertEqual(headers, ["", "Contract", "DTE", "Status", "Open",
+                                   "Close", "Credit", "Closing", "Realized",
+                                   "Carry", "B/E", "At risk", "", "Legs"])
 
     def test_open_position_projects_close_to_the_target(self):
         position = self._fresh("prj")
@@ -920,11 +993,51 @@ class TestPartialAndProjection(WebTestCase):
         # 2,993.50 credit less 1,496.50 projected closing = 1,497.00, greyed.
         self.assertIn('title="expected at the 50% target">1,497.00</span>', row)
 
-    def test_script_prefetches_and_swaps_partials(self):
+    def test_script_fetches_only_the_rows_it_needs(self):
         js = self.get("/static/app.js")
-        self.assertIn("partial=table", js)
-        self.assertIn("prefetchAll", js)
-        self.assertIn("replaceWith", js)
+        self.assertIn("'block'", js)              # a chain: its rows only
+        self.assertIn("'action'", js)             # a form: its row and the form
+        self.assertIn("closeForms", js)           # closing fetches nothing
+        self.assertIn("patchRows", js)            # a full table is diffed, not swapped
+        self.assertNotIn("mouseover", js)         # and nothing is fetched speculatively
+        self.assertNotIn("prefetchAll", js)
+
+    def test_block_partial_is_just_the_chain_rows(self):
+        self.add_position(underlying="blk")
+        parent = [p for p in self.positions() if p.underlying == "BLK"][0]
+        self.post(f"/position/{parent.id}/split", {"quantity": "4", "on": "2026-02-01"})
+        self.add_position(underlying="oth")
+        four = min([p for p in self.positions() if p.underlying == "BLK" and p.is_open],
+                   key=lambda p: p.quantity)
+        block = self.get(f"/?show=open&chain={four.id}&partial=block")
+        self.assertNotIn("<table", block)
+        self.assertIn('class="chain-head"', block)
+        self.assertEqual(block.count("<tr"), 4)                # head + three legs
+        self.assertNotIn("OTH", block)
+
+    def test_action_partial_is_the_row_and_its_form(self):
+        self.add_position(underlying="actp")
+        p = [q for q in self.positions() if q.underlying == "ACTP"][0]
+        frag = self.get(f"/?show=open&act={p.id}&do=roll&partial=action")
+        self.assertTrue(frag.startswith(f'<tr id="row-{p.id}"'), frag[:80])
+        self.assertEqual(frag.count('class="action-row"'), 1)
+        self.assertIn('class="act act-close here"', frag)
+        self.assertNotIn("<table", frag)
+        # Without an open form there is nothing to send.
+        self.assertEqual(self.get(f"/?show=open&act={p.id}&partial=action"), "")
+
+    def test_responses_are_gzipped_when_the_browser_accepts_it(self):
+        import gzip
+        req = urllib.request.Request(self.base + "/?show=open&partial=table",
+                                     headers={"Accept-Encoding": "gzip"})
+        with urllib.request.urlopen(req) as res:
+            self.assertEqual(res.headers.get("Content-Encoding"), "gzip")
+            raw = res.read()
+            self.assertEqual(int(res.headers["Content-Length"]), len(raw))
+        self.assertIn("table", gzip.decompress(raw).decode())
+        # Small responses and clients that do not ask are left alone.
+        with urllib.request.urlopen(self.base + "/?show=open&partial=table") as res:
+            self.assertIsNone(res.headers.get("Content-Encoding"))
 
 
 class TestShares(WebTestCase):
@@ -1125,6 +1238,48 @@ class TestFutureDatesRefused(WebTestCase):
                             if q.underlying == "FUT1"))
 
 
+class TestTransport(WebTestCase):
+    """Keep-alive, so a burst of fetches does not overflow the listen backlog."""
+
+    def test_speaks_http_1_1_and_reuses_a_connection(self):
+        import http.client
+        from bcoj.web.server import Handler, Server
+        self.assertEqual(Handler.protocol_version, "HTTP/1.1")
+        self.assertGreaterEqual(Server.request_queue_size, 64)
+        host, port = self.base.replace("http://", "").split(":")
+        conn = http.client.HTTPConnection(host, int(port))
+        try:
+            for path in ("/", "/?show=open&partial=table", "/static/app.js"):
+                conn.request("GET", path)
+                res = conn.getresponse()
+                body = res.read()
+                self.assertEqual(res.status, 200)
+                self.assertEqual(int(res.getheader("Content-Length")), len(body))
+                self.assertEqual(res.version, 11)
+        finally:
+            conn.close()
+
+    def test_logging_survives_a_connection_with_no_request_line(self):
+        # A browser dropping a kept-alive connection makes the stdlib log an
+        # error before any request was parsed: no command, no path.
+        import io, contextlib
+        from bcoj.web.server import Handler
+        handler = Handler.__new__(Handler)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            _ORIGINAL_LOG_MESSAGE(handler, "code %d, message %s", 400,
+                                  "Bad request version ('')")
+            _ORIGINAL_LOG_MESSAGE(handler, '"%s" %s %s', "GET / HTTP/1.1", "200", "-")
+        self.assertIn("Bad request version", out.getvalue())
+        self.assertIn("-> 200", out.getvalue())
+
+    def test_refusals_also_carry_a_length(self):
+        status, _, body = self.post("/shares/sell", {"underlying": "none", "on": "2026-01-05",
+                                                     "quantity": "1", "price": "1"})
+        self.assertEqual(status, 400)
+        self.assertTrue(body)
+
+
 class TestDecisionSupport(WebTestCase):
     """M4: the roll panel, the risk page, and strike drift on a chain."""
 
@@ -1136,7 +1291,10 @@ class TestDecisionSupport(WebTestCase):
         p = self._open("rpv")
         page = self.get(f"/position/{p.id}?do=roll")
         self.assertIn(f'data-preview="/position/{p.id}/roll-preview"', page)
-        self.assertIn("Enter the buy-back price", page)
+        self.assertIn("appears here as you type", page)
+        # Within the roll panel the date comes first, then the legs.
+        panel = page[page.index('data-form="roll"'):page.index('data-form="expire"')]
+        self.assertLess(panel.index('name="on"'), panel.index('class="leg-grid"'))
 
     def test_roll_preview_shows_the_engine_figures(self):
         # Fixture leg: 10 puts at 35, 3.00, fee 6.50. Same roll as the engine test.
@@ -1145,7 +1303,8 @@ class TestDecisionSupport(WebTestCase):
                         "&new_expiry=2026-03-20&new_strike=34&new_price=5.00"
                         "&new_fee=7.80&new_quantity=12&on=2026-02-06")
         self.assertIn("credit 1,985.70", frag)
-        self.assertIn("29.85", frag)           # break-even after
+        self.assertIn('<span class="pos">29.85</span>', frag)   # break-even fell: good
+        self.assertIn("was 32.01", frag)
         self.assertIn("40,800.00", frag)       # capital at risk after
         self.assertIn("Size grows 10 &rarr; 12", frag)
         self.assertIn("42 DTE", frag)
@@ -1155,7 +1314,7 @@ class TestDecisionSupport(WebTestCase):
     def test_roll_preview_waits_politely_for_missing_fields(self):
         p = self._open("rpw")
         frag = self.get(f"/position/{p.id}/roll-preview?close_price=4.00")
-        self.assertIn("Enter the buy-back price", frag)
+        self.assertIn("appears here as you type", frag)
 
     def test_roll_preview_flags_a_chain_left_under_water(self):
         p = self._open("rpu")
