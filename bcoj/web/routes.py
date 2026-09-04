@@ -360,7 +360,7 @@ def positions_page(conn, query, token: str = "") -> tuple[int, str]:
     queue = validate.expiring(open_ones)
     banner = ""
     if queue:
-        banner = (f'<div class="callout"><a href="/expiring">'
+        banner = (f'<div class="callout"><a href="/?show=open&amp;due=0">'
                   f"{len(queue)} position(s) at or past expiry need an outcome"
                   "</a></div>")
 
@@ -605,6 +605,18 @@ def _new_form_body(conn, token, form, problems, back: str) -> str:
     grid = _leg_grid([leg], attrs=f' data-fee-rate="{r.esc(rate)}"')
     when = r.field("Opened", "opened_on", _one(form, "opened_on", r.today_iso()),
                    kind="date", required=True)
+    # A short call sold against shares bought at the same time is a buy-write:
+    # the shares are recorded with it and the call is covered from the start.
+    with_shares = _one(form, "with_shares", "NONE")
+    shares_row = '<div class="grid compact">' + "".join([
+        r.select("Shares", "with_shares", [("NONE", "none"), ("BUY", "bought with it (buy-write)")],
+                 with_shares),
+        '<span class="when-shares">'
+        + r.field("Shares bought", "shares", _one(form, "shares"), kind="number", step="1")
+        + r.field("Share price", "share_price", _one(form, "share_price"), kind="number", step="0.01")
+        + r.field("Share fee", "share_fee", _one(form, "share_fee", "0.00"), kind="number", step="0.01")
+        + "</span>",
+    ]) + "</div>"
     # A compact row for a trade being caught up on: how it ended. The closing
     # fields show only once an outcome is picked.
     over = '<div class="grid compact">' + "".join([
@@ -621,15 +633,11 @@ def _new_form_body(conn, token, form, problems, back: str) -> str:
         r.field("Notes", "notes", _one(form, "notes"), attrs=' placeholder="why this trade"'),
         r.field("Tags", "tags", _one(form, "tags"), attrs=' list="all-tags" autocomplete="off"'
                                                         ' placeholder="wheel, earnings"'),
-        r.select("Cover with lot", "share_lot_id",
-                 [("", "- not covered -")] + [
-                     (l.id, _lot_label(l)) for l in sorted(
-                         store.load_lots(conn), key=lambda l: (l.underlying, l.acquired_on))
-                 ], _one(form, "share_lot_id")),
+
     ]) + "</div>"
     return (r.problems_block(problems)
             + r.datalist("tickers", tickers) + r.datalist("all-tags", store.all_tags(conn))
-            + r.form("/new", r.hidden("next", back) + when + grid + rest, token,
+            + r.form("/new", r.hidden("next", back) + when + grid + shares_row + rest, token,
                      submit="Add position", cls="two-part", submit_cls="btn-open"))
     return 200, r.page("New position", body, nav_here="new")
 
@@ -666,13 +674,29 @@ def create_position(conn, form, token) -> None:
         status=Status.OPEN,
         notes=_one(form, "notes"),
         tags=store.normalize_tags(_one(form, "tags")),
-        share_lot_id=_one(form, "share_lot_id") or None,
     )
 
     existing = store.load_positions(conn)
     problems = validate.validate_position(position, existing, rate)
     if validate.errors(problems):
         raise Invalid(problems, form)
+
+    if _one(form, "with_shares", "NONE").upper() == "BUY":
+        if position.right is not Right.CALL or position.direction is not Direction.SHORT:
+            raise BadRequest("A buy-write is a short call sold against shares bought with it")
+        if _one(form, "outcome", "OPEN").upper() != "OPEN":
+            raise BadRequest("Record the buy-write first, then close or assign the call above")
+        result = actions.buy_write(
+            position.underlying, shares=_int(form, "shares", label="Shares bought"),
+            share_price=_decimal(form, "share_price", label="Share price"),
+            expiry=position.expiry, strike=position.strike, call_price=position.open_price,
+            on=position.opened_on, contracts=position.quantity,
+            share_fee=_decimal(form, "share_fee", ZERO), option_fee=position.open_fee,
+        )
+        call = result.created[0]
+        call.notes, call.tags = position.notes, position.tags
+        store.apply(conn, result, "entered by hand")
+        raise Redirect(_next(form, "/new"), f"Added {result.summary}")
 
     outcome = _one(form, "outcome", "OPEN").upper()
     ended = None
@@ -737,7 +761,7 @@ def position_page(conn, position_id, token, query) -> tuple[int, str]:
         strips += ("<h2>This branch</h2>"
                    + _cards(_chain_cards(index, position, chain), "totals wide"))
     strips += ("<h2>This position</h2>"
-               + _cards(_position_cards(position, chain, carry, lots), "totals wide"))
+               + _cards(_position_cards(position, chain, carry, lots, conn), "totals wide"))
 
     # Actions open in the chain table below, exactly as on the positions
     # page. ``?do=X`` alone means this position; ``act`` may name another leg.
@@ -751,16 +775,6 @@ def position_page(conn, position_id, token, query) -> tuple[int, str]:
         return 200, _chain_action_partial(index, position, act_id, which, token)
 
     actions_block = ""
-    if position.is_open:
-        if position.right is Right.CALL and position.direction is Direction.SHORT:
-            candidates = [l for l in lots if l.underlying == position.underlying]
-            if candidates:
-                options = [("", "- none (naked) -")] + [(l.id, _lot_label(l)) for l in candidates]
-                actions_block += ("<h3>Covering lot</h3>" + r.form(
-                    f"/position/{r.esc(position.id)}/cover",
-                    r.hidden("next", here) + r.select("Shares this call is written against",
-                                                      "lot_id", options, position.share_lot_id or ""),
-                    token, submit="Save", cls="grid"))
     notes = ("<h2>Notes</h2>" + r.form(
         f"/position/{r.esc(position.id)}/notes",
         r.hidden("next", here)
@@ -1104,7 +1118,7 @@ def _campaign_cards(fam, word: str = "Campaign") -> list:
     return cells
 
 
-def _position_cards(position, chain, carry, lots) -> list:
+def _position_cards(position, chain, carry, lots, conn=None) -> list:
     """This leg alone: its terms, its cash, and where it stands."""
     cells = [("Status", r.status_badge(position.status)
               + _sub(f"opened {position.opened_on} &middot; expiry {position.expiry}"), None)]
@@ -1141,12 +1155,19 @@ def _position_cards(position, chain, carry, lots) -> list:
 
     lot_by_id = {l.id: l for l in lots}
     if position.right is Right.CALL and position.direction is Direction.SHORT:
-        covering = lot_by_id.get(position.share_lot_id) if position.share_lot_id else None
-        if covering:
-            cells.append(("Covered by", f'<a href="/shares/{r.esc(covering.underlying)}">'
-                                        f"{r.esc(_lot_label(covering))}</a>", None))
+        # Coverage is the ticker's: shares held against the shares every open
+        # call controls, delivered oldest lot first if assigned.
+        held = _shares_held(conn, position.underlying)
+        called = sum(p.shares for p in store.load_positions(conn, position.underlying)
+                     if p.is_open and p.right is Right.CALL and p.direction is Direction.SHORT)
+        if held <= 0:
+            cells.append(("Shares behind it", '<span class="neg">none - naked</span>', -1))
         else:
-            cells.append(("Covered by", '<span class="neg">nothing - naked</span>', -1))
+            short = max(called - held, 0)
+            text = (f'<a href="/shares/{r.esc(position.underlying)}">{held} held</a>'
+                    + _sub(f"{called} called across open calls"
+                           + (f" &middot; <span class='neg'>{short} uncovered</span>" if short else "")))
+            cells.append(("Shares behind it", text, -1 if short else None))
     created = [l for l in lots if l.assigning_position_id == position.id
                and position.right is Right.PUT]
     if created:
@@ -1451,7 +1472,8 @@ def risk_page(conn, query) -> tuple[int, str]:
     shares_at_cost = {t.underlying: t.held_cost for t in tickers if not t.error}
     blocked = [t.underlying for t in tickers if t.error]
 
-    risks = [t for t in decide.concentration(positions, shares_at_cost)
+    shares_held = {t.underlying: t.held for t in tickers if not t.error}
+    risks = [t for t in decide.concentration(positions, shares_at_cost, shares_held)
              if t.open_positions or t.shares_at_cost or t.naked_calls]
     total = decide.total_exposure(risks)
     options_at_risk = q2(sum((t.at_risk for t in risks), ZERO))
@@ -1533,17 +1555,70 @@ that way.</p>"""
 # ---------------------------------------------------------------------------
 # filtering and saved views
 
-FILTER_KEYS = ("ticker", "q", "right", "side", "tag", "since", "until", "period")
+FILTER_KEYS = ("ticker", "due", "q", "right", "side", "tag", "since", "until", "period")
+DUE = (("0", "at or past expiry"), ("7", "within 7 days"), ("30", "within 30 days"))
 PERIODS = (("3m", "Last 3 months", 91), ("6m", "Last 6 months", 182),
            ("ytd", "This year", None), ("1y", "Last 12 months", 365))
 
 
-def _period_cutoff(code: str) -> date | None:
-    today = date.today()
+def _quarter_start(day: date) -> date:
+    return date(day.year, 3 * ((day.month - 1) // 3) + 1, 1)
+
+
+def _add_months(day: date, months: int) -> date:
+    y, m = divmod(day.month - 1 + months, 12)
+    return date(day.year + y, m + 1, 1)
+
+
+def _period_window(code: str, today: date | None = None):
+    """The (start, end) a period code covers, end exclusive; None for none.
+
+    Rolling: 3m, 6m, 1y. Calendar: ytd, tm (this month), tq (this quarter),
+    m:YYYY-MM, q:YYYY-Qn, y:YYYY."""
+    today = today or date.today()
+    if not code:
+        return None
     for key, _, days in PERIODS:
-        if key == code:
-            return date(today.year, 1, 1) if days is None else today - timedelta(days=days)
+        if key == code and days is not None:
+            return today - timedelta(days=days), None
+    if code == "ytd":
+        return date(today.year, 1, 1), None
+    if code == "tm":
+        return date(today.year, today.month, 1), None
+    if code == "tq":
+        return _quarter_start(today), None
+    try:
+        if code.startswith("m:"):
+            y, m = (int(x) for x in code[2:].split("-"))
+            start = date(y, m, 1)
+            return start, _add_months(start, 1)
+        if code.startswith("q:"):
+            y, q = code[2:].split("-Q")
+            start = date(int(y), 3 * (int(q) - 1) + 1, 1)
+            return start, _add_months(start, 3)
+        if code.startswith("y:"):
+            y = int(code[2:])
+            return date(y, 1, 1), date(y + 1, 1, 1)
+    except (ValueError, TypeError):
+        return None
     return None
+
+
+def _period_label(code: str) -> str:
+    for key, label, _ in PERIODS:
+        if key == code:
+            return label
+    fixed = {"ytd": "This year", "tm": "This month", "tq": "This quarter"}
+    if code in fixed:
+        return fixed[code]
+    window = _period_window(code)
+    if window and code.startswith("m:"):
+        return window[0].strftime("%b %Y")
+    if window and code.startswith("q:"):
+        return f"Q{(window[0].month - 1) // 3 + 1} {window[0].year}"
+    if window and code.startswith("y:"):
+        return str(window[0].year)
+    return code
 
 
 def _filter_qs(query) -> str:
@@ -1553,7 +1628,9 @@ def _filter_qs(query) -> str:
 
 
 def _apply_filters(listed, query, show: str = "open"):
-    cutoff = _period_cutoff((query.get("period") or [""])[0].strip())
+    window = _period_window((query.get("period") or [""])[0].strip())
+    due = (query.get("due") or [""])[0].strip()
+    due_days = int(due) if due.isdigit() else None
     q = (query.get("q") or [""])[0].strip().casefold()
     ticker = (query.get("ticker") or [""])[0].strip().upper()
     right = (query.get("right") or [""])[0].strip().upper()
@@ -1564,6 +1641,8 @@ def _apply_filters(listed, query, show: str = "open"):
     out = []
     for p in listed:
         if ticker and p.underlying != ticker:
+            continue
+        if due_days is not None and (not p.is_open or (p.expiry - date.today()).days > due_days):
             continue
         if q and q not in p.underlying.casefold() and q not in p.notes.casefold() \
                 and not any(q in t.casefold() for t in p.tags):
@@ -1578,19 +1657,20 @@ def _apply_filters(listed, query, show: str = "open"):
             continue
         if until and p.opened_on.isoformat() > until:
             continue
-        if cutoff:
+        if window:
             # The date that matters is the one the list is about: when a
             # closed leg closed, when an open one was opened; either for all.
             when = (p.closed_on or p.opened_on) if show != "open" else p.opened_on
-            if when < cutoff:
+            start, stop = window
+            if when < start or (stop is not None and when >= stop):
                 continue
         out.append(p)
     return out
 
 
-ADVANCED = ("right", "side", "tag", "since", "until")
-LABELS = {"ticker": "Ticker", "q": "Find", "right": "Right", "side": "Side", "tag": "Tag",
-          "since": "Opened from", "until": "Opened to", "period": "Period"}
+ADVANCED = ("due", "right", "side", "tag", "since", "until")
+LABELS = {"ticker": "Ticker", "due": "Due", "q": "Find", "right": "Right", "side": "Side",
+          "tag": "Tag", "since": "Opened from", "until": "Opened to", "period": "Period"}
 
 
 def _with(query, show: str, **changes) -> str:
@@ -1604,29 +1684,116 @@ def _with(query, show: str, **changes) -> str:
     return r.esc("/?" + urllib.parse.urlencode(params))
 
 
+def _same_state(a: str, b: str) -> bool:
+    """Two query strings naming the same view, however they were encoded."""
+    return urllib.parse.parse_qs(a, keep_blank_values=False) == \
+        urllib.parse.parse_qs(b, keep_blank_values=False)
+
+
+PRESET_VIEWS = (
+    ("Expiring", "show=open&due=0"),
+    ("This month", "show=all&period=tm"),
+    ("This quarter", "show=all&period=tq"),
+    ("This year", "show=all&period=ytd"),
+    ("Last 12 months", "show=all&period=1y"),
+)
+
+
+PERIOD_SEGMENTS = (("", "All time"), ("3m", "3m"), ("6m", "6m"), ("ytd", "YTD"), ("1y", "12m"))
+MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
 def _filter_bar(conn, query, show: str, token: str, positions=()) -> str:
-    """Status and period as segmented controls, ticker and search beside
-    them, the rest behind More. Every control applies itself; what is active
-    shows as chips that can be removed one at a time."""
+    """Views on one line, filters on the next.
+
+    A view is a whole destination -- status and filters together -- and a
+    filter narrows the table in front of you. Keeping them apart is what lets
+    "This quarter" mean everything that happened this quarter rather than
+    whatever status happened to be showing."""
     get = lambda k: (query.get(k) or [""])[0].strip()  # noqa: E731
     tags = store.all_tags(conn)
     tickers = store.recent_underlyings(conn, limit=500)      # most recently traded first
+    active = _filter_qs(query)
+    current = f"show={show}" + (f"&{active}" if active else "")
 
-    def seg(items, key, current) -> str:
+    # --- views: one stacked control. The top row is the presets and the two
+    # most recent saved views. Rows beneath appear only when they mean
+    # something: the due windows while Expiring is on; the years when the
+    # Views label is opened, then a picked year's quarters and months; the
+    # older saved views and saving in the last row of the opened stack.
+    def view_chip(label, state, extra_cls: str = "", on: bool | None = None) -> str:
+        here = _same_state(state, current) if on is None else on
+        return (f'<a class="flt chip view{extra_cls}{" here" if here else ""}" href="/?{r.esc(state)}">'
+                f"{label}</a>")
+
+    due, period = get("due"), get("period")
+    expiring_on = show == "open" and due in dict(DUE)
+    row1 = [view_chip("Expiring", "show=open&due=0", on=expiring_on)]
+    row1 += [view_chip(label, state) for label, state in PRESET_VIEWS
+             if label not in ("Expiring", "Last 12 months")]
+    saved_all = store.load_views(conn)
+
+    def saved_chip(v) -> str:
+        here_cls = " here" if _same_state(v["filter"], current) else ""
+        return (f'<span class="chip view saved{here_cls}"><a class="flt" href="/?{r.esc(v["filter"])}">'
+                f'{r.esc(v["name"])}</a>'
+                + r.form(f"/views/{r.esc(v['id'])}/delete", r.hidden("next", f"/?show={show}"),
+                         token, submit="\u00d7", cls="inline") + "</span>")
+
+    row1 += [saved_chip(v) for v in saved_all[:2]]
+
+    years = sorted({p.opened_on.year for p in positions} | {date.today().year})
+    picked_year = None
+    if show == "all" and period[:2] in ("y:", "q:", "m:"):
+        try:
+            picked_year = int(period[2:6])
+        except ValueError:
+            picked_year = None
+    shown = picked_year is not None
+    label = (f'<a class="views-label{" here" if shown else ""}" href="#allviews" '
+             'data-toggle="allviews" title="More views">Views <span class="caret"></span></a>')
+
+    rows = [f'<div class="chips views">{label}{"".join(row1)}</div>']
+    if expiring_on:
+        rows.append('<div class="chips views sub" id="duerow"><span class="lbl">Due</span>'
+                    + "".join(view_chip(text, f"show=open&due={code}") for code, text in DUE)
+                    + "</div>")
+    year_row = ('<div class="chips views sub"><span class="lbl">Year</span>'
+                + "".join(view_chip(str(y), f"show=all&period=y:{y}", " year", on=(picked_year == y))
+                          for y in years) + "</div>")
+    sub_row = ""
+    if picked_year is not None:
+        subs = [view_chip(f"Q{q}", f"show=all&period=q:{picked_year}-Q{q}") for q in range(1, 5)]
+        subs += [view_chip(name, f"show=all&period=m:{picked_year}-{m:02d}")
+                 for m, name in enumerate(MONTHS, start=1)]
+        sub_row = f'<div class="chips views sub"><span class="lbl">{picked_year}</span>{"".join(subs)}</div>'
+    older = "".join(saved_chip(v) for v in saved_all[2:])
+    save = ('<details class="save"><summary title="Keep the current status and filters under a name">'
+            "Save view as&hellip;</summary>"
+            + r.form("/views/save",
+                     r.hidden("next", f"/?{current}") + r.hidden("filter", current)
+                     + r.field("Name", "name", "", required=True, attrs=' placeholder="a name"'),
+                     token, submit="Save", cls="inline save-view")
+            + "</details>")
+    saved_row = (f'<div class="chips views sub"><span class="lbl">Saved</span>'
+                 f'{older or "<span class=dim>the newest two are above</span>"}{save}</div>')
+    rows.append(f'<div id="allviews"{"" if shown else " hidden"}>{year_row}{sub_row}{saved_row}</div>')
+    views_line = f'<div class="viewstack">{"".join(rows)}</div>'
+
+    # --- filters
+    def seg(items, key, current_value) -> str:
         links = []
         for value, label in items:
-            cls = ' class="flt here"' if value == current else ' class="flt"'
+            cls = ' class="flt here"' if value == current_value else ' class="flt"'
             href = _with(query, value, **{}) if key == "show" else _with(query, show, **{key: value})
             links.append(f'<a href="{href}"{cls}>{label}</a>')
         return '<nav class="seg">' + "".join(links) + "</nav>"
 
     status = seg((("open", "Open"), ("closed", "Closed"), ("all", "All")), "show", show)
-    period = seg((("", "All time"),) + tuple((c, l.replace("Last ", "").replace(" months", "m")
-                                                 .replace("This year", "YTD").replace("12 m", "12m"))
-                                              for c, l, _ in PERIODS), "period", get("period"))
-
-    advanced_on = any(get(k) for k in ADVANCED)
+    advanced_n = sum(1 for k in ADVANCED if get(k))
+    # In the order they are reached for: the ticker first, the rare ones in More.
     more = "".join([
+        r.select("Due", "due", [("", "any time")] + list(DUE), get("due")),
         r.select("Right", "right", [("", "any"), ("PUT", "Put"), ("CALL", "Call")], get("right")),
         r.select("Side", "side", [("", "any"), ("SHORT", "Short"), ("LONG", "Long")], get("side")),
         r.select("Tag", "tag", [("", "any")] + [(t, t) for t in tags], get("tag")) if tags else "",
@@ -1635,50 +1802,29 @@ def _filter_bar(conn, query, show: str, token: str, positions=()) -> str:
         '<div class="actions"><button type="submit">Apply</button></div>',
     ])
     form = (f'<form class="filters" method="get" action="/">'
-            + r.hidden("show", show) + r.hidden("period", get("period"))
+            + r.hidden("show", show)
             + r.select("Ticker", "ticker", [("", "any")] + [(t, t) for t in tickers], get("ticker"))
             + r.field("Find", "q", get("q"), attrs=' placeholder="note or tag" autocomplete="off"')
-            + f'<details class="more"{" open" if advanced_on else ""}><summary>More</summary>'
+            + seg(PERIOD_SEGMENTS, "period",
+                  get("period") if get("period") in dict(PERIOD_SEGMENTS) else None)
+            + f'<details class="more"><summary>More{f" ({advanced_n})" if advanced_n else ""}</summary>'
             f'<div class="more-fields">{more}</div></details>'
             + "</form>")
-    chips = []
+
+    on = []
     for k in FILTER_KEYS:
         v = get(k)
         if not v:
             continue
-        shown = v
-        if k == "period":
-            shown = next((l for c, l, _ in PERIODS if c == v), v)
-        chips.append(f'<span class="chip on">{r.esc(LABELS[k])}: {r.esc(shown)}'
-                     f'<a class="flt x" href="{_with(query, show, **{k: ""})}" '
-                     f'title="Remove this filter">&times;</a></span>')
-    active = _filter_qs(query)
-    if chips:
-        chips.append(f'<a class="flt clear" href="/?show={show}">Clear all</a>')
-    active_line = f'<div class="chips active">{"".join(chips)}</div>' if chips else ""
-
-    # Saved views are their own line: named, one click each, and a folded
-    # control to keep the current filter under a name.
-    current = f"show={show}" + (f"&{active}" if active else "")
-    views = []
-    for v in store.load_views(conn):
-        here_cls = " here" if v["filter"] == current else ""
-        views.append(
-            f'<span class="chip view{here_cls}"><a class="flt" href="/?{r.esc(v["filter"])}">'
-            f'{r.esc(v["name"])}</a>'
-            + r.form(f"/views/{r.esc(v['id'])}/delete", r.hidden("next", f"/?show={show}"),
-                     token, submit="\u00d7", cls="inline") + "</span>")
-    save = ('<details class="save"><summary title="Keep the current filter under a name">'
-            "Save view as&hellip;</summary>"
-            + r.form("/views/save",
-                     r.hidden("next", f"/?{current}") + r.hidden("filter", current)
-                     + r.field("Name", "name", "", required=True, attrs=' placeholder="a name"'),
-                     token, submit="Save", cls="inline save-view")
-            + "</details>")
-    views_line = (f'<div class="chips views"><span class="dim lbl">Views</span>'
-                  f'{"".join(views)}{save}</div>')
-    return (f'<div class="filterbar"><div class="fbar">{status}{period}{form}</div>'
-            f"{active_line}{views_line}</div>")
+        shown = _period_label(v) if k == "period" else (dict(DUE).get(v, v) if k == "due" else v)
+        on.append(f'<span class="chip on">{r.esc(LABELS[k])}: {r.esc(shown)}'
+                  f'<a class="flt x" href="{_with(query, show, **{k: ""})}" '
+                  f'title="Remove this filter">&times;</a></span>')
+    if on:
+        on.append(f'<a class="flt clear" href="/?show={show}">Clear all</a>')
+    active_line = f'<div class="chips active">{"".join(on)}</div>' if on else ""
+    return (f'<div class="filterbar">{views_line}<div class="fbar">{status}{form}</div>'
+            f"{active_line}</div>")
 
 
 def do_save_view(conn, form) -> None:
@@ -1901,11 +2047,8 @@ def _health_issues(conn) -> list:
     rule = store.matching_rule(conn)
     tickers = wheels.by_ticker(index, positions, lots, disposals, rule)
     blocked = {t.underlying: t.error for t in tickers if t.error}
-    views = wheels.lot_views(index, positions, lots, disposals, rule)
-    unlinked = len(wheels.suggest_covers(index, positions, views))
     flags = [dict(f) for f in store.open_flags(conn)]
-    issues = health.check(positions, lots, disposals, blocked=blocked,
-                          unlinked_calls=unlinked, import_flags=flags)
+    issues = health.check(positions, lots, disposals, blocked=blocked, import_flags=flags)
     # An import flag whose live check no longer fires was fixed: close it.
     for f in health.cleared_flags(flags, issues):
         store.resolve_flag(conn, f["id"], "fixed in the data")
@@ -1921,7 +2064,6 @@ HEALTH_TITLES = {
     "split_sum": "Split halves do not add up",
     "duplicate": "Possible duplicate",
     "estimated": "Reconstructed, not recorded",
-    "unlinked_calls": "Covered calls not linked",
     "date_order": "Dates out of order",
     "missing_close": "Closed with no close date",
 }
@@ -2135,41 +2277,11 @@ def do_split(conn, position_id, form) -> None:
 # expiry queue
 
 
-def expiring_page(conn, query) -> tuple[int, str]:
-    window = int((query.get("within") or ["0"])[0])
-    positions = store.load_positions(conn)
-    index = ChainIndex(positions)
-    queue = validate.expiring(
-        [p for p in positions if p.is_open], within_days=window
-    )
-
-    rows = []
-    for position, days in queue:
-        pid = r.esc(position.id)
-        carry = index.carry(position)
-        rows.append([
-            f'<a href="/position/{pid}">{r.contract(position)}</a>',
-            r.dte_cell(days),
-            r.money(open_cash(position)),
-            r.money(carry, dash="0.00"),
-            r.money(capital_at_risk(position)),
-            f'<a class="btn" href="/position/{pid}?do=expire">Expired</a> '
-            f'<a class="btn" href="/position/{pid}?do=assign">Assigned</a> '
-            f'<a class="btn" href="/position/{pid}?do=roll">Roll</a>',
-        ])
-
-    tabs = " ".join(
-        f'<a href="/expiring?within={w}" class="{"here" if window == w else ""}">'
-        f"{label}</a>"
-        for w, label in ((0, "At or past expiry"), (7, "Next 7 days"),
-                         (30, "Next 30 days"))
-    )
-    body = f"""<p class="hint">With no market data the app cannot know whether
-an expired short option expired worthless or was assigned - so it asks. This
-queue is where that gets settled.</p>
-<div class="tabs">{tabs}</div>
-{r.table(["Contract", "DTE", "Credit", "Carry", "At risk", "Outcome"], rows)}"""
-    return 200, r.page("Expiring", body, nav_here="expiring")
+def expiring_redirect(query) -> None:
+    """The old expiring page is the positions page with the Due filter: the
+    same rows, the same buttons, the same forms."""
+    window = (query.get("within") or ["0"])[0]
+    raise Redirect(f"/?show=open&due={window}")
 
 
 # ---------------------------------------------------------------------------
@@ -2284,9 +2396,7 @@ def _share_context(conn):
     disposals = store.load_disposals(conn)
     rule = store.matching_rule(conn)
     tickers = wheels.by_ticker(index, positions, lots, disposals, rule)
-    views = [v for t in tickers for v in t.lots]
-    suggestions = wheels.suggest_covers(index, positions, views)
-    return positions, index, lots, disposals, tickers, suggestions
+    return positions, index, lots, disposals, tickers, {}
 
 
 def _lot_label(lot, remaining=None) -> str:
@@ -2308,13 +2418,16 @@ def _remaining_by_lot(conn, underlying: str) -> dict[str, int]:
 
 
 def _share_form_body(conn, kind: str, underlying: str, token: str, back: str) -> str:
-    """The buy / sell / buy-write form, for embedding on a page."""
+    """The buy / sell / buy-write form on the same leg grid as every option
+    form: date first, one row per leg, the extras below."""
     rate = _fee_rate(conn)
-    common = [
-        r.field("Ticker", "underlying", underlying, required=True, autofocus=not underlying,
-                attrs=' list="tickers" autocapitalize="characters" autocomplete="off"'),
-        r.field("Date", "on", r.today_iso(), kind="date", required=True),
-    ]
+    when = r.field("Date", "on", r.today_iso(), kind="date", required=True)
+    ticker_box = _box("underlying", underlying, kind="text", label="Ticker",
+                      autofocus=not underlying,
+                      attrs=' list="tickers" autocapitalize="characters" autocomplete="off"')
+    shares_word = _fixed("Shares")
+    extras = ""
+
     if kind == "sell":
         lots = [l for l in store.load_lots(conn) if not underlying or l.underlying == underlying]
         remaining = _remaining_by_lot(conn, underlying) if underlying else {}
@@ -2326,40 +2439,38 @@ def _share_form_body(conn, kind: str, underlying: str, token: str, back: str) ->
                 continue          # nothing left to sell from it
             options.append((l.id, _lot_label(l, left)))
             attrs.append(f'"{r.esc(l.id)}":{left}')
-        fields = common + [
-            r.field("Shares", "quantity", "", kind="number", step="1", required=True,
-                    attrs=' min="1"'),
-            r.field("Price / share", "price", "", kind="number", step="0.01", required=True),
-            r.field("Fee", "fee", "0.00", kind="number", step="0.01"),
-            r.select("From lot", "lot_id", options, "",
-                     hint="Leave on the account rule unless the broker matched a specific lot"),
-            f'<script type="application/json" id="lot-remaining">{{{",".join(attrs)}}}</script>',
-        ]
-        action, submit = "/shares/sell", "Record sale"
+        row = [_tag("SELL", "Shares sold", "shares"), ticker_box, _blank(), _blank(), shares_word,
+               _box("quantity", "", step="1", label="Shares", attrs=' min="1"'),
+               _box("price", "", label="Price / share"),
+               _box("fee", "0.00", label="Fee", required=False)]
+        extras = (r.select("From lot", "lot_id", options, "",
+                           hint="Leave on the account rule unless the broker matched a specific lot")
+                  + f'<script type="application/json" id="lot-remaining">{{{",".join(attrs)}}}</script>')
+        rows, action, submit, cls = [row], "/shares/sell", "Record sale", "btn-close"
     elif kind == "buy-write":
-        fields = common + [
-            r.field("Shares bought", "shares", "", kind="number", step="1", required=True),
-            r.field("Share price", "share_price", "", kind="number", step="0.01", required=True),
-            r.field("Share fee", "share_fee", "0.00", kind="number", step="0.01"),
-            r.field("Call expiry", "expiry", _next_friday().isoformat(), kind="date", required=True),
-            r.field("Call strike", "strike", "", kind="number", step="0.5", required=True),
-            r.field("Call premium / share", "call_price", "", kind="number", step="0.01", required=True),
-            r.field("Contracts", "contracts", "", kind="number", step="1",
-                    hint="Defaults to shares / 100"),
-            r.field("Option fee", "option_fee", str(rate), kind="number", step="0.01"),
-        ]
-        action, submit = "/shares/buy-write", "Record buy-write"
+        call = [_tag("STO", "Sell to open", "open"), ticker_box,
+                _box("expiry", _next_friday().isoformat(), kind="date", label="Call expiry"),
+                _box("strike", "", step="0.5", label="Call strike"), _fixed("Call"),
+                _box("contracts", "", step="1", label="Contracts", required=False,
+                     attrs=' min="1" placeholder="shares/100"'),
+                _box("call_price", "", label="Call premium / share"),
+                _box("option_fee", str(rate), label="Option fee", required=False)]
+        buy = [_tag("BUY", "Shares bought", "shares"), _fixed("same"), _blank(), _blank(), shares_word,
+               _box("shares", "", step="1", label="Shares bought", attrs=' min="1"'),
+               _box("share_price", "", label="Share price"),
+               _box("share_fee", "0.00", label="Share fee", required=False)]
+        rows, action, submit, cls = [call, buy], "/shares/buy-write", "Record buy-write", "btn-open"
     else:
-        fields = common + [
-            r.field("Shares", "quantity", "", kind="number", step="1", required=True),
-            r.field("Price / share", "price", "", kind="number", step="0.01", required=True),
-            r.field("Fee", "fee", "0.00", kind="number", step="0.01"),
-            r.field("Notes", "notes", ""),
-        ]
-        action, submit = "/shares/buy", "Record purchase"
-    return r.form(action, r.hidden("next", back) + "".join(fields), token,
-                  submit=submit, cls="grid", cancel=f"{back}#record",
-                  cancel_attrs=" data-form-close")
+        row = [_tag("BUY", "Shares bought", "shares"), ticker_box, _blank(), _blank(), shares_word,
+               _box("quantity", "", step="1", label="Shares", attrs=' min="1"'),
+               _box("price", "", label="Price / share"),
+               _box("fee", "0.00", label="Fee", required=False)]
+        extras = r.field("Notes", "notes", "")
+        rows, action, submit, cls = [row], "/shares/buy", "Record purchase", "btn-open"
+
+    body = when + _leg_grid(rows) + (f'<div class="grid compact">{extras}</div>' if extras else "")
+    return r.form(action, r.hidden("next", back) + body, token, submit=submit, cls="two-part",
+                  submit_cls=cls, cancel=f"{back}#record", cancel_attrs=" data-form-close")
 
 
 def _share_forms(conn, kind: str, underlying: str, token: str, back: str,
@@ -2432,10 +2543,6 @@ def shares_page(conn, token, query) -> tuple[int, str]:
             f'<div class="callout"><a href="/shares/{r.esc(t.underlying)}">'
             f"{r.esc(t.underlying)}</a>: {r.esc(t.error)}</div>" for t in blocked)
     hint = ""
-    if suggestions:
-        hint = (f'<div class="callout"><a href="/shares/covers">{len(suggestions)} '
-                "short call(s) look like covered calls but are not linked to a lot"
-                "</a> - link them so their premium counts toward the shares' basis.</div>")
 
     kind = (query.get("form") or [""])[0]
     body = f"""{warn}{hint}
@@ -2464,6 +2571,9 @@ def ticker_page(conn, underlying, token, query) -> tuple[int, str]:
         ("Cost of shares held", r.money(t.held_cost if t.held > 0 else None)),
         ("Share P/L realized", r.money(t.realized if not t.error else None)),
         ("Option premium on these lots", r.money(t.option_premium)),
+        ("Open calls", (f'<span class="{"neg" if t.uncovered_shares else "pos"}">'
+                        f"{t.open_call_shares} of {max(t.held, 0)} shares</span>"
+                        if t.open_call_shares else '<span class="dim">none</span>')),
         ("Wheel total", r.money(t.total if not t.error else None)),
     ]
     b = t.blended
@@ -2540,20 +2650,7 @@ def ticker_page(conn, underlying, token, query) -> tuple[int, str]:
                           r.esc(price(d.proceeds_per_share)), r.money(d.proceeds),
                           how + pinned])
 
-    my_suggestions = {pid: lot_id for pid, lot_id in suggestions.items()
-                      if by_id[pid].underlying == name}
     suggest_html = ""
-    if my_suggestions:
-        items = "".join(
-            f"<li>{r.contract(by_id[pid])} &rarr; "
-            f"{r.esc(_lot_label(next(l for l in lots if l.id == lot_id)))}"
-            f'{r.form(f"/position/{r.esc(pid)}/cover", r.hidden("lot_id", lot_id) + r.hidden("next", f"/shares/{name}"), token, submit="Link", cls="inline")}</li>'
-            for pid, lot_id in my_suggestions.items()
-        )
-        suggest_html = f"""<h2>Calls that look covered but are not linked</h2>
-<p class="hint">Each was written while exactly one lot of {r.esc(name)} was held.
-Linking it counts its premium toward that lot's basis.</p>
-<ul class="suggest">{items}</ul>"""
 
     kind = (query.get("form") or [""])[0]
     forms = "<h2>Record</h2>" + _share_forms(conn, kind, name, token, f"/shares/{name}",
@@ -2595,10 +2692,6 @@ def ticker_data_page(conn, underlying, token, query) -> tuple[int, str]:
     except InsufficientSharesError as exc:
         warn = f'<div class="callout">{r.esc(exc)}</div>'
 
-    linked: dict[str, int] = {}          # open calls only: a closed call is history
-    for p in by_id.values():
-        if p.share_lot_id and p.is_open:
-            linked[p.share_lot_id] = linked.get(p.share_lot_id, 0) + 1
     left = _remaining_by_lot(conn, name)
     pinned_to: dict[str, int] = {}
     for d in disposals:
@@ -2615,17 +2708,7 @@ def ticker_data_page(conn, underlying, token, query) -> tuple[int, str]:
         when = ('<span class="neg" title="dated after today">future</span> '
                 if lot.acquired_on > today else "")
         # Why a lot cannot be removed is said, not hidden in a tooltip.
-        if lot.id in linked:
-            # Removable, but only after saying what it does to the calls.
-            n = linked[lot.id]
-            remove = r.form(
-                f"/shares/lot/{r.esc(lot.id)}/delete",
-                r.hidden("next", back)
-                + f'<span class="dim inuse">backs {n} open call(s)</span> '
-                + '<label class="check"><input type="checkbox" name="unlink" value="1"> '
-                  f"remove anyway; {n} open call(s) become naked</label>",
-                token, submit="remove", cls="inline unlink")
-        elif lot.id in pinned_to:
+        if lot.id in pinned_to:
             remove = f'<span class="dim inuse">in use: {pinned_to[lot.id]} sale(s) pinned to it</span>'
         else:
             remove = r.form(f"/shares/lot/{r.esc(lot.id)}/delete", r.hidden("next", back),
@@ -2711,66 +2794,10 @@ from <a href="/audit">History</a>.</p>
     return 200, r.page(f"{name} raw data", body, nav_here="shares")
 
 
-def covers_page(conn, token, query) -> tuple[int, str]:
-    positions, index, lots, disposals, tickers, suggestions = _share_context(conn)
-    by_id = {p.id: p for p in positions}
-    lot_by_id = {l.id: l for l in lots}
-    rows = []
-    for pid, lot_id in sorted(suggestions.items(), key=lambda kv: by_id[kv[0]].opened_on):
-        p = by_id[pid]
-        rows.append([
-            f'<a href="/position/{r.esc(pid)}">{r.contract(p)}</a>',
-            r.esc(p.opened_on),
-            r.status_badge(p.status),
-            r.esc(_lot_label(lot_by_id[lot_id])),
-            r.form(f"/position/{r.esc(pid)}/cover",
-                   r.hidden("lot_id", lot_id) + r.hidden("next", "/shares/covers"),
-                   token, submit="Link", cls="inline"),
-        ])
-    apply_all = ""
-    if suggestions:
-        apply_all = r.form("/shares/covers/apply", r.hidden("next", "/shares/covers"),
-                           token, submit=f"Link all {len(suggestions)}", cls="inline")
-    body = f"""<p class="hint">Short calls written while exactly one lot of the same
-ticker was held, and not yet linked to it. Imported history has no links at
-all, so this is how the calls written against your shares get their premium
-counted toward the shares' basis. Where several lots could fit, nothing is
-proposed - guessing would misplace premium.</p>
-{apply_all}
-{r.table(["Call", "Opened", "Status", "Proposed lot", ""], rows)}"""
-    return 200, r.page("Unlinked covered calls", body, nav_here="shares")
-
-
-def do_cover(conn, position_id, form) -> None:
-    position = store.load_position(conn, position_id)
-    if position is None:
-        raise BadRequest("no such position")
-    lot_id = _one(form, "lot_id")
-    lots = {l.id: l for l in store.load_lots(conn)}
-    if lot_id and lot_id not in lots:
-        raise BadRequest("no such lot")
-    if lot_id and lots[lot_id].underlying != position.underlying:
-        raise BadRequest(f"that lot is {lots[lot_id].underlying}, not {position.underlying}")
-    if position.right is not Right.CALL:
-        raise BadRequest("only a call can be covered by shares")
-
-    from dataclasses import replace
-    updated = replace(position, share_lot_id=lot_id or None)
-    what = "linked to lot" if lot_id else "unlinked from its lot"
-    store.apply(conn, actions.ActionResult(updated=[updated]), f"call {what}")
-    raise Redirect(_next(form, f"/position/{position_id}"),
-                   f"{r.contract_text(position)} {what}")
-
-
-def do_cover_all(conn, form) -> None:
-    positions, index, lots, disposals, tickers, suggestions = _share_context(conn)
-    by_id = {p.id: p for p in positions}
-    from dataclasses import replace
-    updated = [replace(by_id[pid], share_lot_id=lot_id) for pid, lot_id in suggestions.items()]
-    if updated:
-        store.apply(conn, actions.ActionResult(updated=updated),
-                    f"linked {len(updated)} covered call(s) to their lots")
-    raise Redirect(_next(form, "/shares"), f"Linked {len(updated)} call(s)")
+def _shares_held(conn, underlying: str) -> int:
+    lots = [l for l in store.load_lots(conn) if l.underlying == underlying]
+    disposals = [d for d in store.load_disposals(conn) if d.underlying == underlying]
+    return sum(l.quantity for l in lots) - sum(d.quantity for d in disposals)
 
 
 def share_form(conn, token, query) -> tuple[int, str]:
@@ -2867,7 +2894,7 @@ def do_delete_disposal(conn, disposal_id, form) -> None:
 
 def do_delete_lot(conn, lot_id, form) -> None:
     try:
-        store.delete_lot(conn, lot_id, "removed by hand", unlink_open=_one(form, "unlink") == "1")
+        store.delete_lot(conn, lot_id, "removed by hand", unlink_open=False)
     except store.InUseError as exc:
         raise BadRequest(str(exc)) from None
     except ValueError as exc:

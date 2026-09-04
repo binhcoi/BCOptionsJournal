@@ -38,10 +38,9 @@ class Issue:
 
 
 def check(positions, lots, disposals, *, blocked: dict | None = None,
-          unlinked_calls: int = 0, import_flags=(), today: date | None = None) -> list[Issue]:
+          import_flags=(), today: date | None = None) -> list[Issue]:
     """Every issue found, errors first. ``blocked`` maps a ticker to the
-    reason its share matching failed; ``unlinked_calls`` is the number of
-    short calls that look covered but are not linked to a lot."""
+    reason its share matching failed."""
     today = today or date.today()
     by_id = {p.id: p for p in positions}
     lot_ids = {l.id for l in lots}
@@ -106,9 +105,6 @@ def check(positions, lots, disposals, *, blocked: dict | None = None,
                 issues.append(Issue("dangling_link", ERROR, "position", p.id,
                                     f"{field_name} points at a position that does not exist",
                                     pos_href(p)))
-        if p.share_lot_id and p.share_lot_id not in lot_ids:
-            issues.append(Issue("dangling_link", ERROR, "position", p.id,
-                                "covering lot no longer exists", pos_href(p)))
     for l in lots:
         if l.assigning_position_id and l.assigning_position_id not in by_id:
             issues.append(Issue("dangling_link", WARNING, "share_lot", l.id,
@@ -162,10 +158,6 @@ def check(positions, lots, disposals, *, blocked: dict | None = None,
                                 f"{l.underlying} lot of {l.quantity} was reconstructed, not recorded: "
                                 "confirm it against a statement",
                                 f"{data_href(l.underlying)}#lot-{l.id}"))
-    if unlinked_calls:
-        issues.append(Issue("unlinked_calls", WARNING, "ticker", "",
-                            f"{unlinked_calls} short call(s) look covered but are not linked to a lot",
-                            "/shares/covers"))
     live = {(i.kind, i.entity_id) for i in issues}
     for f in import_flags:
         superseded_by = LIVE_FOR_IMPORT.get(f["kind"])

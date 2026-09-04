@@ -64,11 +64,8 @@ class App:
             ("POST", r"^/position/([0-9a-zA-Z_-]+)/assign$", self._assign),
             ("POST", r"^/position/([0-9a-zA-Z_-]+)/roll$", self._roll),
             ("POST", r"^/position/([0-9a-zA-Z_-]+)/split$", self._split),
-            ("POST", r"^/position/([0-9a-zA-Z_-]+)/cover$", self._cover),
             ("GET", r"^/shares$", self._shares),
             ("GET", r"^/shares/new$", self._share_form),
-            ("GET", r"^/shares/covers$", self._covers),
-            ("POST", r"^/shares/covers/apply$", self._cover_all),
             ("POST", r"^/shares/buy$", self._buy_shares),
             ("POST", r"^/shares/sell$", self._sell_shares),
             ("POST", r"^/shares/buy-write$", self._buy_write),
@@ -117,7 +114,7 @@ class App:
         return 200, ""
 
     def _expiring(self, conn, query, form, args):
-        return routes.expiring_page(conn, query)
+        routes.expiring_redirect(query)
 
     def _audit(self, conn, query, form, args):
         return routes.audit_page(conn, self.csrf, query)
@@ -153,9 +150,6 @@ class App:
         routes.do_split(conn, args[0], form)
         return 200, ""
 
-    def _cover(self, conn, query, form, args):
-        routes.do_cover(conn, args[0], form)
-        return 200, ""
 
     def _shares(self, conn, query, form, args):
         return routes.shares_page(conn, self.csrf, query)
@@ -214,12 +208,7 @@ class App:
     def _share_form(self, conn, query, form, args):
         return routes.share_form(conn, self.csrf, query)
 
-    def _covers(self, conn, query, form, args):
-        return routes.covers_page(conn, self.csrf, query)
 
-    def _cover_all(self, conn, query, form, args):
-        routes.do_cover_all(conn, form)
-        return 200, ""
 
     def _buy_shares(self, conn, query, form, args):
         routes.do_buy_shares(conn, form)

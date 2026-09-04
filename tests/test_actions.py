@@ -99,7 +99,7 @@ class TestAssign(unittest.TestCase):
         self.assertEqual(disposal.proceeds_per_share, D("35"))
         self.assertEqual(disposal.kind, DisposalKind.CALLED_AWAY)
         # Earmarked, so matching cannot reach past the covering lot.
-        self.assertEqual(disposal.specific_lot_ids, ("lot-1",))
+        self.assertEqual(disposal.specific_lot_ids, ())      # delivered by the account rule
 
     def test_long_call_exercise_acquires(self):
         result = actions.assign(
@@ -174,7 +174,6 @@ class TestRoll(unittest.TestCase):
             new_strike=D("33"), new_price=D("2.00"), on=date(2026, 2, 20),
         )
         new = result.created[0]
-        self.assertEqual(new.share_lot_id, "lot-1")
         self.assertEqual(new.target_pct, D("0.30"))
 
     def test_zero_quantity_refused(self):
@@ -333,7 +332,7 @@ class TestShareActions(unittest.TestCase):
             on=date(2026, 1, 5), lot_id="lot-1", position_id="call-1",
         )
         lot, call = result.lots[0], result.created[0]
-        self.assertEqual(call.share_lot_id, "lot-1")
+        self.assertEqual(lot.assigning_position_id, call.id)   # the lot names its call
         self.assertEqual(call.quantity, 3)
         self.assertEqual(call.right, Right.CALL)
         self.assertEqual(call.direction, Direction.SHORT)
@@ -410,15 +409,6 @@ class TestValidation(unittest.TestCase):
         wild = validate.validate_position(position(open_fee=D("300.00")))
         self.assertTrue(validate.errors(wild))
 
-    def test_naked_short_call_warns(self):
-        problems = validate.validate_position(position(right=Right.CALL))
-        self.assertTrue(
-            any("naked" in p.message for p in validate.warnings(problems))
-        )
-        covered = validate.validate_position(
-            position(right=Right.CALL, share_lot_id="lot-1")
-        )
-        self.assertFalse(any("naked" in p.message for p in covered))
 
     def test_leg_opening_before_its_predecessor_is_an_error(self):
         parent = position(id="parent", opened_on=date(2026, 2, 1))

@@ -140,12 +140,52 @@ def load_positions(conn, underlying: str | None = None) -> list[Position]:
     sql += " ORDER BY opened_on, id"
 
     tags = load_tags(conn)
-    return [_position(row, tags.get(row["id"], ())) for row in conn.execute(sql, params)]
+    covers = load_covers(conn)
+    return [_position(row, tags.get(row["id"], ()), covers.get(row["id"], ()))
+            for row in conn.execute(sql, params)]
 
 
-def _position(row, tags=()) -> Position:
+def load_covers(conn) -> dict[str, tuple[tuple[str, int], ...]]:
+    out: dict[str, list] = {}
+    for row in conn.execute("SELECT position_id, lot_id, shares FROM position_covers"
+                            " ORDER BY position_id, rowid"):
+        out.setdefault(row["position_id"], []).append((row["lot_id"], row["shares"]))
+    return {pid: tuple(v) for pid, v in out.items()}
+
+
+def _sync_covers(conn, p: Position) -> None:
+    """The covers table and the share_lot_id column, kept to one truth."""
+    conn.execute("DELETE FROM position_covers WHERE position_id = ?", (p.id,))
+    for lot_id, n in p.covers:
+        conn.execute("INSERT INTO position_covers (position_id, lot_id, shares) VALUES (?,?,?)",
+                     (p.id, lot_id, n))
+    conn.execute("UPDATE positions SET share_lot_id = ? WHERE id = ?",
+                 (p.covers[0][0] if p.covers else None, p.id))
+
+
+def _reconcile_covers(conn, position_id: str) -> None:
+    """After a row is restored from the audit log, which knows only the
+    share_lot_id column: no lot means no covers; a lot with no matching
+    covers row means one cover for the whole call."""
+    row = conn.execute("SELECT share_lot_id, quantity, multiplier FROM positions WHERE id = ?",
+                       (position_id,)).fetchone()
+    if row is None:
+        return
+    if row["share_lot_id"] is None:
+        conn.execute("DELETE FROM position_covers WHERE position_id = ?", (position_id,))
+        return
+    have = conn.execute("SELECT lot_id FROM position_covers WHERE position_id = ?",
+                        (position_id,)).fetchall()
+    if not any(h["lot_id"] == row["share_lot_id"] for h in have):
+        conn.execute("DELETE FROM position_covers WHERE position_id = ?", (position_id,))
+        conn.execute("INSERT INTO position_covers (position_id, lot_id, shares) VALUES (?,?,?)",
+                     (position_id, row["share_lot_id"], row["quantity"] * row["multiplier"]))
+
+
+def _position(row, tags=(), covers=()) -> Position:
     return Position(
         tags=tuple(tags),
+        covers=tuple(covers),
         id=row["id"],
         underlying=row["underlying"],
         expiry=_date(row["expiry"]),
@@ -524,9 +564,18 @@ def apply(conn, result, note: str = "") -> dict[str, str]:
     summary = note or getattr(result, "summary", "")
 
     with audit_group(), conn:
-        # Shares first: a created position may point at a new lot (a
-        # buy-write's call), while a lot only ever points at a position that
-        # already exists. Writing positions first trips the foreign key.
+        # Positions first: a lot may name the trade it came with (a buy-write's
+        # call, an assigned put), so the position must exist before the lot.
+        for p in result.updated:
+            before = _row_as_dict(conn, "positions", p.id)
+            _update_position(conn, p)
+            _sync_covers(conn, p)
+            _audit(conn, "position", p.id, "update", before, _position_dict(p), summary)
+        for p in result.created:
+            _insert_position(conn, p)
+            _audit(conn, "position", p.id, "create", None, _position_dict(p), summary)
+            if p.tags:
+                set_tags(conn, p.id, p.tags)
         for lot in result.lots:
             _insert_lot(conn, lot)
             _audit(conn, "share_lot", lot.id, "create", None,
@@ -535,15 +584,8 @@ def apply(conn, result, note: str = "") -> dict[str, str]:
             _insert_disposal(conn, d)
             _audit(conn, "share_disposal", d.id, "create", None,
                    _row_as_dict(conn, "share_disposals", d.id), summary)
-        for p in result.updated:
-            before = _row_as_dict(conn, "positions", p.id)
-            _update_position(conn, p)
-            _audit(conn, "position", p.id, "update", before, _position_dict(p), summary)
         for p in result.created:
-            _insert_position(conn, p)
-            _audit(conn, "position", p.id, "create", None, _position_dict(p), summary)
-            if p.tags:
-                set_tags(conn, p.id, p.tags)
+            _sync_covers(conn, p)       # after the lots it might name exist
 
     if result.lots or result.disposals:
         return rebuild_allocations(conn)
@@ -587,7 +629,7 @@ def load_position(conn, position_id: str) -> Position | None:
     row = conn.execute(
         "SELECT * FROM positions WHERE id = ?", (position_id,)
     ).fetchone()
-    return _position(row, load_tags(conn).get(position_id, ())) if row else None
+    return _position(row, load_tags(conn).get(position_id, ()), load_covers(conn).get(position_id, ())) if row else None
 
 
 def open_positions(conn) -> list[Position]:
@@ -674,7 +716,8 @@ def save_view(conn, name: str, filter_: str) -> str:
 
 
 def load_views(conn) -> list[dict]:
-    return [dict(r) for r in conn.execute("SELECT id, name, filter FROM saved_views ORDER BY name")]
+    """Most recently saved first: the line shows the newest two."""
+    return [dict(r) for r in conn.execute("SELECT id, name, filter FROM saved_views ORDER BY rowid DESC")]
 
 
 def delete_view(conn, view_id: str) -> None:
@@ -813,6 +856,7 @@ def edit_position(conn, position_id: str, changes: dict, note: str = "") -> None
         raise ValueError("fees cannot be negative")
     with conn:
         _update_position(conn, new)
+        _sync_covers(conn, new)
         _audit(conn, "position", position_id, "update", before, _position_dict(new), note)
 
 
@@ -1093,6 +1137,8 @@ def _redo_one(conn, entry) -> str:
         conn.execute(f"UPDATE {table} SET {','.join(c + ' = ?' for c in cols)} WHERE id = ?",
                      tuple(after[c] for c in cols) + (entry["entity_id"],))
         outcome = f"restored {label}"
+    if kind == "position":
+        _reconcile_covers(conn, entry["entity_id"])
     _audit(conn, kind, entry["entity_id"], "redo", current, after, f"redo of audit #{entry['id']}")
     return outcome
 
@@ -1150,6 +1196,7 @@ def _revert_one(conn, entry) -> str:
                 tuple(before.get(c) for c in columns) + (entry["entity_id"],),
             )
             outcome = f"restored {short}"
+        _reconcile_covers(conn, entry["entity_id"])
     else:
         raise ValueError("that change cannot be reverted automatically")
     _audit(conn, kind, entry["entity_id"], "revert", None, before, f"undo of audit #{entry['id']}")
@@ -1182,13 +1229,6 @@ def delete_lot(conn, lot_id: str, note: str = "", unlink_open: bool = False) -> 
     before = _row_as_dict(conn, "share_lots", lot_id)
     if before is None:
         raise ValueError("no such lot")
-    calls = conn.execute(
-        "SELECT id, status FROM positions WHERE share_lot_id = ?", (lot_id,)
-    ).fetchall()
-    open_calls = [c for c in calls if Status(c["status"]).is_open]
-    if open_calls and not unlink_open:
-        raise InUseError(f"{len(open_calls)} open call(s) are written against this lot;"
-                         " confirm that they become naked, or unlink them first")
     pinned = conn.execute(
         "SELECT COUNT(*) AS n FROM share_disposals WHERE specific_lot_ids LIKE ?",
         (f"%{lot_id}%",),
@@ -1196,15 +1236,6 @@ def delete_lot(conn, lot_id: str, note: str = "", unlink_open: bool = False) -> 
     if pinned:
         raise InUseError(f"{pinned} sale(s) are pinned to this lot; remove or repin them first")
     with audit_group(), conn:
-        # Closed calls that were written against it are history: they keep
-        # their own figures and simply stop pointing at a lot that is gone.
-        for c in calls:
-            p = load_position(conn, c["id"])
-            pbefore = _position_dict(p)
-            p.share_lot_id = None
-            _update_position(conn, p)
-            _audit(conn, "position", p.id, "update", pbefore, _position_dict(p),
-                   f"{note}: covering lot removed")
         conn.execute("DELETE FROM share_lots WHERE id = ?", (lot_id,))
         _audit(conn, "share_lot", lot_id, "delete", before, None, note)
     rebuild_allocations(conn)

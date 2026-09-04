@@ -7,7 +7,7 @@ from decimal import Decimal
 from bcoj.domain.enums import Direction, DisposalKind, Right, ShareSource, Status
 from bcoj.domain.types import Position, ShareDisposal, ShareLot
 from bcoj.engine.chains import ChainIndex
-from bcoj.engine.wheels import by_ticker, lot_views, realized_shares, suggest_covers
+from bcoj.engine.wheels import by_ticker, lot_views, realized_shares
 
 D = Decimal
 
@@ -158,44 +158,41 @@ class TestDeficit(unittest.TestCase):
         self.assertEqual(realized_shares(tickers), D("0"))
 
 
-class TestSuggestCovers(unittest.TestCase):
-    def setUp(self):
-        self.lot = ShareLot(id="lot", underlying="ACME", quantity=100,
-                            acquired_on=date(2026, 3, 20), cost_per_share=D("35"),
-                            source=ShareSource.PUT_ASSIGNMENT)
-
-    def _suggest(self, positions, lots):
-        index = ChainIndex(positions)
-        views = lot_views(index, positions, lots, [])
-        return suggest_covers(index, positions, views)
-
-    def test_call_written_while_lot_held_is_proposed(self):
-        call = pos(id="c", right=Right.CALL, opened_on=date(2026, 4, 1))
-        self.assertEqual(self._suggest([call], [self.lot]), {"c": "lot"})
-
-    def test_call_written_before_the_lot_existed_is_not(self):
-        call = pos(id="c", right=Right.CALL, opened_on=date(2026, 3, 1))
-        self.assertEqual(self._suggest([call], [self.lot]), {})
-
-    def test_ambiguous_lots_propose_nothing(self):
-        other = ShareLot(id="lot2", underlying="ACME", quantity=100,
-                         acquired_on=date(2026, 3, 25), cost_per_share=D("36"))
-        call = pos(id="c", right=Right.CALL, opened_on=date(2026, 4, 1))
-        self.assertEqual(self._suggest([call], [self.lot, other]), {})
-
-    def test_already_linked_puts_and_longs_are_skipped(self):
-        linked = pos(id="l", right=Right.CALL, opened_on=date(2026, 4, 1), share_lot_id="x")
-        put = pos(id="p", opened_on=date(2026, 4, 1))
-        long_call = pos(id="lc", right=Right.CALL, direction=Direction.LONG,
-                        opened_on=date(2026, 4, 1))
-        self.assertEqual(self._suggest([linked, put, long_call], [self.lot]), {})
-
-    def test_only_the_chain_head_is_proposed(self):
-        first = pos(id="c1", right=Right.CALL, opened_on=date(2026, 4, 1),
-                    close_price=D("1"), status=Status.ROLLED, closed_on=date(2026, 4, 10))
-        head = pos(id="c2", right=Right.CALL, opened_on=date(2026, 4, 10), rolled_from_id="c1")
-        self.assertEqual(self._suggest([first, head], [self.lot]), {"c2": "lot"})
-
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCoverAcrossLots(unittest.TestCase):
+    def test_premium_is_split_by_shares_and_each_lot_counts_its_cover(self):
+        from datetime import date
+        from decimal import Decimal as D
+        from bcoj.domain.enums import Direction, Right
+        from bcoj.domain.types import Position, ShareLot
+        from bcoj.engine.chains import ChainIndex
+        from bcoj.engine.wheels import lot_views
+        a = ShareLot(id="a", underlying="ACME", quantity=200, acquired_on=date(2026, 1, 5),
+                     cost_per_share=D("10"))
+        b = ShareLot(id="b", underlying="ACME", quantity=100, acquired_on=date(2026, 2, 1),
+                     cost_per_share=D("12"))
+        call = Position(id="c", underlying="ACME", expiry=date(2026, 3, 20), strike=D("15"),
+                        right=Right.CALL, direction=Direction.SHORT, quantity=3,
+                        opened_on=date(2026, 2, 2), open_price=D("1.00"), open_fee=D("1.95"),
+                        covers=(("a", 200), ("b", 100)))
+        views = {v.lot.id: v for v in lot_views(ChainIndex([call]), [call], [a, b], [])}
+        # Open premium 298.05: two thirds to the 200-share lot, one third to the 100.
+        self.assertEqual(views["a"].covered, 200)
+        self.assertEqual(views["b"].covered, 100)
+        self.assertEqual((views["a"].uncovered, views["b"].uncovered), (0, 0))
+        self.assertEqual(views["a"].open_calls, (call,))
+        self.assertEqual(views["a"].cc_premium + views["b"].cc_premium, D("0.00"))  # nothing realized yet
+        closed = Position(id="c", underlying="ACME", expiry=date(2026, 3, 20), strike=D("15"),
+                          right=Right.CALL, direction=Direction.SHORT, quantity=3,
+                          opened_on=date(2026, 2, 2), open_price=D("1.00"), open_fee=D("1.95"),
+                          closed_on=date(2026, 3, 1), close_price=D("0.10"), close_fee=D("1.95"),
+                          status=Status.CLOSED, covers=(("a", 200), ("b", 100)))
+        views = {v.lot.id: v for v in lot_views(ChainIndex([closed]), [closed], [a, b], [])}
+        # Realized 298.05 - 31.95 = 266.10: 177.40 to the first lot, 88.70 to the second.
+        self.assertEqual(views["a"].cc_premium, D("177.40"))
+        self.assertEqual(views["b"].cc_premium, D("88.70"))
+        self.assertEqual(call.share_lot_id, "a")

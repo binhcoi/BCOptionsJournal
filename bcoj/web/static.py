@@ -274,7 +274,6 @@ form.restore button:hover, form.save-view button:hover { filter: brightness(1.08
 .titlebar h1 { margin-right: auto; }
 .filterbar { margin: 0 0 .8rem; }
 .chips.active { margin: .5rem 0 0; }
-.chips.views { margin: .5rem 0 0; padding-top: .5rem; border-top: 1px dashed var(--line); }
 .chips .lbl { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em;
   font-weight: 600; margin-right: .2rem; }
 .chip.view { background: var(--panel); }
@@ -298,6 +297,45 @@ form.filters label > span { font-size: .8rem; }
 form.filters input, form.filters select { padding: .3rem .45rem; }
 form.filters input[name=q] { width: 11rem; }
 form.filters button { padding: .35rem .9rem; }
+/* The views are one stacked control: rows in a single band, divided by
+   hairlines, so they read together and apart from the filter row below. */
+.viewstack { display: inline-flex; flex-direction: column; align-items: stretch; margin: 0 0 1rem;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--bg); overflow: hidden;
+  max-width: 100%; }
+.chips.views { display: flex; flex-wrap: wrap; gap: 0; margin: 0; padding: 0; border: 0;
+  border-radius: 0; background: none; }
+.chips.views.sub { border-top: 1px solid var(--line); }
+.chips.views .chip, .chips.views a.views-label, .chips.views .lbl { border: 0; border-radius: 0;
+  background: none; margin: 0; padding: .4rem .9rem; font-size: .9rem;
+  border-right: 1px solid var(--line); }
+.chips.views > :last-child { border-right: 0; }
+/* Every row starts with the same cell: one width, one style; the top one is
+   the toggle and is darker for it. */
+.chips.views .lbl, .chips.views a.views-label { font-size: .74rem; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--dim); font-weight: 700; background: var(--panel);
+  display: inline-flex; align-items: center; flex: 0 0 6.5rem; box-sizing: border-box; }
+.chips.views .chip.view { color: var(--accent); }
+.chips.views .chip.view:hover { background: var(--panel); }
+.chips.views .chip.view.here { background: var(--accent); color: #fff; }
+.chips.views .chip.view.saved { display: inline-flex; align-items: center; gap: .2rem; }
+.chips.views .chip.view.saved.here a { color: #fff; }
+.chips.views details.save { padding: .2rem .9rem; }
+/* The line's label is also the toggle for the rest of the views. */
+.chips.views a.views-label { color: var(--ink); text-decoration: none; white-space: nowrap; }
+.chips.views a.views-label:hover, .chips.views a.views-label.here { color: var(--accent); }
+a.views-label .caret { display: inline-block; width: 0; height: 0; vertical-align: middle;
+  border-left: 5px solid transparent; border-right: 5px solid transparent;
+  border-top: 6px solid currentColor; margin-left: .25rem; }
+a.views-label.here .caret { border-top: 0; border-bottom: 6px solid currentColor; }
+/* hidden must win over any display rule an element's class sets. */
+[hidden] { display: none !important; }
+details.more > summary { white-space: nowrap; }
+form.filters .seg { margin-left: .2rem; }
+.chip.view { text-decoration: none; }
+a.chip.view { padding: .1rem .7rem; }
+.chip.view.here { background: var(--accent); color: #fff; border-color: var(--accent); }
+.chip.view.here a { color: #fff; }
+.chip.view.saved { background: var(--panel); }
 details.more { position: relative; }
 details.more > summary { cursor: pointer; list-style: none; padding: .35rem .75rem;
   border: 1px solid var(--line); border-radius: 8px; font-size: .85rem; font-weight: 600;
@@ -357,8 +395,8 @@ textarea:focus { outline: 2px solid var(--accent); }
   padding: 0; background: none; border: 0; }
 .grid.compact label { width: auto; min-width: 8rem; }
 .grid.compact input, .grid.compact select { padding: .3rem .45rem; }
-.grid.compact .when-over { display: contents; }
-.grid.compact .when-over.off { display: none; }
+.grid.compact .when-over, .grid.compact .when-shares { display: contents; }
+.grid.compact .when-over.off, .grid.compact .when-shares.off { display: none; }
 .action-inline .tabs { margin: .2rem 0 .7rem; }
 
 /* Status pills. Open is the one that matters; everything else is history. */
@@ -538,6 +576,30 @@ JS = """
   };
   window.addEventListener('hashchange', reveal); reveal();
 
+  // The More menu is transient: a click anywhere else, or Escape, closes it.
+  // The views bubble is not: it closes only from its own summary.
+  document.addEventListener('click', function (event) {
+    document.querySelectorAll('details.more[open]').forEach(function (d) {
+      if (!d.contains(event.target)) d.open = false;
+    });
+    var toggle = event.target.closest('a[data-toggle]');
+    if (toggle) {
+      event.preventDefault();
+      var box = document.getElementById(toggle.getAttribute('data-toggle'));
+      if (box) {
+        box.hidden = !box.hidden;
+        box.setAttribute('data-user', '1');
+        toggle.classList.toggle('here', !box.hidden);
+        var due = document.getElementById('duerow');     // one or the other, never both
+        if (due) due.hidden = !box.hidden;
+      }
+    }
+  });
+  document.addEventListener('keydown', function (event) {
+    if (event.key !== 'Escape') return;
+    document.querySelectorAll('details.more[open]').forEach(function (d) { d.open = false; });
+  });
+
   // Cancel inside a folded edit form folds it again.
   document.addEventListener('click', function (event) {
     var x = event.target.closest('[data-close-details]');
@@ -548,13 +610,16 @@ JS = """
     box.open = false;
   });
 
-  // The entry form's closing fields matter only for a trade already over.
-  var outcome = document.getElementById('f_outcome');
-  if (outcome) {
-    var over = outcome.closest('form').querySelector('.when-over');
-    var reflect = function () { if (over) over.classList.toggle('off', outcome.value === 'OPEN'); };
-    outcome.addEventListener('change', reflect); reflect();
-  }
+  // The entry form's closing fields matter only for a trade already over,
+  // its share fields only for a buy-write.
+  [['f_outcome', '.when-over', 'OPEN'], ['f_with_shares', '.when-shares', 'NONE']]
+    .forEach(function (spec) {
+      var control = document.getElementById(spec[0]);
+      if (!control) return;
+      var span = control.closest('form').querySelector(spec[1]);
+      var reflect = function () { if (span) span.classList.toggle('off', control.value === spec[2]); };
+      control.addEventListener('change', reflect); reflect();
+    });
 
   // "+7" in a date box means seven days from today. Faster than a picker for
   // the weekly cadence most of these trades follow.
@@ -580,10 +645,40 @@ JS = """
   var table = document.querySelector('table.positions');
   if (table && window.fetch) {
     var cache = {}, order = [], pending = {};
+    // One key per table state, however the URL was spelled: "/" and
+    // "/?show=open" are the same table, and so are two orderings of the same
+    // filters. Otherwise a visited view is fetched again.
+    var canon = function (href) {
+      var qs = (href.split('#')[0].split('?')[1] || '');
+      var p = new URLSearchParams(qs);
+      p.delete('partial');
+      if (!p.get('show')) p.set('show', 'open');
+      var keys = Array.from(p.keys()).filter(function (k, i, a) { return a.indexOf(k) === i; });
+      keys.sort();
+      return keys.map(function (k) { return k + '=' + p.get(k); }).join('&');
+    };
+    // Bounded by memory, not by count: a filtered view is a few KB, the
+    // whole closed list about half a megabyte. Eight megabytes holds a long
+    // session of browsing, so a view is fetched once and then never again
+    // until the page itself reloads.
+    var LIMIT = 8 * 1024 * 1024, held = 0;
     var remember = function (href, html) {
-      if (!cache[href]) order.push(href);
-      cache[href] = html;
-      while (order.length > 12) delete cache[order.shift()];
+      var key = canon(href);
+      if (cache[key]) held -= cache[key].length;
+      else order.push(key);
+      cache[key] = html;
+      held += html.length;
+      while (held > LIMIT && order.length > 1) {
+        var old = order.shift();
+        held -= cache[old].length;
+        delete cache[old];
+      }
+    };
+    // What a swap needs of the current page: strip, filter bar and table.
+    var snapshot = function () {
+      var t = document.querySelector('.totals'), b = document.querySelector('.filterbar'),
+          c = current();
+      return (t ? t.outerHTML : '') + (b ? b.outerHTML : '') + (c ? c.outerHTML : '');
     };
     var current = function () { return document.querySelector('table.positions'); };
     var here = function () { return window.location.pathname + window.location.search; };
@@ -592,7 +687,7 @@ JS = """
       return m ? decodeURIComponent(m[1]) : null;
     };
     var get = function (href, partial) {
-      if (partial === 'table' && cache[href]) return Promise.resolve(cache[href]);
+      if (partial === 'table' && cache[canon(href)]) return Promise.resolve(cache[canon(href)]);
       var key = partial + ' ' + href;
       if (pending[key]) return pending[key];
       var base = href.split('#')[0];
@@ -642,10 +737,15 @@ JS = """
       return true;
     };
 
+    // Two quick clicks are two requests; whichever answers last must not
+    // overwrite the one asked for last. Only the newest request may render.
+    var seq = 0;
     var full = function (href, push) {
       var cur = current();
-      if (cur && !cache[here()]) remember(here(), cur.outerHTML);
+      if (cur && !cache[canon(here())]) remember(here(), snapshot());
+      var mine = ++seq;
       return get(href, 'table').then(function (html) {
+        if (mine !== seq) return;
         var holder = document.createElement('div');
         holder.innerHTML = html;
         var fresh = holder.querySelector('table.positions');
@@ -658,6 +758,19 @@ JS = """
         var freshBar = holder.querySelector('.filterbar');
         var curBar = document.querySelector('.filterbar');
         if (freshBar && curBar) {
+          // The views bubble keeps whatever the reader chose: closed stays
+          // closed even inside a year, open stays open.
+          // The year rows and the Due row never show together: choosing
+          // Expiring closes the years, whatever the reader had open.
+          var curViews = curBar.querySelector('#allviews');
+          var freshViews = freshBar.querySelector('#allviews');
+          if (curViews && freshViews && curViews.hasAttribute('data-user')
+              && !freshBar.querySelector('#duerow')) {
+            freshViews.hidden = curViews.hidden;
+            freshViews.setAttribute('data-user', '1');
+            var t = freshBar.querySelector('a[data-toggle=allviews]');
+            if (t) t.classList.toggle('here', !freshViews.hidden);
+          }
           var wasOpen = curBar.querySelector('details.more[open]');
           var q = curBar.querySelector('#f_q');
           var typing = q && document.activeElement === q ? [q.selectionStart, q.selectionEnd] : null;
@@ -712,9 +825,11 @@ JS = """
       var target = document.getElementById('row-' + param(href, 'act'));
       if (!target) return full(href, push);
       var cur = current();
-      if (!cache[here()]) remember(here(), cur.outerHTML);
+      if (!cache[canon(here())]) remember(here(), snapshot());
       if (openLocal(href, target)) { settle(href, push); return Promise.resolve(); }
+      var mine = ++seq;
       return get(href, 'action').then(function (html) {
+        if (mine !== seq) return;
         var rows = rowsOf(html);
         if (rows.length < 2) return full(href, push);
         closeForms();
@@ -728,8 +843,10 @@ JS = """
       var target = document.getElementById('row-' + param(href, 'chain'));
       if (!target) return full(href, push);
       var cur = current();
-      if (!cache[here()]) remember(here(), cur.outerHTML);
+      if (!cache[canon(here())]) remember(here(), snapshot());
+      var mine = ++seq;
       return get(href, 'block').then(function (html) {
+        if (mine !== seq) return;
         var rows = rowsOf(html);
         if (!rows.length) return full(href, push);
         var ids = {};
@@ -796,7 +913,7 @@ JS = """
       full(flt.getAttribute('href'), true);
     });
     document.addEventListener('change', function (event) {
-      var form = event.target.closest('form.filters');
+      var form = event.target.closest('form.filters, form.pick');
       if (form && (event.target.tagName === 'SELECT' || event.target.type === 'date')) {
         applyFilters(form);
       }
@@ -816,7 +933,7 @@ JS = """
     });
     var applyFilters = function (form) {
       var params = new URLSearchParams(new FormData(form));
-      Array.prototype.slice.call(params.keys()).forEach(function (k) {
+      Array.from(params.keys()).forEach(function (k) {
         if (!params.get(k)) params.delete(k);
       });
       var filterField = document.querySelector('form.save-view input[name=filter]');
@@ -847,7 +964,8 @@ JS = """
     if (closing && inTable) { event.preventDefault(); return; }
     event.preventDefault();
     var key = tab ? tab.getAttribute('data-form-tab') : null;
-    var tabs = strip.querySelectorAll('a[data-form-tab]');
+    var tabs = Array.prototype.slice.call(strip.querySelectorAll('a[data-form-tab]'));
+    if (tab && tabs.indexOf(tab) < 0) tabs = [tab];   // a lone button is its own strip
     var panels = box.querySelectorAll(':scope > [data-form]');
     tabs.forEach(function (t) {
       t.classList.toggle('here', !closing && t.getAttribute('data-form-tab') === key);

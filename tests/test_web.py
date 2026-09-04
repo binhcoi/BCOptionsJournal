@@ -365,6 +365,29 @@ class TestExpiryQueue(WebTestCase):
 
     def test_the_queue_is_announced_on_the_positions_page(self):
         self.assertIn("need an outcome", self.get("/"))
+        self.assertIn('href="/?show=open&amp;due=0"', self.get("/"))
+
+    def test_expiring_is_the_positions_table_with_the_due_filter(self):
+        self.add_position(underlying="due1", opened_on="2026-01-05", expiry="2026-01-16")
+        self.add_position(underlying="due2", expiry="2099-01-15")
+        page = self.get("/?show=open&due=0")
+        table = page[page.index('<table class="positions'):]
+        self.assertIn("DUE1", table)
+        self.assertNotIn("DUE2", table)
+        self.assertIn("Due: at or past expiry", page)
+        self.assertIn('class="act act-close"', table)          # the same button as anywhere
+        self.assertIn('<option value="0" selected>at or past expiry</option>', page)
+        self.assertNotIn('<details class="more" open>', page)          # More never opens by itself
+        self.assertIn("<summary>More (1)</summary>", page)             # but says one filter is set
+        self.assertIn('class="flt chip view here" href="/?show=open&amp;due=0">Expiring</a>', page)
+        # Expiring opens a connected Due row, at-or-past selected by default.
+        self.assertIn('<span class="lbl">Due</span>', page)
+        self.assertIn('class="flt chip view here" href="/?show=open&amp;due=0">at or past expiry</a>', page)
+        self.assertIn('href="/?show=open&amp;due=7">within 7 days</a>', page)
+        self.assertNotIn('<span class="lbl">Due</span>', self.get("/?show=open"))
+        # /expiring still works: it lands here.
+        with urllib.request.urlopen(self.base + "/expiring?within=7") as res:
+            self.assertIn("due=7", res.geturl())
 
 
 class TestAuditAndUndo(WebTestCase):
@@ -1072,8 +1095,15 @@ class TestPartialAndProjection(WebTestCase):
         self.assertIn("'action'", js)             # a form: its row and the form
         self.assertIn("closeForms", js)           # closing fetches nothing
         self.assertIn("patchRows", js)            # a full table is diffed, not swapped
-        self.assertNotIn("mouseover", js)         # and nothing is fetched speculatively
-        self.assertNotIn("prefetchAll", js)
+        self.assertIn("mine !== seq", js)         # a stale response never renders
+        self.assertIn("var canon = function", js) # "/" and "/?show=open" share one cache entry
+        # URLSearchParams.keys() is an iterator: slice.call() on it is empty.
+        self.assertNotIn("slice.call(p.keys())", js)
+        self.assertNotIn("slice.call(params.keys())", js)
+        self.assertIn("remember(here(), snapshot())", js)   # cached with its strip and bar
+        self.assertIn("var LIMIT = 8 * 1024 * 1024", js)   # cache bounded by size, not count
+        self.assertNotIn("mouseover", js)         # nothing is fetched speculatively: a
+        self.assertNotIn("prefetchAll", js)       # closed table is 40 KB and queues ahead of clicks
 
     def test_table_partial_carries_the_strip_that_describes_it(self):
         self.add_position(underlying="tps")
@@ -1213,7 +1243,7 @@ class TestShares(WebTestCase):
         self.assertEqual(status, 303)
         lot = self._lots("bw")[0]
         call = [p for p in self.positions() if p.underlying == "BW"][0]
-        self.assertEqual(call.share_lot_id, lot.id)
+        self.assertEqual(lot.assigning_position_id, call.id)
         self.assertEqual(call.quantity, 3)
         page = self.get("/shares/BW")
         self.assertIn("300/300", page)       # fully covered
@@ -1225,56 +1255,9 @@ class TestShares(WebTestCase):
         body = self.get(f"/position/{put.id}")
         self.assertIn("Shares acquired", body)
 
-    def test_naked_call_can_be_covered_and_uncovered(self):
-        self._put_assigned("cov")
-        lot = self._lots("cov")[0]
-        self.add_position(underlying="cov", right="CALL", strike="40",
-                          opened_on="2026-04-01", expiry="2026-05-15")
-        call = [p for p in self.positions() if p.underlying == "COV"
-                and p.right.value == "CALL"][0]
-        # The fact reads "nothing - naked"; the cover form's dropdown also
-        # contains the word, so assert on the fact's wording.
-        self.assertIn("nothing - naked", self.get(f"/position/{call.id}"))
 
-        status, _, _ = self.post(f"/position/{call.id}/cover", {"lot_id": lot.id})
-        self.assertEqual(status, 303)
-        page = self.get(f"/position/{call.id}")
-        self.assertIn("Covered by", page)
-        self.assertNotIn("nothing - naked", page)
 
-        self.post(f"/position/{call.id}/cover", {"lot_id": ""})
-        self.assertIn("nothing - naked", self.get(f"/position/{call.id}"))
 
-    def test_cover_refuses_a_lot_of_another_ticker(self):
-        self._put_assigned("cva")
-        self._put_assigned("cvb")
-        lot_b = self._lots("cvb")[0]
-        self.add_position(underlying="cva", right="CALL", strike="40",
-                          opened_on="2026-04-01", expiry="2026-05-15")
-        call = [p for p in self.positions() if p.underlying == "CVA"
-                and p.right.value == "CALL"][0]
-        status, _, body = self.post(f"/position/{call.id}/cover", {"lot_id": lot_b.id})
-        self.assertEqual(status, 400)
-        self.assertIn("not CVA", body)
-
-    def test_unlinked_covered_calls_are_suggested_and_linkable_in_bulk(self):
-        self._put_assigned("sug")
-        self.add_position(underlying="sug", right="CALL", strike="40",
-                          opened_on="2026-04-01", expiry="2026-05-15")
-        body = self.get("/shares/covers")
-        self.assertIn("SUG", body)
-        self.assertIn("Link all", body)
-        status, _, _ = self.post("/shares/covers/apply", {})
-        self.assertEqual(status, 303)
-        call = [p for p in self.positions() if p.underlying == "SUG"
-                and p.right.value == "CALL"][0]
-        self.assertEqual(call.share_lot_id, self._lots("sug")[0].id)
-
-    def test_new_position_form_offers_covering_lots(self):
-        self._put_assigned("nfl")
-        body = self.get("/new")
-        self.assertIn('name="share_lot_id"', body)
-        self.assertIn("NFL @ 35.00", body)
 
     def test_dashboard_shows_true_total(self):
         body = self.get("/reports")
@@ -1513,7 +1496,10 @@ class TestReportingAndViews(WebTestCase):
         self.assertIn('<div class="chips views">', page)              # views, own line
         self.assertNotIn('<div class="chips active">', self.get("/?show=open"))
         self.assertIn('<details class="more">', page)                   # advanced folded
-        self.assertIn('<details class="more" open>', self.get("/?show=open&right=CALL"))
+        # More never opens by itself; it counts the filters set inside it.
+        with_right = self.get("/?show=open&right=CALL")
+        self.assertIn('<details class="more">', with_right)
+        self.assertIn("<summary>More (1)</summary>", with_right)
 
     def test_notes_and_tags_edit_and_filter(self):
         p = self._open("tag")
@@ -1582,6 +1568,31 @@ class TestPositionsPagePolish(WebTestCase):
         self.assertIn('action="/new"', page)
         self.assertNotIn('<a href="/new">New</a>', page)
 
+
+
+    def test_the_entry_form_records_a_buy_write(self):
+        status, location, _ = self.add_position(
+            underlying="bwn", right="CALL", direction="SHORT", quantity="2", strike="40",
+            open_price="1.50", open_fee="1.30", with_shares="BUY", shares="200",
+            share_price="38.00", share_fee="1.00", tags="wheel")
+        self.assertEqual(status, 303)
+        self.assertIn("buy-write", location.lower())
+        call = [p for p in self.positions() if p.underlying == "BWN"][0]
+        conn = store.open_db(self.db_path)
+        try:
+            lot = [l for l in store.load_lots(conn) if l.underlying == "BWN"][0]
+        finally:
+            conn.close()
+        self.assertEqual((lot.quantity, str(lot.cost_per_share), lot.source.value), (200, "38.00", "BUY_WRITE"))
+        self.assertEqual(lot.assigning_position_id, call.id)   # the lot names its call
+        self.assertEqual(call.tags, ("wheel",))
+        self.assertIn('id="f_with_shares"', self.get("/new"))
+        # A put cannot be a buy-write.
+        status, _, body = self.add_position(underlying="bwp", with_shares="BUY", shares="100",
+                                            share_price="30")
+        self.assertEqual(status, 400)
+        self.assertIn("short call", body)
+
     def test_a_past_position_can_be_entered_already_closed(self):
         status, location, _ = self.add_position(
             underlying="past", opened_on="2026-01-05", outcome="CLOSED",
@@ -1613,15 +1624,43 @@ class TestPositionsPagePolish(WebTestCase):
         table = page[page.index('<table class="positions'):]
         self.assertIn("REC", table)
         self.assertNotIn(">OLD<", table)
-        # Period and status are segmented controls; the chosen one is marked.
+        # Period is a one-click segment among the filters; the chosen one is marked.
         self.assertIn('href="/?show=open&amp;period=3m" class="flt here">3m</a>', page)
         self.assertIn('class="flt here">Open</a>', page)
-        # A segment keeps the other filters when it switches.
+        # Views are complete destinations on their own line: a period view
+        # shows everything with activity in the period, not only open legs.
+        self.assertIn('class="flt chip view" href="/?show=all&amp;period=tq">This quarter</a>', page)
+        quarter = self.get("/?show=all&period=tq")
+        self.assertIn('class="flt chip view here" href="/?show=all&amp;period=tq">This quarter</a>', quarter)
         self.assertIn('href="/?show=closed&amp;period=3m" class="flt">Closed</a>', page)
-        # What is active shows as a chip that can be removed.
         self.assertIn('Period: Last 3 months<a class="flt x" href="/?show=open"', page)
         self.assertIn("Clear all", page)
         self.assertIn('<option value="OLD">OLD</option>', page)          # ticker dropdown
+        # The ticker comes first after status; Due lives in More.
+        bar = page[page.index('<div class="fbar">'):page.index('<div class="chips active">')]
+        self.assertLess(bar.index('name="ticker"'), bar.index('name="q"'))
+        self.assertLess(bar.index('name="q"'), bar.index('class="flt here">3m</a>'))
+        self.assertLess(bar.index("<summary>More</summary>"), bar.index('name="due"'))
+        # A specific month is two clicks: the year, then the month, inside
+        # the bubble, which opens by itself only while a year is picked.
+        self.assertIn('class="views-label" href="#allviews" data-toggle="allviews" title="More views">Views', page)
+        self.assertIn('<div id="allviews" hidden>', page)
+        self.assertIn('href="/?show=all&amp;period=y:2026">2026</a>', page)
+        self.assertNotIn("period=m:2026-08", page)                       # months wait for a year
+        year = self.get("/?show=all&period=y:2026")
+        self.assertIn('<div id="allviews">', year)                        # rows shown inside a year
+        self.assertIn('<span class="lbl">2026</span>', year)             # the year's own row
+        # hidden must actually hide: a display rule on the class would defeat it.
+        css = self.get("/static/app.css")
+        self.assertIn("[hidden] { display: none !important; }", css)
+        self.assertIn('class="flt chip view year here"', year)
+        self.assertIn('href="/?show=all&amp;period=q:2026-Q3">Q3</a>', year)
+        self.assertIn('href="/?show=all&amp;period=m:2026-08">Aug</a>', year)
+        aug = self.get("/?show=all&period=m:2026-01")
+        self.assertIn("Period: Jan 2026", aug)
+        self.assertIn('class="flt chip view here" href="/?show=all&amp;period=m:2026-01">Jan</a>', aug)
+        self.assertIn(">OLD<", aug[aug.index('<table class="positions'):])
+        self.assertNotIn("Expiring</a>\n", self.get("/")[:1200])        # not in the nav
         only = self.get("/?show=open&ticker=OLD")
         self.assertNotIn(">REC<", only[only.index('<table class="positions'):])
 
@@ -1941,6 +1980,19 @@ class TestShareRepairs(WebTestCase):
         finally:
             conn.close()
 
+    def test_share_forms_share_the_leg_grid(self):
+        self._buy("lg", 100)
+        for kind, tags in (("buy", [">BUY</b>"]), ("sell", [">SELL</b>"]),
+                           ("buy-write", [">STO</b>", ">BUY</b>"])):
+            with self.subTest(form=kind):
+                page = self.get(f"/shares/LG?form={kind}")
+                panel = page[page.index(f'data-form="{kind}"'):]
+                panel = panel[:panel.index("</form>")]
+                self.assertIn('class="leg-grid"', panel)
+                for tag in tags:
+                    self.assertIn(tag, panel)
+                self.assertIn('class="btn cancel"', panel)
+
     def test_forms_open_inline_on_the_shares_pages(self):
         self._buy("inl", 100)
         for base in ("/shares?", "/shares/INL?"):
@@ -2161,48 +2213,47 @@ class TestShareRepairs(WebTestCase):
         self.assertIn("data-close-details", self.get("/static/app.js"))
         self.assertIn("account rule", data)
 
-    def test_removing_a_lot_in_use_is_refused(self):
+
+    def test_a_lot_with_calls_written_is_still_removable(self):
+        # A call is covered by the ticker's shares, not by a stored link, so
+        # removing a lot never has to unlink anything. Only a pinned sale holds it.
         lot = self._buy("use", 300)
         self.add_position(underlying="use", right="CALL", strike="12",
-                          opened_on="2026-02-01", expiry="2026-03-20",
-                          share_lot_id=lot.id)
-        status, _, body = self.post(f"/shares/lot/{lot.id}/delete", {})
-        self.assertEqual(status, 400)
-        self.assertIn("open call(s) are written against this lot", body)
-        # The page says why, offers removal only behind a spelled-out
-        # confirmation, and shows what is left.
+                          opened_on="2026-02-01", expiry="2026-03-20")
         data = self.get("/shares/USE/data")
-        self.assertIn("backs 1 open call(s)", data)
-        self.assertIn("remove anyway; 1 open call(s) become naked", data)
+        self.assertNotIn("backs", data)
         self.assertIn('<abbr>Left</abbr>', data)
-        # Confirmed: the lot goes and the call is naked, audited on the call.
-        other = self._buy("use", 300)                       # a second lot to exercise on
-        status, _, _ = self.post(f"/shares/lot/{other.id}/delete", {})
-        self.assertEqual(status, 303)
-        self.add_position(underlying="use", right="CALL", strike="13", opened_on="2026-02-02",
-                          expiry="2026-03-20", share_lot_id=lot.id)
-        status, _, _ = self.post(f"/shares/lot/{lot.id}/delete", {"unlink": "1"})
-        self.assertEqual(status, 303)
-        conn = store.open_db(self.db_path)
-        try:
-            calls = [p for p in store.load_positions(conn) if p.underlying == "USE"
-                     and p.right.value == "CALL"]
-            self.assertEqual({p.share_lot_id for p in calls}, {None})
-            self.assertTrue(all(p.is_open for p in calls))
-            self.assertFalse(any(l.id == lot.id for l in store.load_lots(conn)))
-        finally:
-            conn.close()
-        return
-        # Once the call is closed it is history: the lot can go, and the call
-        # simply stops pointing at it.
-        call = [p for p in self.positions() if p.underlying == "USE" and p.right.value == "CALL"][0]
-        self.post(f"/position/{call.id}/close", {"closed_on": "2026-03-01", "close_price": "0.10"})
-        self.assertNotIn("backs", self.get("/shares/USE/data"))
         status, _, _ = self.post(f"/shares/lot/{lot.id}/delete", {})
         self.assertEqual(status, 303)
+        call = [p for p in self.positions() if p.underlying == "USE"][0]
+        self.assertIn("none - naked", self.get(f"/position/{call.id}"))
+
+    def test_coverage_is_the_tickers_shares_against_its_open_calls(self):
+        self.post("/shares/buy", {"underlying": "cvt", "on": "2026-01-05", "quantity": "200",
+                                  "price": "10"})
+        self.post("/shares/buy", {"underlying": "cvt", "on": "2026-02-01", "quantity": "100",
+                                  "price": "12"})
+        self.add_position(underlying="cvt", right="CALL", quantity="3", strike="15",
+                          opened_on="2026-02-02", expiry="2026-03-20")
+        call = [p for p in self.positions() if p.underlying == "CVT"][0]
+        page = self.get(f"/position/{call.id}")
+        self.assertIn("Shares behind it", page)
+        self.assertIn("300 held", page)
+        self.assertIn("300 called across open calls", page)
+        ticker = self.get("/shares/CVT")
+        self.assertIn("300 of 300 shares", ticker)              # open calls fact
+        self.assertIn("200/200", ticker)                         # oldest lot first
+        self.assertIn("100/100", ticker)
+        # A fourth contract has no shares behind it: uncovered, in red.
+        self.add_position(underlying="cvt", right="CALL", quantity="1", strike="16",
+                          opened_on="2026-02-03", expiry="2026-03-20")
+        self.assertIn("100 uncovered", self.get(f"/position/{call.id}"))
+        # Assignment sells FIFO like any sale: no lot is pinned.
+        self.post(f"/position/{call.id}/assign", {"on": "2026-03-20", "close_fee": "0", "share_fee": "0"})
         conn = store.open_db(self.db_path)
         try:
-            self.assertIsNone(store.load_position(conn, call.id).share_lot_id)
+            sale = [d for d in store.load_disposals(conn) if d.underlying == "CVT"][0]
+            self.assertEqual((sale.quantity, sale.specific_lot_ids), (300, ()))
         finally:
             conn.close()
 

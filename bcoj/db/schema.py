@@ -14,7 +14,7 @@ every historical row with nothing to migrate.
 
 import sqlite3
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -359,4 +359,20 @@ MIGRATIONS[2] = _migrate_2_split_and_exercise
 MIGRATIONS[3] = (
     "ALTER TABLE audit_log ADD COLUMN group_id TEXT",
     "CREATE INDEX audit_log_group ON audit_log(group_id)",
+)
+
+# A call can be covered by shares from more than one lot. The single
+# share_lot_id column stays as the first of them; this table holds them all.
+MIGRATIONS[4] = (
+    """
+    CREATE TABLE position_covers (
+        position_id TEXT NOT NULL REFERENCES positions(id) ON DELETE CASCADE,
+        lot_id      TEXT NOT NULL REFERENCES share_lots(id) ON DELETE CASCADE,
+        shares      INTEGER NOT NULL,
+        PRIMARY KEY (position_id, lot_id)
+    )
+    """,
+    "INSERT INTO position_covers (position_id, lot_id, shares)"
+    " SELECT id, share_lot_id, quantity * multiplier FROM positions"
+    " WHERE share_lot_id IS NOT NULL",
 )

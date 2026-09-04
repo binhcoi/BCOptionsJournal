@@ -800,7 +800,7 @@ class TestConcentration(unittest.TestCase):
             # 200 - 0.65 open fee - 100 buy-back, no closing fee: realized 99.35
             closed(id="d", quantity=1, open_price=D("2.00"), close_price=D("1.00")),
         ]
-        risks = concentration(rows, {"ACME": D("12000.00")})
+        risks = concentration(rows, {"ACME": D("12000.00")}, {"ACME": 200})
         self.assertEqual([t.underlying for t in risks], ["ACME", "GAMMA"])
         acme, gamma = risks
         self.assertEqual(acme.at_risk, D("35000.00"))
@@ -953,13 +953,12 @@ class TestHealth(unittest.TestCase):
         issues = self.health.check(
             [future, lapsed, dangling, prev, late, parent, h1, h2, twin_a, twin_b], [lot], [sale],
             blocked={"BETA": "the sale of 5 needs more shares than were held"},
-            unlinked_calls=2,
             import_flags=[{"kind": "share_row", "entity_type": "position", "entity_id": "f",
                            "detail": "looks like a share purchase"}],
             today=self.today)
         kinds = self.kinds(issues)
         for kind in ("future_date", "past_expiry", "dangling_link", "roll_dates", "split_sum",
-                     "duplicate", "estimated", "blocked_shares", "unlinked_calls",
+                     "duplicate", "estimated", "blocked_shares",
                      "import:share_row"):
             with self.subTest(kind=kind):
                 self.assertIn(kind, kinds)

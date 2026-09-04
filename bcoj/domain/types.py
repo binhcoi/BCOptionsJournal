@@ -43,12 +43,24 @@ class Position:
     target_pct: Decimal | None = None
     notes: str = ""
     tags: tuple[str, ...] = ()
+    # Shares behind a short call, by lot: (lot id, shares). A call written
+    # against 300 shares held as 200 + 100 has two entries. ``share_lot_id``
+    # stays as the first of them, so older code and the sheet's single link
+    # keep working.
+    covers: tuple[tuple[str, int], ...] = ()
 
     def __post_init__(self) -> None:
         if self.quantity <= 0:
             raise ValueError(
                 f"{self.id}: quantity must be positive; direction carries the sign"
             )
+        if not self.covers and self.share_lot_id:
+            self.covers = ((self.share_lot_id, self.shares),)
+        elif self.covers:
+            self.covers = tuple((lot_id, int(n)) for lot_id, n in self.covers if int(n) > 0)
+            self.share_lot_id = self.covers[0][0] if self.covers else None
+        if sum(n for _, n in self.covers) > self.shares:
+            raise ValueError(f"{self.id}: covered by more shares than the call controls")
         if self.multiplier <= 0:
             raise ValueError(f"{self.id}: multiplier must be positive")
         if self.rolled_from_id and self.split_from_id:
@@ -65,6 +77,10 @@ class Position:
     def shares(self) -> int:
         """Shares controlled, unsigned."""
         return self.quantity * self.multiplier
+
+    @property
+    def covered_shares(self) -> int:
+        return sum(n for _, n in self.covers)
 
     @property
     def is_open(self) -> bool:

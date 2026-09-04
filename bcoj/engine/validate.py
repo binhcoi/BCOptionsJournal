@@ -144,8 +144,7 @@ def validate_position(
                 )
 
     if position.direction is Direction.SHORT and position.right is Right.CALL:
-        if position.share_lot_id is None:
-            warn("share_lot_id", "a short call with no covering lot is naked")
+        pass  # whether the call is covered is a ticker-level fact: shares held
 
     problems.extend(_contextual(position, existing or ()))
     return problems

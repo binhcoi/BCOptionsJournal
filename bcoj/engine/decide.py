@@ -209,7 +209,8 @@ class TickerRisk:
         return q2(self.at_risk + self.shares_at_cost)
 
 
-def concentration(positions, shares_at_cost: dict[str, Decimal] | None = None) -> list[TickerRisk]:
+def concentration(positions, shares_at_cost: dict[str, Decimal] | None = None,
+                  shares_held: dict[str, int] | None = None) -> list[TickerRisk]:
     """Capital committed per ticker, largest first.
 
     A short call written against a lot is not counted again as option risk:
@@ -218,6 +219,7 @@ def concentration(positions, shares_at_cost: dict[str, Decimal] | None = None) -
     ceiling -- a sum that included it would be a lie either way.
     """
     shares_at_cost = shares_at_cost or {}
+    shares_held = shares_held or {}
     index = ChainIndex(positions)
     names = sorted({p.underlying for p in positions} | set(shares_at_cost))
     out = []
@@ -226,10 +228,17 @@ def concentration(positions, shares_at_cost: dict[str, Decimal] | None = None) -
         open_ones = [p for p in mine if p.is_open]
         at_risk = ZERO
         naked = 0
+        # Short calls are covered by the ticker's shares, soonest expiry first;
+        # whatever the shares do not reach is naked.
+        held = shares_held.get(name, 0)
+        for p in sorted((p for p in open_ones if p.direction is Direction.SHORT
+                         and p.right is Right.CALL), key=lambda p: (p.expiry, p.id)):
+            if held >= p.shares:
+                held -= p.shares
+            else:
+                naked += 1
         for p in open_ones:
             if p.direction is Direction.SHORT and p.right is Right.CALL:
-                if p.share_lot_id is None:
-                    naked += 1
                 continue
             at_risk += capital_at_risk(p) or ZERO
         out.append(TickerRisk(

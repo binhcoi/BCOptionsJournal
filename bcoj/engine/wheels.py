@@ -30,12 +30,13 @@ class LotView:
     acquisition: Chain | None      # the option chain that delivered the shares
     acq_premium: Decimal           # that chain's realized total
     call_chains: tuple[Chain, ...]  # covered calls written against the lot
-    cc_premium: Decimal            # realized across those chains
+    cc_premium: Decimal            # realized across those chains, this lot's share
     open_calls: tuple[Position, ...]
     share_realized: Decimal        # P/L on the shares disposed from this lot
     disposed: int
     last_disposed_on: date | None
     basis: AdjustedBasis
+    covered_shares: int = 0        # shares of this lot spoken for by open calls
 
     @property
     def is_open(self) -> bool:
@@ -44,7 +45,7 @@ class LotView:
     @property
     def covered(self) -> int:
         """Shares currently spoken for by open calls."""
-        return sum(p.shares for p in self.open_calls)
+        return self.covered_shares
 
     @property
     def uncovered(self) -> int:
@@ -81,6 +82,8 @@ class TickerShares:
     realized: Decimal          # share P/L across all lots
     held_cost: Decimal         # cost basis of what is still held
     error: str = ""            # matching refused: an acquisition is missing
+    call_premium: Decimal = ZERO   # realized by the ticker's short-call chains
+    open_call_shares: int = 0      # shares the open short calls control
 
     @property
     def held(self) -> int:
@@ -99,12 +102,21 @@ class TickerShares:
         return blended([v.basis for v in self.open_lots])
 
     @property
+    def covered_shares(self) -> int:
+        return min(max(self.held, 0), self.open_call_shares)
+
+    @property
+    def uncovered_shares(self) -> int:
+        """Shares the open calls control beyond what is held: naked."""
+        return max(self.open_call_shares - max(self.held, 0), 0)
+
+    @property
     def option_premium(self) -> Decimal:
-        return q2(sum((v.acq_premium + v.cc_premium for v in self.lots), ZERO))
+        return q2(sum((v.acq_premium for v in self.lots), ZERO) + self.call_premium)
 
     @property
     def total(self) -> Decimal:
-        return q2(sum((v.total for v in self.lots), ZERO))
+        return q2(self.option_premium + self.realized)
 
 
 def _is_acquiring_option(position: Position) -> bool:
@@ -119,15 +131,19 @@ def lot_views(index: ChainIndex, positions, lots, disposals,
     allocations, so its lots read as fully held."""
     by_id = {p.id: p for p in positions}
 
-    # Covered-call chains by lot: only chain heads, so a rolled call counts
-    # once, with its whole history.
-    calls_by_lot: dict[str, list[Chain]] = {}
-    open_calls_by_lot: dict[str, list[Position]] = {}
+    # Covered calls belong to the ticker, not to a lot: when one is assigned
+    # the broker delivers shares by the account's matching rule, so a stored
+    # link between a call and a lot describes nothing real. Premium from the
+    # ticker's short-call chains (heads only, so a rolled call counts once) is
+    # spread over the ticker's lots by size; coverage is what the open calls
+    # control against what the ticker holds, oldest lots first.
+    chains_by_ticker: dict[str, list[Chain]] = {}
+    open_calls_by_ticker: dict[str, list[Position]] = {}
     for p in positions:
-        if p.share_lot_id and p.right is Right.CALL and index.is_head(p):
-            calls_by_lot.setdefault(p.share_lot_id, []).append(index.chain(p))
+        if p.right is Right.CALL and p.direction is Direction.SHORT and index.is_head(p):
+            chains_by_ticker.setdefault(p.underlying, []).append(index.chain(p))
             if p.is_open:
-                open_calls_by_lot.setdefault(p.share_lot_id, []).append(p)
+                open_calls_by_ticker.setdefault(p.underlying, []).append(p)
 
     # Share P/L per lot, from matching.
     realized_by_lot: dict[str, Decimal] = {}
@@ -152,23 +168,39 @@ def lot_views(index: ChainIndex, positions, lots, disposals,
             if a.lot_id not in last_by_lot or when > last_by_lot[a.lot_id]:
                 last_by_lot[a.lot_id] = when
 
+    size_by_ticker: dict[str, int] = {}
+    for lot in lots:
+        size_by_ticker[lot.underlying] = size_by_ticker.get(lot.underlying, 0) + lot.quantity
+    # Coverage: the open calls' shares laid over the open lots, oldest first.
+    covered_by_lot: dict[str, int] = {}
+    for underlying, calls in open_calls_by_ticker.items():
+        left = sum(p.shares for p in calls)
+        for lot in sorted((l for l in lots if l.underlying == underlying),
+                          key=lambda l: (l.acquired_on, l.id)):
+            take = min(remaining_by_lot.get(lot.id, lot.quantity), left)
+            if take > 0:
+                covered_by_lot[lot.id] = take
+                left -= take
+        if left > 0 and any(l.underlying == underlying for l in lots):
+            # More called than held: the excess sits on the last lot, where
+            # the ticker page shows it as over-covered.
+            last = max((l for l in lots if l.underlying == underlying),
+                       key=lambda l: (l.acquired_on, l.id))
+            covered_by_lot[last.id] = covered_by_lot.get(last.id, 0) + left
+
     views: list[LotView] = []
     for lot in lots:
         acquisition = None
         acq_premium = ZERO
-        chains = list(calls_by_lot.get(lot.id, ()))
         assigning = by_id.get(lot.assigning_position_id) if lot.assigning_position_id else None
-        if assigning is not None:
-            chain = index.chain(assigning)
-            if _is_acquiring_option(assigning):
-                acquisition = chain
-                acq_premium = chain.realized
-            elif assigning.share_lot_id != lot.id:
-                # An imported buy-write records the call as the lot's origin.
-                # It is a covered call on this lot, not its acquisition.
-                chains.append(chain)
+        if assigning is not None and _is_acquiring_option(assigning):
+            acquisition = index.chain(assigning)
+            acq_premium = acquisition.realized
 
-        cc_premium = q2(sum((c.realized for c in chains), ZERO))
+        chains = list(chains_by_ticker.get(lot.underlying, ()))
+        size = size_by_ticker.get(lot.underlying, 0)
+        call_premium = q2(sum((c.realized for c in chains), ZERO))
+        cc_premium = (q2(call_premium * Decimal(lot.quantity) / Decimal(size)) if size else ZERO)
         remaining = remaining_by_lot.get(lot.id, lot.quantity)
         basis = adjusted_basis(
             lot, acq_premium=acq_premium, cc_premium=cc_premium,
@@ -181,11 +213,12 @@ def lot_views(index: ChainIndex, positions, lots, disposals,
             acq_premium=acq_premium,
             call_chains=tuple(chains),
             cc_premium=cc_premium,
-            open_calls=tuple(open_calls_by_lot.get(lot.id, ())),
+            open_calls=tuple(open_calls_by_ticker.get(lot.underlying, ())),
             share_realized=realized_by_lot.get(lot.id, ZERO),
             disposed=disposed_by_lot.get(lot.id, 0),
             last_disposed_on=last_by_lot.get(lot.id),
             basis=basis,
+            covered_shares=covered_by_lot.get(lot.id, 0),
         ))
     return views
 
@@ -208,48 +241,23 @@ def by_ticker(index: ChainIndex, positions, lots, disposals,
             held_cost = result.open_cost
         except InsufficientSharesError as exc:
             error = str(exc)
+        mine = tuple(v for v in views if v.lot.underlying == underlying)
+        open_calls = mine[0].open_calls if mine else tuple(
+            p for p in positions if p.underlying == underlying and p.is_open
+            and p.right is Right.CALL and p.direction is Direction.SHORT)
         out.append(TickerShares(
             underlying=underlying,
-            lots=tuple(v for v in views if v.lot.underlying == underlying),
+            lots=mine,
             acquired=acquired,
             disposed=disposed,
             realized=realized,
             held_cost=held_cost,
             error=error,
+            call_premium=q2(sum((c.realized for c in (mine[0].call_chains if mine else ())), ZERO)),
+            open_call_shares=sum(p.shares for p in open_calls),
         ))
     return out
 
 
 def realized_shares(tickers) -> Decimal:
     return q2(sum((t.realized for t in tickers if not t.error), ZERO))
-
-
-def suggest_covers(index: ChainIndex, positions, lot_views_) -> dict[str, str]:
-    """Propose a covering lot for each unlinked short call.
-
-    A call opened on a ticker while a lot of that ticker was held is almost
-    certainly written against it. Where exactly one open-at-the-time lot fits,
-    propose it; where several do, propose nothing -- guessing would misplace
-    premium between lots. Imported history has no links at all, so this is
-    how it gets them, one confirmation at a time.
-    """
-    by_ticker_lots: dict[str, list[LotView]] = {}
-    for v in lot_views_:
-        by_ticker_lots.setdefault(v.lot.underlying, []).append(v)
-
-    out: dict[str, str] = {}
-    for p in positions:
-        if not (p.right is Right.CALL and p.direction is Direction.SHORT):
-            continue
-        if p.share_lot_id or not index.is_head(p):
-            continue
-        # Only propose for the chain's first leg; the roll inherits the link.
-        candidates = [
-            v for v in by_ticker_lots.get(p.underlying, ())
-            if v.lot.acquired_on <= p.opened_on
-            and (v.last_disposed_on is None or v.last_disposed_on >= p.opened_on)
-            and v.lot.assigning_position_id != p.id
-        ]
-        if len(candidates) == 1:
-            out[p.id] = candidates[0].lot.id
-    return out

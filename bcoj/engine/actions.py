@@ -119,9 +119,9 @@ def assign(
         long put    -> shares delivered (you exercised)
         long call   -> shares acquired (you exercised)
 
-    ``covering_lot_id`` earmarks the lot a short call delivers from. Without
-    it, matching falls back to the account rule, which for a buy-write would
-    reach past the shares actually bought for that call.
+    A short call's shares are delivered by the account's matching rule, as
+    the broker does it; ``covering_lot_id`` is accepted for compatibility and
+    ignored.
     """
     _require_open(position, "assign")
 
@@ -162,7 +162,8 @@ def assign(
         )
         result.summary = f"assigned - acquired {shares} shares at {position.strike}"
     else:
-        earmark = covering_lot_id or position.share_lot_id
+        # Delivered by the account's matching rule, as the broker does it:
+        # no lot is pinned.
         result.disposals.append(
             ShareDisposal(
                 id=new_id(),
@@ -177,7 +178,6 @@ def assign(
                     else DisposalKind.SOLD
                 ),
                 disposing_position_id=position.id,
-                specific_lot_ids=(earmark,) if earmark else (),
             )
         )
         result.summary = f"assigned - delivered {shares} shares at {position.strike}"
@@ -239,7 +239,6 @@ def roll(
         close_fee=q2(new_fee),
         status=Status.OPEN,
         rolled_from_id=position.id,
-        share_lot_id=position.share_lot_id,
         spread_group_id=position.spread_group_id,
         target_pct=position.target_pct,
     )
@@ -314,7 +313,6 @@ def split(
             # the tree whenever the parent had itself been rolled.
             split_from_id=position.id,
             split_from_quantity=total,
-            share_lot_id=position.share_lot_id,
             spread_group_id=position.spread_group_id,
             target_pct=position.target_pct,
             notes=position.notes,
@@ -424,8 +422,8 @@ def buy_write(
 ) -> ActionResult:
     """Buy stock and write a call against it, in one commit.
 
-    The call is linked to the lot, so it counts as covered and its shares are
-    earmarked for delivery if it is exercised.
+    The lot records the call as its origin. Coverage is a ticker-level fact:
+    shares held against the shares the open calls control.
     """
     if shares <= 0:
         raise ActionError("share quantity must be positive")
@@ -441,6 +439,7 @@ def buy_write(
             f" but only {shares} are being bought"
         )
 
+    call_id = position_id or new_id()
     lot = ShareLot(
         id=lot_id or new_id(),
         underlying=underlying.upper(),
@@ -449,9 +448,10 @@ def buy_write(
         cost_per_share=q2(share_price),
         fee=q2(share_fee),
         source=ShareSource.BUY_WRITE,
+        assigning_position_id=call_id,      # the lot names the trade it came with
     )
     call = Position(
-        id=position_id or new_id(),
+        id=call_id,
         underlying=underlying.upper(),
         expiry=expiry,
         strike=q2(strike),
@@ -463,7 +463,6 @@ def buy_write(
         open_price=q2(call_price),
         open_fee=q2(option_fee),
         status=Status.OPEN,
-        share_lot_id=lot.id,
     )
     return ActionResult(
         created=[call],
