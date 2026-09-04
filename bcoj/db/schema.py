@@ -14,7 +14,7 @@ every historical row with nothing to migrate.
 
 import sqlite3
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -353,3 +353,10 @@ def _seed_settings(conn: sqlite3.Connection) -> None:
 
 # Registered here because a callable migration has to be defined first.
 MIGRATIONS[2] = _migrate_2_split_and_exercise
+
+# One action, one group: a split writes three audit rows, and undoing one of
+# them alone left the other two standing. The group is what undo works on.
+MIGRATIONS[3] = (
+    "ALTER TABLE audit_log ADD COLUMN group_id TEXT",
+    "CREATE INDEX audit_log_group ON audit_log(group_id)",
+)

@@ -421,6 +421,47 @@ class TestAuditAndUndo(WebTestCase):
         self.post(f"/audit/{entry['id']}/revert", {})
         self.assertFalse(any(p.id == position.id for p in self.positions()))
 
+    def test_history_shows_one_row_per_action_and_undoes_it_whole(self):
+        self.add_position(underlying="grp")
+        parent = [p for p in self.positions() if p.underlying == "GRP"][0]
+        self.post(f"/position/{parent.id}/split", {"quantity": "4", "on": "2026-02-01"})
+        page = self.get("/audit")
+        self.assertIn("(3 records)", page)
+        conn = store.open_db(self.db_path)
+        try:
+            entry = [e for e in store.audit_entries(conn) if "split" in e["action"]][-1]
+        finally:
+            conn.close()
+        status, location, _ = self.post(f"/audit/{entry['id']}/revert", {})
+        self.assertEqual(status, 303)
+        self.assertIn("Undone split 10 into 4 and 6", location)     # says what, in trade terms
+        grp = [p for p in self.positions() if p.underlying == "GRP"]
+        self.assertEqual([(p.quantity, p.is_open) for p in grp], [(10, True)])
+        # A second undo of the same action is refused, and not shown as success.
+        status, location, _ = self.post(f"/audit/{entry['id']}/revert", {})
+        self.assertIn("flash=%21", location.replace("!", "%21"))
+        self.assertIn("already undone", location)
+        # The action's own row shows it undone, struck through, with Redo.
+        page = self.get("/audit")
+        self.assertIn("undone at", page)
+        self.assertIn('<s class="dim">', page)
+        self.assertNotIn("undo of audit #", page)
+        self.assertNotIn("Undid", page)                      # no bookkeeping rows
+        self.assertIn('submit">Redo</button>', page)
+        status, location, _ = self.post(f"/audit/{entry['id']}/redo", {})
+        self.assertEqual(status, 303)
+        self.assertIn("Redone split 10 into 4 and 6", location)
+        grp = [p for p in self.positions() if p.underlying == "GRP"]
+        self.assertEqual(sorted((p.quantity, p.status.value) for p in grp),
+                         [(4, "OPEN"), (6, "OPEN"), (10, "SPLIT")])
+        page = self.get("/audit")
+        self.assertNotIn("undone at", page)                 # in effect again: Undo is back
+        self.assertIn('submit">Undo</button>', page)
+        status, location, _ = self.post(f"/audit/{entry['id']}/redo", {})
+        self.assertIn("in effect", location)                # a second redo does nothing
+        status, location, _ = self.post(f"/audit/{entry['id']}/revert", {})
+        self.assertEqual(status, 303)                        # and undo works again
+
     def test_reverting_a_missing_entry_says_so(self):
         status, location, _ = self.post("/audit/999999/revert", {})
         self.assertEqual(status, 303)
@@ -459,8 +500,8 @@ class TestPositionPage(WebTestCase):
         self.add_position(underlying="dec")
         position = [p for p in self.positions() if p.underlying == "DEC"][0]
         body = self.get(f"/position/{position.id}")
-        for label in ("Break-even", "50% target", "Capital at risk",
-                      "Chain so far", "If all close at target"):
+        for label in ("break-even", "50% target", "Capital at risk",
+                      "Banked", "In hand", "To close at target", "Net at target"):
             with self.subTest(label=label):
                 self.assertIn(label, body)
 
@@ -1000,7 +1041,7 @@ class TestPartialAndProjection(WebTestCase):
     def test_partial_returns_the_table_and_its_strip_only(self):
         self._fresh("prt")
         body = self.get("/?show=open&partial=table")
-        self.assertTrue(body.startswith('<div class="totals">'), body[:60])
+        self.assertTrue(body.startswith('<div class="totals score">'), body[:60])
         self.assertIn('<table class="positions"', body)
         self.assertNotIn("<!doctype html>", body)
         self.assertNotIn("<header>", body)
@@ -1037,8 +1078,8 @@ class TestPartialAndProjection(WebTestCase):
     def test_table_partial_carries_the_strip_that_describes_it(self):
         self.add_position(underlying="tps")
         frag = self.get("/?show=open&ticker=TPS&partial=table")
-        self.assertTrue(frag.startswith('<div class="totals">'), frag[:60])
-        self.assertIn("1 position(s)", frag)
+        self.assertTrue(frag.startswith('<div class="totals score">'), frag[:60])
+        self.assertIn("the 1 position(s) in this table", frag)
         self.assertIn('<div class="filterbar">', frag)                 # the bar travels too
         self.assertIn("Ticker: TPS", frag)
         self.assertIn('<table class="positions">', frag)
@@ -1535,7 +1576,7 @@ class TestPositionsPagePolish(WebTestCase):
     def test_new_position_form_is_inline_and_the_nav_tab_is_gone(self):
         page = self.get("/?show=open")
         self.assertIn('data-form-tab="new" data-tabs-for="new-box"', page)
-        self.assertLess(page.index('data-form-tab="new"'), page.index('class="totals"'))  # up top
+        self.assertLess(page.index('data-form-tab="new"'), page.index('class="totals score"'))
         self.assertIn('<div class="titlebar"><h1>Positions</h1>', page)
         self.assertIn('data-form="new" hidden', page)
         self.assertIn('action="/new"', page)
@@ -1588,12 +1629,11 @@ class TestPositionsPagePolish(WebTestCase):
         self.add_position(underlying="tta", quantity="10", strike="35")
         self.add_position(underlying="ttb", quantity="2", strike="20", right="CALL")
         page = self.get("/?show=open&q=ttb")
-        self.assertIn("1 position(s)", page)
-        self.assertIn("0 put(s) &middot; 1 call(s) &middot; 2 contract(s)", page)
-        self.assertIn("Net credit", page)
-        self.assertIn("no cash committed", page)        # a naked call has no capital at risk
-        self.assertIn("% expected return", self.get("/?show=open&q=tta"))
-        self.assertIn("Next expiry", page)
+        self.assertIn("the 1 position(s) in this table", page)
+        self.assertIn("1 open leg(s) &middot; 2 contract(s)", page)
+        self.assertIn(">In hand<", page)
+        self.assertIn(">To close at target<", page)
+        self.assertIn("% return at target", self.get("/?show=open&q=tta"))
         self.assertNotIn("Realized options", page)     # portfolio-wide lives in Reports
         self.assertIn('class="good"', page)             # net credit is positive: green card
 
@@ -1607,10 +1647,10 @@ class TestPositionsPagePolish(WebTestCase):
         page = self.get(f"/position/{head.id}")
         self.assertIn(f'href="/position/{head.id}?&act={head.id}&do=close#row-{head.id}"', page)
         # Two strips at the top: the chain's story, then this leg's.
-        self.assertLess(page.index("<h2>Chain</h2>"), page.index("<h2>This position</h2>"))
+        self.assertLess(page.index('class="totals score"'), page.index("<h2>This position</h2>"))
         self.assertLess(page.index("<h2>This position</h2>"), page.index('<table class="positions'))
-        self.assertEqual(page.count("Chain so far"), 1)
-        self.assertIn("Break-even", page)
+        self.assertEqual(page.count(">Banked<"), 1)
+        self.assertIn("break-even", page)                   # one open chain: it has one
         self.assertIn("1 roll(s)", page)
         self.assertIn("less fee", page)                     # how the credit was made
         self.assertIn("Days to expiry", page)
@@ -1636,22 +1676,20 @@ class TestCampaignStrip(WebTestCase):
                                                 "new_price": "5.00", "close_fee": "0", "new_fee": "0"})
         head = [p for p in self.positions() if p.underlying == "CMP" and p.is_open][0]
         page = self.get(f"/position/{head.id}")
-        self.assertLess(page.index("<h2>Campaign</h2>"), page.index("<h2>This branch</h2>"))
+        self.assertLess(page.index('class="totals score"'), page.index("<h2>This branch</h2>"))
         self.assertLess(page.index("<h2>This branch</h2>"), page.index("<h2>This position</h2>"))
-        self.assertIn("Campaign so far", page)
-        self.assertIn("10 &rarr; 6", page)                      # contracts
-        self.assertIn("400 shares", page)                        # assigned
+        self.assertIn(">Banked<", page)
+        self.assertIn("this campaign &middot; 4 leg(s)", page)
+        self.assertIn("contracts 10 &rarr; 6", page)
         self.assertIn("1 roll(s) &middot; 1 split(s)", page)
-        self.assertIn("buy-backs would cost", page)
+        self.assertIn("assigned 400 shares", page)
         # A plain chain has no campaign section: chain and branch are the same.
         self.add_position(underlying="pln")
         plain = [p for p in self.positions() if p.underlying == "PLN"][0]
         plain_page = self.get(f"/position/{plain.id}")
-        self.assertIn("<h2>Chain</h2>", plain_page)
-        self.assertNotIn("<h2>Campaign</h2>", plain_page)
-        self.assertIn("Chain so far", plain_page)               # same cards, one lineage
-        self.assertIn("buy-backs would cost", plain_page)
-        self.assertIn("Break-even", plain_page)
+        self.assertNotIn("<h2>This branch</h2>", plain_page)    # one lineage: no branch section
+        self.assertIn(">Banked<", plain_page)                  # the same scorecard
+        self.assertIn("break-even", plain_page)
 
 
 class TestDataPage(WebTestCase):
@@ -1879,7 +1917,9 @@ class TestLongTargets(WebTestCase):
         self.assertIn(">1.40<", page)
         self.assertIn("expected 26.70", page)
         strip = self.get("/?show=open&ticker=LNG2")
-        self.assertIn("profit target on the debit paid", strip)
+        # Closing a long at target is a sale: the "obligation" is negative,
+        # i.e. cash coming in (139.35 for the 1.40 target less the 0.65 fee).
+        self.assertIn("139.35", strip)
         self.assertNotIn("chain is net debit", strip)
 
 
@@ -1887,12 +1927,17 @@ class TestShareRepairs(WebTestCase):
     """Fixing a mis-entered sale, and the guards that prevent one."""
 
     def _buy(self, ticker, qty, price="10.00", on="2026-01-05"):
+        conn = store.open_db(self.db_path)
+        try:
+            before = {l.id for l in store.load_lots(conn)}
+        finally:
+            conn.close()
         self.post("/shares/buy", {"underlying": ticker, "on": on,
                                   "quantity": str(qty), "price": price})
         conn = store.open_db(self.db_path)
         try:
-            return [l for l in store.load_lots(conn)
-                    if l.underlying == ticker.upper()][-1]
+            # The lot just written, not whichever sorts last among same-day lots.
+            return [l for l in store.load_lots(conn) if l.id not in before][0]
         finally:
             conn.close()
 

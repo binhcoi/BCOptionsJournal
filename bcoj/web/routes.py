@@ -23,6 +23,7 @@ from ..domain.types import Position
 from ..engine import actions, decide, reports, validate, wheels
 from ..engine import health
 from ..engine.campaign import campaign
+from ..engine.scorecard import scorecard
 from ..engine.chains import ChainIndex
 from ..engine.shares import InsufficientSharesError, match as match_lots
 from ..engine.pnl import close_cash, open_cash, realized_pl
@@ -417,7 +418,9 @@ def positions_page(conn, query, token: str = "") -> tuple[int, str]:
             return 200, ""
         return 200, rows[act_row_at] + rows[action_at]
 
-    totals = _table_totals(listed, index)
+    sc = scorecard(index, listed, whole_campaigns=False)
+    totals = _scorecard_html(sc, f"the {len(listed)} position(s) in this table: "
+                                 f"{sc.closed_legs} closed, {sc.open_legs} open")
 
     table_html = r.table(POSITION_COLUMNS, rows, cls="positions")
     filter_bar = _filter_bar(conn, query, show, token, positions)
@@ -724,21 +727,15 @@ def position_page(conn, position_id, token, query) -> tuple[int, str]:
 
     lots = store.load_lots(conn)
     fam = campaign(index, position)
+    # The same scorecard as the positions page, over this campaign, then the
+    # campaign's shape in a line of chips.
+    strips = _scorecard_html(scorecard(index, [position]),
+                             f"this campaign &middot; {len(fam.legs)} leg(s) since {fam.started}",
+                             extra_chips=_campaign_chips(fam))
     if fam.splits:
-        # Several branches grew from one trade: the campaign is all of them,
-        # this branch is the lineage that leads here.
-        strips = ("<h2>Campaign</h2>" + _cards(_campaign_cards(fam, "Campaign"), "totals wide")
-                  + "<h2>This branch</h2>"
-                  + _cards(_chain_cards(index, position, chain), "totals wide"))
-    else:
-        # One lineage: the campaign cards tell its story, plus the two figures
-        # that only exist for a single line -- break-even and what it still
-        # owes.
-        cards = _campaign_cards(fam, "Chain")
-        extra = [c for c in _chain_cards(index, position, chain)
-                 if c[0] in ("Break-even", "Credit to recover")]
-        cards[2:2] = extra
-        strips = "<h2>Chain</h2>" + _cards(cards, "totals wide")
+        # Several branches grew from one trade; this is the lineage that leads here.
+        strips += ("<h2>This branch</h2>"
+                   + _cards(_chain_cards(index, position, chain), "totals wide"))
     strips += ("<h2>This position</h2>"
                + _cards(_position_cards(position, chain, carry, lots), "totals wide"))
 
@@ -1022,6 +1019,60 @@ def do_delete_position(conn, position_id, form) -> None:
     except ValueError as exc:
         raise BadRequest(str(exc)) from None
     raise Redirect(_next(form, "/?show=all"), "Position removed; undo from History if needed")
+
+
+def _scorecard_html(sc, scope: str, extra_chips=()) -> str:
+    """One figure per card, nothing to decode; the finer stats are chips."""
+    def tone(value):
+        return None if value == 0 else (1 if value > 0 else -1)
+
+    cards = [
+        ("Banked", r.money(sc.banked, dash="0.00"), tone(sc.banked)),
+        ("In hand", r.money(sc.in_hand, dash="0.00"), tone(sc.in_hand)),
+        ("To close at target", (f'<span class="neg">({fmt(sc.to_close)})</span>' if sc.to_close > 0
+                                else r.money(-sc.to_close, dash="0.00")), -1 if sc.to_close > 0 else None),
+        ("Net at target", r.money(sc.at_target, dash="0.00"), tone(sc.at_target)),
+        ("At risk", r.money(sc.at_risk, dash="0.00"), None),
+    ]
+    chips = []
+    if sc.closed_legs:
+        kept = sc.kept
+        if kept is not None:
+            cls = "pos" if kept >= 50 else ("neg" if kept < 0 else "")
+            chips.append((f"kept {kept}% of premium", cls))
+        chips.append((f"won {sc.wins} of {sc.closed_legs} closed", ""))
+        chips.append((f"avg {sc.avg_days} days", ""))
+    if sc.open_legs:
+        chips.append((f"{sc.open_legs} open leg(s) &middot; {sc.contracts} contract(s)", ""))
+        if sc.return_at_target is not None:
+            chips.append((f"{sc.return_at_target}% return at target", ""))
+        if sc.break_even is not None:
+            chips.append((f"break-even {fmt(sc.break_even)}", ""))
+    chips.extend(extra_chips)
+    chips.append((scope, "dim"))
+    return (_cards(cards, "totals score")
+            + '<div class="chips facts">' + "".join(
+                f'<span class="chip{" " + cls if cls else ""}">{text}</span>' for text, cls in chips)
+            + "</div>")
+
+
+def _campaign_chips(fam) -> list:
+    """The campaign's shape, as chips: size, strikes, assignments, span."""
+    chips = []
+    if fam.is_open:
+        grew = fam.contracts_now - fam.contracts_start
+        growth = f" &middot; x{fam.contracts_now / fam.contracts_start:.1f}" if grew > 0 else ""
+        chips.append((f"contracts {fam.contracts_start} &rarr; {fam.contracts_now}{growth}",
+                      "neg" if grew > 0 else ""))
+        strikes = " / ".join(price(x) for x in fam.strikes_now)
+        chips.append((f"strikes {r.esc(price(fam.root.strike))} &rarr; {r.esc(strikes)}", ""))
+        if fam.at_risk_now != fam.at_risk_start:
+            chips.append((f"at risk was {fmt(fam.at_risk_start)} at the start",
+                          "neg" if fam.at_risk_now > fam.at_risk_start else ""))
+    if fam.assigned_legs:
+        chips.append((f"assigned {fam.assigned_shares} shares &middot; {fmt(fam.assigned_cash)} at strike", ""))
+    chips.append((f"{fam.days} days &middot; {fam.rolls} roll(s) &middot; {fam.splits} split(s)", ""))
+    return chips
 
 
 def _campaign_cards(fam, word: str = "Campaign") -> list:
@@ -2129,29 +2180,89 @@ def audit_page(conn, token, query) -> tuple[int, str]:
     entity = (query.get("entity") or [None])[0]
     entries = store.audit_entries(conn, limit=300, entity_id=entity)
 
-    rows = []
+    # One row per action: the entries of a group are shown together and
+    # undone together, because that is the only undo that leaves the journal
+    # consistent (a split is three records). Entries older than grouping are
+    # matched the way the store matches them: same second, same note.
+    def same_action(a, b) -> bool:
+        if a["group_id"] or b["group_id"]:
+            return bool(a["group_id"]) and a["group_id"] == b["group_id"]
+        na, nb = (x["action"].split(": ", 1)[1] if ": " in x["action"] else "" for x in (a, b))
+        return bool(na) and na == nb and a["at"] == b["at"]
+
+    groups: list[list] = []
     for e in entries:
+        if e["action"].startswith(("revert", "redo")):
+            continue        # bookkeeping: the action's own row shows its state
+        if groups and same_action(groups[-1][0], e):
+            groups[-1].append(e)
+        else:
+            groups.append([e])
+
+    def who(e) -> str:
+        return (f'<a href="/position/{r.esc(e["entity_id"])}">{r.esc(e["entity_id"][:8])}</a>'
+                if e["entity_type"] == "position" else r.esc(e["entity_id"][:8]))
+
+    rows = []
+    for group in groups:
+        first = group[-1]          # oldest entry of the action: its note names it
+        kinds_ok = all(e["entity_type"] in ("position", "share_lot", "share_disposal") for e in group)
+        state = store.action_state(conn, group)
         undo = ""
-        if (e["entity_type"] in ("position", "share_lot", "share_disposal")
-                and not e["action"].startswith("revert")):
-            undo = r.form(f"/audit/{e['id']}/revert", "", token,
-                          submit="Undo", cls="inline")
+        if kinds_ok:
+            if state == "undone":
+                undo = r.form(f"/audit/{first['id']}/redo", "", token, submit="Redo", cls="inline")
+            else:
+                undo = r.form(f"/audit/{first['id']}/revert", "", token, submit="Undo", cls="inline")
+        kinds = sorted({e["entity_type"].replace("_", " ") for e in group})
+        what = _describe_action(conn, first)
+        if len(group) > 1:
+            what += f' <span class="dim">({len(group)} records)</span>'
+        if state == "undone":
+            when = (store.action_state_at(conn, group) or "")[11:16]
+            what = f'<s class="dim">{what}</s> <small class="neg">undone at {r.esc(when)}</small>'
         rows.append([
-            r.esc(e["at"].replace("T", " ")),
-            r.esc(e["entity_type"]),
-            (f'<a href="/position/{r.esc(e["entity_id"])}">'
-             f'{r.esc(e["entity_id"][:8])}</a>'
-             if e["entity_type"] == "position" else r.esc(e["entity_id"][:8])),
-            r.esc(e["action"]),
+            r.esc(first["at"].replace("T", " ")),
+            r.esc(", ".join(kinds)),
+            "<br>".join(who(e) for e in group[::-1]),
+            what,
             undo,
         ])
 
     scope = (f' for <a href="/position/{r.esc(entity)}">{r.esc(entity[:8])}</a>'
              if entity else "")
-    body = f"""<p class="hint">Every change is recorded{scope}. Undo restores
-the values a change replaced, and is itself recorded.</p>
+    body = f"""<p class="hint">Every change is recorded{scope}. Undo takes back the whole
+action a row belongs to -- a split is three records -- or nothing, and is itself
+recorded. An undone action stays in the list, struck through, with Redo to
+put it back. An action that a later one depends on cannot be undone until that
+later one is.</p>
 {r.table(["When (UTC)", "Kind", "Entity", "What", ""], rows, cls="audit")}"""
     return 200, r.page("History", body, nav_here="audit")
+
+
+def _describe_action(conn, entry) -> str:
+    """An audit entry in words a reader knows: the action's own note, and for
+    an undo or redo, the note of the action it undid or redid."""
+    verb, _, note = entry["action"].partition(": ")
+    if verb in ("revert", "redo") and "#" in note:
+        try:
+            target = conn.execute("SELECT action FROM audit_log WHERE id = ?",
+                                  (int(note.rsplit("#", 1)[1]),)).fetchone()
+        except ValueError:
+            target = None
+        original = target["action"].partition(": ")[2] if target else ""
+        word = "Undid" if verb == "revert" else "Redid"
+        return f"<b>{word}</b> {r.esc(original) if original else r.esc(note)}"
+    label = {"create": "recorded", "update": "changed", "delete": "removed"}.get(verb, verb)
+    return f'<span class="dim">{r.esc(label)}</span> {r.esc(note or verb)}'
+
+
+def do_redo(conn, entry_id, form) -> None:
+    try:
+        outcome = store.redo_audit_entry(conn, int(entry_id))
+    except ValueError as exc:
+        raise Redirect("/audit", f"!{exc}") from None
+    raise Redirect("/audit", f"Redone {outcome}")
 
 
 def do_revert(conn, entry_id, form) -> None:
@@ -2159,7 +2270,7 @@ def do_revert(conn, entry_id, form) -> None:
         outcome = store.revert_audit_entry(conn, int(entry_id))
     except ValueError as exc:
         raise Redirect("/audit", f"!{exc}") from None
-    raise Redirect("/audit", f"Undone: {outcome}")
+    raise Redirect("/audit", f"Undone {outcome}")
 
 
 # ---------------------------------------------------------------------------

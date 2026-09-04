@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import threading
+from contextlib import contextmanager
 import re
 import sqlite3
 import uuid
@@ -521,22 +523,18 @@ def apply(conn, result, note: str = "") -> dict[str, str]:
     """
     summary = note or getattr(result, "summary", "")
 
-    with conn:
+    with audit_group(), conn:
         # Shares first: a created position may point at a new lot (a
         # buy-write's call), while a lot only ever points at a position that
         # already exists. Writing positions first trips the foreign key.
         for lot in result.lots:
             _insert_lot(conn, lot)
             _audit(conn, "share_lot", lot.id, "create", None,
-                   {"underlying": lot.underlying, "quantity": lot.quantity,
-                    "cost_per_share": str(lot.cost_per_share),
-                    "source": lot.source.value}, summary)
+                   _row_as_dict(conn, "share_lots", lot.id), summary)
         for d in result.disposals:
             _insert_disposal(conn, d)
             _audit(conn, "share_disposal", d.id, "create", None,
-                   {"underlying": d.underlying, "quantity": d.quantity,
-                    "proceeds_per_share": str(d.proceeds_per_share),
-                    "kind": d.kind.value}, summary)
+                   _row_as_dict(conn, "share_disposals", d.id), summary)
         for p in result.updated:
             before = _row_as_dict(conn, "positions", p.id)
             _update_position(conn, p)
@@ -556,14 +554,31 @@ def _position_dict(p: Position) -> dict:
     return dict(zip(_POSITION_COLUMNS, _position_values(p)))
 
 
+_GROUP = threading.local()
+
+
+@contextmanager
+def audit_group():
+    """Everything audited inside belongs to one action, and is undone as one."""
+    fresh = getattr(_GROUP, "id", None) is None
+    if fresh:
+        _GROUP.id = uuid.uuid4().hex
+    try:
+        yield _GROUP.id
+    finally:
+        if fresh:
+            _GROUP.id = None
+
+
 def _audit(conn, entity_type, entity_id, action, before, after, note) -> None:
     conn.execute(
-        "INSERT INTO audit_log (at, entity_type, entity_id, action, before, after)"
-        " VALUES (?,?,?,?,?,?)",
+        "INSERT INTO audit_log (at, entity_type, entity_id, action, before, after, group_id)"
+        " VALUES (?,?,?,?,?,?,?)",
         (
             _now(), entity_type, entity_id, f"{action}: {note}" if note else action,
             json.dumps(before, default=str) if before is not None else None,
             json.dumps(after, default=str) if after is not None else None,
+            getattr(_GROUP, "id", None),
         ),
     )
 
@@ -712,7 +727,7 @@ def convert_to_share_trade(conn, position_id: str, note: str = "") -> str:
             raise InUseError("; ".join(others) + " - a real option leg is not a share trade")
     when = _iso(p.closed_on or p.opened_on)
     moved = []
-    with conn:
+    with audit_group(), conn:
         for row in conn.execute("SELECT * FROM share_lots WHERE assigning_position_id = ?",
                                 (position_id,)).fetchall():
             before = dict(row)
@@ -747,7 +762,8 @@ def convert_to_share_trade(conn, position_id: str, note: str = "") -> str:
                 _audit(conn, "share_disposal", d.id, "create", None,
                        _row_as_dict(conn, "share_disposals", d.id), note)
                 moved.append(f"sale of {p.shares}")
-    delete_position(conn, position_id, note)
+    with audit_group():
+        delete_position(conn, position_id, note)
     rebuild_allocations(conn)
     return ", ".join(moved) + f" on {when}"
 
@@ -932,51 +948,200 @@ def audit_entries(conn, limit: int = 200, entity_id: str | None = None):
 
 
 def revert_audit_entry(conn, entry_id: int) -> str:
-    """Undo one logged change by restoring its ``before`` state.
+    """Undo the action an audit entry belongs to -- every record it touched,
+    in reverse order, in one transaction -- or nothing.
 
     A create is undone by deleting; an update by writing the previous values
-    back. The reversal is itself logged, so undo is auditable too.
+    back; a delete by putting the row back. Refused when a later action
+    depends on a record this one created (a half of a split that has since
+    been rolled): undo that later action first. The reversal is itself
+    logged, as one group.
     """
-    entry = conn.execute(
-        "SELECT * FROM audit_log WHERE id = ?", (entry_id,)
-    ).fetchone()
+    entry = conn.execute("SELECT * FROM audit_log WHERE id = ?", (entry_id,)).fetchone()
     if entry is None:
         raise ValueError(f"no audit entry {entry_id}")
+    if entry["action"].startswith(("revert", "redo")):
+        raise ValueError("undo and redo apply to the action itself, not to its bookkeeping")
+    entries = action_entries(conn, entry)
+    if action_state(conn, entries) == "undone":
+        raise ValueError("that action is already undone; Redo puts it back")
 
+    created_here = {e["entity_id"] for e in entries
+                    if e["entity_type"] == "position" and e["action"].startswith("create")}
+    for pid in created_here:
+        outside = [r_ for r_ in position_links(conn, pid)]
+        # Links from records this same action created do not count.
+        dependants = conn.execute(
+            "SELECT id FROM positions WHERE (rolled_from_id = ? OR split_from_id = ?)",
+            (pid, pid)).fetchall()
+        if any(d["id"] not in created_here for d in dependants) or any(
+                "share" in r_ for r_ in outside):
+            raise ValueError(f"a later action depends on {pid[:8]}: undo that one first")
+
+    outcomes = []
+    touched_shares = False
+    with audit_group(), conn:
+        for e in entries:
+            outcomes.append(_revert_one(conn, e))
+            touched_shares = touched_shares or e["entity_type"] != "position"
+    if touched_shares:
+        rebuild_allocations(conn)
+    what = _note_of(entries[-1])
+    return (f"{what}: " if what else "") + "; ".join(outcomes)
+
+
+def action_state(conn, entries) -> str:
+    """'in_effect' or 'undone': whichever of the action's undos and redos came
+    last decides. An action never undone is in effect."""
+    marks = [f"revert: undo of audit #{e['id']}" for e in entries] + \
+            [f"redo: redo of audit #{e['id']}" for e in entries]
+    last = conn.execute(
+        "SELECT action FROM audit_log WHERE " + " OR ".join("action = ?" for _ in marks)
+        + " ORDER BY id DESC LIMIT 1", tuple(marks)).fetchone()
+    if last is None:
+        return "in_effect"
+    return "undone" if last["action"].startswith("revert") else "in_effect"
+
+
+def action_state_at(conn, entries) -> str | None:
+    """When the action's state last changed, for the History row."""
+    marks = [f"revert: undo of audit #{e['id']}" for e in entries] + \
+            [f"redo: redo of audit #{e['id']}" for e in entries]
+    last = conn.execute(
+        "SELECT at FROM audit_log WHERE " + " OR ".join("action = ?" for _ in marks)
+        + " ORDER BY id DESC LIMIT 1", tuple(marks)).fetchone()
+    return last["at"] if last else None
+
+
+def _note_of(entry) -> str:
+    """The action's own words, e.g. 'split 20 into 2 and 18'."""
+    return entry["action"].split(": ", 1)[1] if ": " in entry["action"] else ""
+
+
+def action_entries(conn, entry) -> list:
+    """Every audit entry of the action ``entry`` belongs to, newest first.
+
+    Grouped entries carry the id. Entries from before grouping existed are
+    matched by what the action itself wrote: the same second and the same
+    note, which is how one action's rows always looked."""
+    if entry["group_id"]:
+        return list(conn.execute(
+            "SELECT * FROM audit_log WHERE group_id = ? ORDER BY id DESC", (entry["group_id"],)))
+    note = _note_of(entry)
+    if not note:
+        return [entry]
+    return list(conn.execute(
+        "SELECT * FROM audit_log WHERE group_id IS NULL AND at = ? AND action LIKE ?"
+        " ORDER BY id DESC", (entry["at"], f"%: {note}")))
+
+
+def redo_audit_entry(conn, revert_id: int) -> str:
+    """Do again what an undo took back: the whole action, in its original
+    order, from the states its own entries recorded."""
+    entry = conn.execute("SELECT * FROM audit_log WHERE id = ?", (revert_id,)).fetchone()
+    if entry is None:
+        raise ValueError(f"no audit entry {revert_id}")
+    if entry["action"].startswith("revert"):      # an undo row still points at its action
+        original_id = int(entry["action"].rsplit("#", 1)[1])
+        entry = conn.execute("SELECT * FROM audit_log WHERE id = ?", (original_id,)).fetchone()
+        if entry is None:
+            raise ValueError("the undone action is no longer in the log")
+    if entry["action"].startswith("redo"):
+        raise ValueError("undo and redo apply to the action itself, not to its bookkeeping")
+    entries = sorted(action_entries(conn, entry), key=lambda e: e["id"])
+    if action_state(conn, entries) != "undone":
+        raise ValueError("that action is in effect; there is nothing to redo")
+    for e in entries:
+        if e["action"].startswith("create") and e["entity_type"] != "position":
+            after = json.loads(e["after"]) if e["after"] else {}
+            if "id" not in after:
+                raise ValueError("this action's share records were logged before they could be "
+                                 "recreated; record them again by hand")
+    outcomes = []
+    touched_shares = False
+    with audit_group(), conn:
+        for e in entries:
+            outcomes.append(_redo_one(conn, e))
+            touched_shares = touched_shares or e["entity_type"] != "position"
+    if touched_shares:
+        rebuild_allocations(conn)
+    what = _note_of(entries[0])
+    return (f"{what}: " if what else "") + "; ".join(outcomes)
+
+
+def _redo_one(conn, entry) -> str:
+    after = json.loads(entry["after"]) if entry["after"] else None
     before = json.loads(entry["before"]) if entry["before"] else None
     kind = entry["entity_type"]
+    table = {"position": "positions", "share_lot": "share_lots",
+             "share_disposal": "share_disposals"}.get(kind)
+    if table is None:
+        raise ValueError("that change cannot be redone automatically")
+    label = _describe(kind, after or before, entry["entity_id"][:8])
+    current = _row_as_dict(conn, table, entry["entity_id"])
+    if entry["action"].startswith("create"):
+        if current is None:
+            row = {k: v for k, v in after.items()
+                   if kind != "position" or k in _POSITION_COLUMNS}
+            _reinsert(conn, table, row)
+        outcome = f"recreated {label}"
+    elif entry["action"].startswith("delete"):
+        conn.execute(f"DELETE FROM {table} WHERE id = ?", (entry["entity_id"],))
+        outcome = f"removed {label} again"
+    else:
+        cols = [c for c in after if c != "id" and (kind != "position" or c in _POSITION_COLUMNS)]
+        conn.execute(f"UPDATE {table} SET {','.join(c + ' = ?' for c in cols)} WHERE id = ?",
+                     tuple(after[c] for c in cols) + (entry["entity_id"],))
+        outcome = f"restored {label}"
+    _audit(conn, kind, entry["entity_id"], "redo", current, after, f"redo of audit #{entry['id']}")
+    return outcome
+
+
+def _describe(kind: str, row: dict | None, fallback: str) -> str:
+    """A record in trade terms, for the undo message."""
+    if not row:
+        return fallback
+    try:
+        if kind == "position":
+            right = str(row.get("option_right", ""))[:1]
+            return (f"{row['quantity']} {row['underlying']} {row['expiry']} "
+                    f"{Decimal(str(row['strike'])).normalize():f}{right}")
+        return f"{row['underlying']} {'lot' if kind == 'share_lot' else 'sale'} of {row['quantity']}"
+    except (KeyError, TypeError, ValueError):
+        return fallback
+
+
+def _revert_one(conn, entry) -> str:
+    before = json.loads(entry["before"]) if entry["before"] else None
+    after = json.loads(entry["after"]) if entry["after"] else None
+    kind = entry["entity_type"]
+    short = _describe(kind, before or after, entry["entity_id"][:8])
     if kind in ("share_lot", "share_disposal"):
         table = "share_lots" if kind == "share_lot" else "share_disposals"
-        with conn:
-            if entry["action"].startswith("create"):
-                conn.execute(f"DELETE FROM {table} WHERE id = ?", (entry["entity_id"],))
-                outcome = f"removed {entry['entity_id'][:8]}"
-            elif entry["action"].startswith("delete") and before:
-                _reinsert(conn, table, before)
-                outcome = f"restored {entry['entity_id'][:8]}"
-            elif entry["action"].startswith("update") and before:
-                cols = [c for c in before if c != "id"]
-                conn.execute(
-                    f"UPDATE {table} SET {','.join(c + ' = ?' for c in cols)} WHERE id = ?",
-                    tuple(before[c] for c in cols) + (entry["entity_id"],),
-                )
-                outcome = f"restored {entry['entity_id'][:8]}"
-            else:
-                raise ValueError("that share change cannot be reverted automatically")
-            _audit(conn, kind, entry["entity_id"], "revert", None, before,
-                   f"undo of audit #{entry_id}")
-        rebuild_allocations(conn)
-        return outcome
-    if kind != "position":
-        raise ValueError("that change cannot be reverted automatically")
-    with conn:
+        if entry["action"].startswith("create"):
+            conn.execute(f"DELETE FROM {table} WHERE id = ?", (entry["entity_id"],))
+            outcome = f"removed {short}"
+        elif entry["action"].startswith("delete") and before:
+            _reinsert(conn, table, before)
+            outcome = f"restored {short}"
+        elif entry["action"].startswith("update") and before:
+            cols = [c for c in before if c != "id"]
+            conn.execute(
+                f"UPDATE {table} SET {','.join(c + ' = ?' for c in cols)} WHERE id = ?",
+                tuple(before[c] for c in cols) + (entry["entity_id"],),
+            )
+            outcome = f"restored {short}"
+        else:
+            raise ValueError("that share change cannot be reverted automatically")
+    elif kind == "position":
         if before is None:
+            conn.execute("DELETE FROM position_tags WHERE position_id = ?", (entry["entity_id"],))
             conn.execute("DELETE FROM positions WHERE id = ?", (entry["entity_id"],))
-            outcome = f"deleted {entry['entity_id'][:8]}"
+            outcome = f"deleted {short}"
         elif entry["action"].startswith("delete"):
             row = {k: v for k, v in before.items() if k in _POSITION_COLUMNS}
             _reinsert(conn, "positions", row)
-            outcome = f"restored {entry['entity_id'][:8]}"
+            outcome = f"restored {short}"
         else:
             columns = [c for c in _POSITION_COLUMNS if c != "id"]
             assignments = ",".join(f"{c} = ?" for c in columns)
@@ -984,9 +1149,10 @@ def revert_audit_entry(conn, entry_id: int) -> str:
                 f"UPDATE positions SET {assignments} WHERE id = ?",
                 tuple(before.get(c) for c in columns) + (entry["entity_id"],),
             )
-            outcome = f"restored {entry['entity_id'][:8]}"
-        _audit(conn, "position", entry["entity_id"], "revert", None, before,
-               f"undo of audit #{entry_id}")
+            outcome = f"restored {short}"
+    else:
+        raise ValueError("that change cannot be reverted automatically")
+    _audit(conn, kind, entry["entity_id"], "revert", None, before, f"undo of audit #{entry['id']}")
     return outcome
 
 
@@ -1029,7 +1195,7 @@ def delete_lot(conn, lot_id: str, note: str = "", unlink_open: bool = False) -> 
     ).fetchone()["n"]
     if pinned:
         raise InUseError(f"{pinned} sale(s) are pinned to this lot; remove or repin them first")
-    with conn:
+    with audit_group(), conn:
         # Closed calls that were written against it are history: they keep
         # their own figures and simply stop pointing at a lot that is gone.
         for c in calls:
@@ -1098,7 +1264,7 @@ def redate_lot(conn, lot_id: str, on: date, note: str = "") -> None:
     before = _row_as_dict(conn, "share_lots", lot_id)
     if before is None:
         raise ValueError("no such lot")
-    with conn:
+    with audit_group(), conn:
         conn.execute("UPDATE share_lots SET acquired_on = ? WHERE id = ?", (_iso(on), lot_id))
         _audit(conn, "share_lot", lot_id, "update", before,
                _row_as_dict(conn, "share_lots", lot_id), note)

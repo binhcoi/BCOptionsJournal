@@ -373,3 +373,148 @@ class TestRepairingPositions(StoreTestCase):
         self.assertEqual((p.opened_on, p.expiry), (date(2026, 1, 5), date(2026, 4, 17)))
         with self.assertRaises(ValueError):
             store.redate_position(self.conn, "p", expiry=date(2025, 12, 1))
+
+
+class TestGroupedUndo(StoreTestCase):
+    def _position(self, pid="g1", **kw):
+        from datetime import date
+        from decimal import Decimal
+        from bcoj.domain.enums import Direction, Right
+        from bcoj.domain.types import Position
+        base = dict(id=pid, underlying="ACME", expiry=date(2026, 3, 20), strike=Decimal("35"),
+                    right=Right.PUT, direction=Direction.SHORT, quantity=10,
+                    opened_on=date(2026, 1, 5), open_price=Decimal("3.00"))
+        base.update(kw)
+        return Position(**base)
+
+    def test_undoing_a_split_takes_back_all_three_records(self):
+        from datetime import date
+        from bcoj.engine import actions
+        parent = self._position()
+        store.save_positions(self.conn, [parent])
+        store.apply(self.conn, actions.split(parent, 4, on=date(2026, 2, 1)))
+        self.assertEqual(len(store.load_positions(self.conn)), 3)
+        entries = store.audit_entries(self.conn)
+        split_rows = [e for e in entries if "split" in e["action"]]
+        self.assertEqual(len(split_rows), 3)
+        self.assertEqual(len({e["group_id"] for e in split_rows}), 1)
+        # Undo through any one of them: the parent is open again, alone.
+        store.revert_audit_entry(self.conn, split_rows[1]["id"])
+        remaining = store.load_positions(self.conn)
+        self.assertEqual([p.id for p in remaining], ["g1"])
+        self.assertTrue(remaining[0].is_open)
+        self.assertEqual(remaining[0].quantity, 10)
+
+    def test_undo_is_refused_while_a_later_action_depends_on_it(self):
+        from datetime import date
+        from decimal import Decimal
+        from bcoj.engine import actions
+        parent = self._position()
+        store.save_positions(self.conn, [parent])
+        split = actions.split(parent, 4, on=date(2026, 2, 1))
+        store.apply(self.conn, split)
+        six = max(split.created, key=lambda p: p.quantity)
+        store.apply(self.conn, actions.roll(store.load_position(self.conn, six.id),
+                                            close_price=Decimal("4"), new_expiry=date(2026, 4, 17),
+                                            new_strike=Decimal("34"), new_price=Decimal("5"),
+                                            on=date(2026, 2, 6)))
+        split_entry = [e for e in store.audit_entries(self.conn) if "split" in e["action"]][0]
+        with self.assertRaises(ValueError) as ctx:
+            store.revert_audit_entry(self.conn, split_entry["id"])
+        self.assertIn("undo that one first", str(ctx.exception))
+        # Undo the roll, then the split goes.
+        roll_entry = [e for e in store.audit_entries(self.conn) if "rolled" in e["action"]][0]
+        store.revert_audit_entry(self.conn, roll_entry["id"])
+        store.revert_audit_entry(self.conn, split_entry["id"])
+        self.assertEqual([p.id for p in store.load_positions(self.conn)], ["g1"])
+
+
+class TestUndoOfOlderEntries(StoreTestCase):
+    def _position(self, pid="o1", **kw):
+        from datetime import date
+        from decimal import Decimal
+        from bcoj.domain.enums import Direction, Right
+        from bcoj.domain.types import Position
+        base = dict(id=pid, underlying="ACME", expiry=date(2026, 3, 20), strike=Decimal("35"),
+                    right=Right.PUT, direction=Direction.SHORT, quantity=10,
+                    opened_on=date(2026, 1, 5), open_price=Decimal("3.00"))
+        base.update(kw)
+        return Position(**base)
+
+    def test_entries_written_before_grouping_are_matched_by_second_and_note(self):
+        from datetime import date
+        from bcoj.engine import actions
+        parent = self._position()
+        store.save_positions(self.conn, [parent])
+        store.apply(self.conn, actions.split(parent, 4, on=date(2026, 2, 1)))
+        # Pretend these rows predate grouping.
+        with self.conn:
+            self.conn.execute("UPDATE audit_log SET group_id = NULL, at = '2026-02-01T10:00:00+00:00'"
+                              " WHERE action LIKE '%split%'")
+        entry = [e for e in store.audit_entries(self.conn) if "split" in e["action"]][0]
+        self.assertEqual(len(store.action_entries(self.conn, entry)), 3)
+        outcome = store.revert_audit_entry(self.conn, entry["id"])
+        self.assertTrue(outcome.startswith("split 10 into 4 and 6: "), outcome)
+        self.assertIn("deleted 4 ACME 2026-03-20 35P", outcome)
+        self.assertIn("restored 10 ACME 2026-03-20 35P", outcome)
+        self.assertEqual([p.id for p in store.load_positions(self.conn)], ["o1"])
+        # Undoing it a second time is refused.
+        with self.assertRaises(ValueError) as ctx:
+            store.revert_audit_entry(self.conn, entry["id"])
+        self.assertIn("already undone", str(ctx.exception))
+        self.assertEqual(store.action_state(self.conn, store.action_entries(self.conn, entry)), "undone")
+
+
+class TestRedo(StoreTestCase):
+    def _position(self, pid="r1", **kw):
+        from datetime import date
+        from decimal import Decimal
+        from bcoj.domain.enums import Direction, Right
+        from bcoj.domain.types import Position
+        base = dict(id=pid, underlying="ACME", expiry=date(2026, 3, 20), strike=Decimal("35"),
+                    right=Right.PUT, direction=Direction.SHORT, quantity=10,
+                    opened_on=date(2026, 1, 5), open_price=Decimal("3.00"))
+        base.update(kw)
+        return Position(**base)
+
+    def test_an_undone_split_can_be_done_again(self):
+        from datetime import date
+        from bcoj.engine import actions
+        from bcoj.domain.enums import Status
+        parent = self._position()
+        store.save_positions(self.conn, [parent])
+        store.apply(self.conn, actions.split(parent, 4, on=date(2026, 2, 1)))
+        entry = [e for e in store.audit_entries(self.conn) if "split" in e["action"]][0]
+        store.revert_audit_entry(self.conn, entry["id"])
+        self.assertEqual(len(store.load_positions(self.conn)), 1)
+        # Redo through the action's own entry: it is undone, so redo applies.
+        outcome = store.redo_audit_entry(self.conn, entry["id"])
+        self.assertTrue(outcome.startswith("split 10 into 4 and 6: "), outcome)
+        positions = store.load_positions(self.conn)
+        self.assertEqual(len(positions), 3)
+        self.assertEqual(store.load_position(self.conn, "r1").status, Status.SPLIT)
+        self.assertEqual(sorted(p.quantity for p in positions if p.is_open), [4, 6])
+        self.assertEqual(store.action_state(self.conn, store.action_entries(self.conn, entry)), "in_effect")
+        with self.assertRaises(ValueError) as ctx:
+            store.redo_audit_entry(self.conn, entry["id"])      # in effect: nothing to redo
+        self.assertIn("in effect", str(ctx.exception))
+        # And it can be undone again, then redone again: two states, no dead ends.
+        store.revert_audit_entry(self.conn, entry["id"])
+        self.assertEqual(len(store.load_positions(self.conn)), 1)
+        store.redo_audit_entry(self.conn, entry["id"])
+        self.assertEqual(len(store.load_positions(self.conn)), 3)
+
+    def test_an_undone_assignment_recreates_its_lot(self):
+        from datetime import date
+        from bcoj.engine import actions
+        p = self._position("r2")
+        store.save_positions(self.conn, [p])
+        store.apply(self.conn, actions.assign(p, on=date(2026, 3, 20)))
+        self.assertEqual(len(store.load_lots(self.conn)), 1)
+        entry = [e for e in store.audit_entries(self.conn) if "assigned" in e["action"]][0]
+        store.revert_audit_entry(self.conn, entry["id"])
+        self.assertEqual(store.load_lots(self.conn), [])
+        revert = [e for e in store.audit_entries(self.conn) if e["action"].startswith("revert")][0]
+        store.redo_audit_entry(self.conn, revert["id"])
+        self.assertEqual(len(store.load_lots(self.conn)), 1)
+        self.assertFalse(store.load_position(self.conn, "r2").is_open)

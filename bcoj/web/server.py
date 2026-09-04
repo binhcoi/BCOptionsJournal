@@ -57,6 +57,7 @@ class App:
             ("GET", r"^/position/([0-9a-zA-Z_-]+)/roll-preview$", self._roll_preview),
             ("GET", r"^/audit$", self._audit),
             ("POST", r"^/audit/(\d+)/revert$", self._revert),
+            ("POST", r"^/audit/(\d+)/redo$", self._redo),
             ("GET", r"^/position/([0-9a-zA-Z_-]+)$", self._position),
             ("POST", r"^/position/([0-9a-zA-Z_-]+)/close$", self._close),
             ("POST", r"^/position/([0-9a-zA-Z_-]+)/expire$", self._expire),
@@ -123,6 +124,10 @@ class App:
 
     def _revert(self, conn, query, form, args):
         routes.do_revert(conn, args[0], form)
+        return 200, ""
+
+    def _redo(self, conn, query, form, args):
+        routes.do_redo(conn, args[0], form)
         return 200, ""
 
     def _position(self, conn, query, form, args):

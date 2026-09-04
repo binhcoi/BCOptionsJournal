@@ -973,3 +973,50 @@ class TestHealth(unittest.TestCase):
         self.assertEqual(by_kind["duplicate"].entity_id, "t2")           # the later one is the twin
         # d (missing predecessor), the lot's gone assignment, the sale's missing lot.
         self.assertEqual(self.health.summary(issues)["dangling_link"], 3)
+
+
+class TestScorecard(unittest.TestCase):
+    """Over the split campaign of TestCampaign: banked 593.50, 3,000 in hand,
+    1,800 still to keep at target (3,000 premium less a 1,200 buy-back)."""
+
+    def test_four_figures_over_the_campaign(self):
+        from bcoj.engine import actions
+        from bcoj.engine.scorecard import scorecard
+        parent = position(quantity=10, open_price=D("3.00"), open_fee=D("6.50"))
+        split = actions.split(parent, 4, on=date(2026, 2, 1))
+        four, six = sorted(split.created, key=lambda p: p.quantity)
+        assigned = actions.assign(four, on=date(2026, 3, 20))
+        rolled = actions.roll(six, close_price=D("4.00"), new_expiry=date(2026, 4, 17),
+                              new_strike=D("34"), new_price=D("5.00"), on=date(2026, 3, 20))
+        new = rolled.created[0]
+        everything = [split.updated[0], assigned.updated[0], rolled.updated[0], new]
+        index = ChainIndex(everything)
+        sc = scorecard(index, [new])
+        self.assertEqual((sc.positions, sc.campaigns, sc.legs, sc.open_legs, sc.contracts), (1, 1, 4, 1, 6))
+        self.assertEqual((sc.banked, sc.in_hand, sc.so_far), (D("593.50"), D("3000.00"), D("3593.50")))
+        self.assertEqual(sc.to_come, D("1800.00"))
+        self.assertEqual(sc.to_close, D("1200.00"))             # the buy-back at target
+        # Net at target: banked 593.50 + in hand 3,000 - buy-back 1,200 = 2,393.50.
+        self.assertEqual(sc.at_target, D("2393.50"))
+        self.assertEqual(sc.at_target, sc.banked + sc.in_hand - sc.to_close)
+        self.assertEqual(sc.at_risk, D("20400.00"))
+        self.assertEqual(sc.return_at_target, D("8.82"))
+        self.assertEqual(sc.break_even, break_even(index.chain(new)).price)
+        self.assertEqual((sc.closed_legs, sc.wins, sc.premium_closed), (2, 1, D("2993.50")))
+        self.assertEqual(sc.kept, D("19.83"))
+        self.assertEqual(sc.win_rate, D("50.00"))
+        # Handing in every leg of the family counts the family once.
+        whole = scorecard(index, everything)
+        self.assertEqual((whole.campaigns, whole.so_far), (1, D("3593.50")))
+        # Scoped to the listed legs only, a closed leg brings just its own figures.
+        only = scorecard(index, [assigned.updated[0]], whole_campaigns=False)
+        self.assertEqual((only.banked, only.in_hand, only.at_risk, only.closed_legs, only.open_legs),
+                         (D("1197.40"), D("0.00"), D("0.00"), 1, 0))
+        self.assertEqual(only.campaigns, 1)
+        # An open leg alone brings what its chain already banked: its carry.
+        head = scorecard(index, [new], whole_campaigns=False)
+        self.assertEqual((head.banked, head.in_hand, head.so_far), (D("-603.90"), D("3000.00"), D("2396.10")))
+        # Listing its rolled ancestor too does not count that loss twice.
+        both = scorecard(index, [new, rolled.updated[0]], whole_campaigns=False)
+        self.assertEqual(both.banked, D("-603.90"))
+        self.assertEqual((both.closed_legs, both.kept), (1, D("-33.62")))   # kept stays a closed-leg stat

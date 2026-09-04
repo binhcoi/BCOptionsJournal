@@ -113,6 +113,15 @@ td:first-child a { text-decoration: none; }
 .totals.wide > div { flex: 1 1 190px; }
 .totals small { display: block; font-size: .7rem; font-weight: 400; color: var(--dim); }
 .totals .pos { color: var(--pos); } .totals .neg { color: var(--neg); }
+/* The scorecard wears the same tinted cards as every other strip; only
+   the figure is larger, since it is the row read first. */
+.totals.score > div { flex: 1 1 160px; }
+.totals.score b { font-size: 1.4rem; }
+.chips.facts { margin: -.4rem 0 1rem; }
+.chips.facts .chip.pos { border-color: var(--pos); background: var(--pos-tint); color: var(--pos); }
+.chips.facts .chip.dim { color: var(--dim); border-style: dashed; }
+.chips.facts .chip { font-size: .78rem; padding: .1rem .6rem; }
+.chips.facts .chip.neg { border-color: var(--neg); background: var(--neg-tint); color: var(--neg); }
 .totals > div.good { background: var(--pos-tint); border-color: var(--pos); }
 .totals b small { font-weight: 400; margin-top: .15rem; }
 .totals > div.bad { background: var(--neg-tint); border-color: var(--neg); }
