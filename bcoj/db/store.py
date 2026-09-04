@@ -667,6 +667,244 @@ def delete_view(conn, view_id: str) -> None:
         conn.execute("DELETE FROM saved_views WHERE id = ?", (view_id,))
 
 
+# --------------------------------------------------------------------------
+# repairing positions
+
+
+def position_links(conn, position_id: str) -> list[str]:
+    """What still refers to a position: the reasons it cannot be removed."""
+    reasons = []
+    n = conn.execute("SELECT COUNT(*) AS n FROM positions WHERE rolled_from_id = ?",
+                     (position_id,)).fetchone()["n"]
+    if n:
+        reasons.append(f"{n} position(s) rolled from it")
+    n = conn.execute("SELECT COUNT(*) AS n FROM positions WHERE split_from_id = ?",
+                     (position_id,)).fetchone()["n"]
+    if n:
+        reasons.append(f"{n} position(s) split from it")
+    n = conn.execute("SELECT COUNT(*) AS n FROM share_lots WHERE assigning_position_id = ?",
+                     (position_id,)).fetchone()["n"]
+    if n:
+        reasons.append(f"{n} share lot(s) came from its assignment")
+    n = conn.execute("SELECT COUNT(*) AS n FROM share_disposals WHERE disposing_position_id = ?",
+                     (position_id,)).fetchone()["n"]
+    if n:
+        reasons.append(f"{n} share sale(s) came from it")
+    return reasons
+
+
+def convert_to_share_trade(conn, position_id: str, note: str = "") -> str:
+    """A row that is really a stock trade stops being an option.
+
+    The importer already derived the shares it moved: a lot from an
+    "assigned put", or a sale from a "called-away call". Those records stay,
+    relabelled as an outright buy or sale with no option behind them. If
+    nothing was derived, the shares are created from the row's own terms.
+    Then the row itself goes. Every step is audited on its own record."""
+    p = load_position(conn, position_id)
+    if p is None:
+        raise ValueError("no such position")
+    if position_links(conn, position_id):
+        # Only share records may hang off it; option links mean it is a real leg.
+        others = [r_ for r_ in position_links(conn, position_id)
+                  if "rolled" in r_ or "split" in r_]
+        if others:
+            raise InUseError("; ".join(others) + " - a real option leg is not a share trade")
+    when = _iso(p.closed_on or p.opened_on)
+    moved = []
+    with conn:
+        for row in conn.execute("SELECT * FROM share_lots WHERE assigning_position_id = ?",
+                                (position_id,)).fetchall():
+            before = dict(row)
+            conn.execute("UPDATE share_lots SET source = ?, assigning_position_id = NULL WHERE id = ?",
+                         (ShareSource.OUTRIGHT_BUY.value, row["id"]))
+            _audit(conn, "share_lot", row["id"], "update", before,
+                   _row_as_dict(conn, "share_lots", row["id"]), note)
+            moved.append(f"lot of {row['quantity']}")
+        for row in conn.execute("SELECT * FROM share_disposals WHERE disposing_position_id = ?",
+                                (position_id,)).fetchall():
+            before = dict(row)
+            conn.execute("UPDATE share_disposals SET kind = ?, disposing_position_id = NULL"
+                         " WHERE id = ?", (DisposalKind.SOLD.value, row["id"]))
+            _audit(conn, "share_disposal", row["id"], "update", before,
+                   _row_as_dict(conn, "share_disposals", row["id"]), note)
+            moved.append(f"sale of {row['quantity']}")
+        if not moved:
+            acquiring = (p.direction is Direction.SHORT) == (p.right is Right.PUT)
+            if acquiring:
+                lot = ShareLot(id=uuid.uuid4().hex, underlying=p.underlying, quantity=p.shares,
+                               acquired_on=p.closed_on or p.opened_on, cost_per_share=p.strike,
+                               fee=p.open_fee + p.close_fee, notes=f"converted from row {p.id[:8]}")
+                _insert_lot(conn, lot)
+                _audit(conn, "share_lot", lot.id, "create", None,
+                       _row_as_dict(conn, "share_lots", lot.id), note)
+                moved.append(f"lot of {p.shares}")
+            else:
+                d = ShareDisposal(id=uuid.uuid4().hex, underlying=p.underlying, quantity=p.shares,
+                                  disposed_on=p.closed_on or p.opened_on, proceeds_per_share=p.strike,
+                                  fee=p.open_fee + p.close_fee, notes=f"converted from row {p.id[:8]}")
+                _insert_disposal(conn, d)
+                _audit(conn, "share_disposal", d.id, "create", None,
+                       _row_as_dict(conn, "share_disposals", d.id), note)
+                moved.append(f"sale of {p.shares}")
+    delete_position(conn, position_id, note)
+    rebuild_allocations(conn)
+    return ", ".join(moved) + f" on {when}"
+
+
+def delete_position(conn, position_id: str, note: str = "") -> None:
+    """Remove a position outright. Refused while anything refers to it; the
+    full row is kept in the audit log, so History can put it back."""
+    p = load_position(conn, position_id)
+    if p is None:
+        raise ValueError("no such position")
+    reasons = position_links(conn, position_id)
+    if reasons:
+        raise InUseError("; ".join(reasons) + " - remove or relink those first")
+    before = dict(_position_dict(p), tags=list(p.tags))
+    with conn:
+        conn.execute("DELETE FROM position_tags WHERE position_id = ?", (position_id,))
+        conn.execute("UPDATE flags SET resolved_at = ?, resolution = ? WHERE entity_id = ?"
+                     " AND resolved_at IS NULL", (_now(), "record removed", position_id))
+        conn.execute("DELETE FROM positions WHERE id = ?", (position_id,))
+        _audit(conn, "position", position_id, "delete", before, None, note)
+
+
+EDITABLE = ("underlying", "expiry", "strike", "right", "direction", "quantity", "multiplier",
+            "opened_on", "open_price", "open_fee", "closed_on", "close_price", "close_fee")
+
+
+def edit_position(conn, position_id: str, changes: dict, note: str = "") -> None:
+    """Correct entered values on a record. Status and chain links are not
+    edited here: those change through the actions, which keep the chain and
+    the shares consistent. Audited as one update."""
+    import dataclasses
+    p = load_position(conn, position_id)
+    if p is None:
+        raise ValueError("no such position")
+    bad = set(changes) - set(EDITABLE)
+    if bad:
+        raise ValueError(f"cannot edit {', '.join(sorted(bad))} here")
+    before = _position_dict(p)
+    new = dataclasses.replace(p, **changes)      # Position validates quantity and multiplier
+    if new.expiry < new.opened_on:
+        raise ValueError("expiry cannot be before the position was opened")
+    if new.closed_on is not None and new.closed_on < new.opened_on:
+        raise ValueError("close cannot be before the position was opened")
+    if new.open_price < 0 or (new.close_price is not None and new.close_price < 0):
+        raise ValueError("prices cannot be negative")
+    if new.open_fee < 0 or new.close_fee < 0:
+        raise ValueError("fees cannot be negative")
+    with conn:
+        _update_position(conn, new)
+        _audit(conn, "position", position_id, "update", before, _position_dict(new), note)
+
+
+def reopen_position(conn, position_id: str, note: str = "") -> None:
+    """Undo a close or expiry recorded by mistake. A roll, a split or an
+    assignment created other records and is not reopened here."""
+    p = load_position(conn, position_id)
+    if p is None:
+        raise ValueError("no such position")
+    if p.status not in (Status.CLOSED, Status.EXPIRED):
+        raise ValueError(f"a {p.status.value.lower()} position is not reopened here; "
+                         "it has records that depend on it")
+    before = _position_dict(p)
+    p.status = Status.OPEN
+    p.closed_on = None
+    p.close_price = None
+    with conn:
+        _update_position(conn, p)
+        _audit(conn, "position", position_id, "update", before, _position_dict(p), note)
+
+
+def redate_position(conn, position_id: str, *, opened_on=None, expiry=None, closed_on=None,
+                    note: str = "") -> None:
+    """Move a position's dates. Only what is given changes; audited as one update."""
+    p = load_position(conn, position_id)
+    if p is None:
+        raise ValueError("no such position")
+    before = _position_dict(p)
+    if opened_on is not None:
+        p.opened_on = opened_on
+    if expiry is not None:
+        p.expiry = expiry
+    if closed_on is not None:
+        p.closed_on = closed_on
+    if p.expiry < p.opened_on:
+        raise ValueError("expiry cannot be before the position was opened")
+    if p.closed_on is not None and p.closed_on < p.opened_on:
+        raise ValueError("close cannot be before the position was opened")
+    with conn:
+        _update_position(conn, p)
+        _audit(conn, "position", position_id, "update", before, _position_dict(p), note)
+
+
+# --------------------------------------------------------------------------
+# snapshots
+#
+# A snapshot is a consistent copy of the whole journal made through SQLite's
+# backup API, next to the journal in a backups/ folder. Restoring copies a
+# snapshot back over the live journal the same way -- after taking a snapshot
+# of what is being replaced, so a restore is itself undoable.
+
+
+def snapshots_dir(db_path: str):
+    import pathlib
+    return pathlib.Path(db_path).resolve().parent / "backups"
+
+
+def snapshot(conn, db_path: str, label: str = "") -> str:
+    """Write a snapshot; returns its file name."""
+    folder = snapshots_dir(db_path)
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    suffix = f"-{_slug(label)}" if label else ""
+    name = f"journal-{stamp}{suffix}.db"
+    n = 2
+    while (folder / name).exists():          # two in one second must not overwrite
+        name = f"journal-{stamp}{suffix}-{n}.db"
+        n += 1
+    target = sqlite3.connect(str(folder / name))
+    try:
+        conn.backup(target)
+    finally:
+        target.close()
+    return name
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", text).strip("-")[:40]
+
+
+def list_snapshots(db_path: str) -> list[dict]:
+    folder = snapshots_dir(db_path)
+    if not folder.exists():
+        return []
+    out = []
+    for f in sorted(folder.glob("journal-*.db"), reverse=True):
+        st = f.stat()
+        out.append({"name": f.name, "bytes": st.st_size,
+                    "at": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")})
+    return out
+
+
+def restore(conn, db_path: str, name: str) -> str:
+    """Replace the live journal with a snapshot. The journal as it was is
+    snapshotted first, and that name is returned so the step can be undone."""
+    if name not in {s["name"] for s in list_snapshots(db_path)}:
+        raise ValueError("no such snapshot")
+    kept = snapshot(conn, db_path, "before-restore")
+    source = sqlite3.connect(str(snapshots_dir(db_path) / name))
+    try:
+        source.backup(conn)
+    finally:
+        source.close()
+    schema.migrate(conn)   # an older snapshot may predate a migration
+    rebuild_allocations(conn)
+    return kept
+
+
 def recent_underlyings(conn, limit: int = 40) -> list[str]:
     """Tickers by most recent use -- the autocomplete order that actually helps."""
     return [
@@ -735,6 +973,10 @@ def revert_audit_entry(conn, entry_id: int) -> str:
         if before is None:
             conn.execute("DELETE FROM positions WHERE id = ?", (entry["entity_id"],))
             outcome = f"deleted {entry['entity_id'][:8]}"
+        elif entry["action"].startswith("delete"):
+            row = {k: v for k, v in before.items() if k in _POSITION_COLUMNS}
+            _reinsert(conn, "positions", row)
+            outcome = f"restored {entry['entity_id'][:8]}"
         else:
             columns = [c for c in _POSITION_COLUMNS if c != "id"]
             assignments = ",".join(f"{c} = ?" for c in columns)
@@ -770,15 +1012,17 @@ def delete_disposal(conn, disposal_id: str, note: str = "") -> None:
     rebuild_allocations(conn)
 
 
-def delete_lot(conn, lot_id: str, note: str = "") -> None:
+def delete_lot(conn, lot_id: str, note: str = "", unlink_open: bool = False) -> None:
     before = _row_as_dict(conn, "share_lots", lot_id)
     if before is None:
         raise ValueError("no such lot")
     calls = conn.execute(
-        "SELECT COUNT(*) AS n FROM positions WHERE share_lot_id = ?", (lot_id,)
-    ).fetchone()["n"]
-    if calls:
-        raise InUseError(f"{calls} call(s) are written against this lot; unlink them first")
+        "SELECT id, status FROM positions WHERE share_lot_id = ?", (lot_id,)
+    ).fetchall()
+    open_calls = [c for c in calls if Status(c["status"]).is_open]
+    if open_calls and not unlink_open:
+        raise InUseError(f"{len(open_calls)} open call(s) are written against this lot;"
+                         " confirm that they become naked, or unlink them first")
     pinned = conn.execute(
         "SELECT COUNT(*) AS n FROM share_disposals WHERE specific_lot_ids LIKE ?",
         (f"%{lot_id}%",),
@@ -786,9 +1030,61 @@ def delete_lot(conn, lot_id: str, note: str = "") -> None:
     if pinned:
         raise InUseError(f"{pinned} sale(s) are pinned to this lot; remove or repin them first")
     with conn:
+        # Closed calls that were written against it are history: they keep
+        # their own figures and simply stop pointing at a lot that is gone.
+        for c in calls:
+            p = load_position(conn, c["id"])
+            pbefore = _position_dict(p)
+            p.share_lot_id = None
+            _update_position(conn, p)
+            _audit(conn, "position", p.id, "update", pbefore, _position_dict(p),
+                   f"{note}: covering lot removed")
         conn.execute("DELETE FROM share_lots WHERE id = ?", (lot_id,))
         _audit(conn, "share_lot", lot_id, "delete", before, None, note)
     rebuild_allocations(conn)
+
+
+LOT_EDITABLE = ("acquired_on", "quantity", "cost_per_share", "fee", "estimated", "notes")
+DISPOSAL_EDITABLE = ("disposed_on", "quantity", "proceeds_per_share", "fee", "notes")
+
+
+def _edit_share_row(conn, table: str, key: str, changes: dict, allowed, note: str) -> None:
+    before = _row_as_dict(conn, table, key)
+    if before is None:
+        raise ValueError(f"no such {table[:-1].replace('_', ' ')}")
+    bad = set(changes) - set(allowed)
+    if bad:
+        raise ValueError(f"cannot edit {', '.join(sorted(bad))} here")
+    if "quantity" in changes and int(changes["quantity"]) <= 0:
+        raise ValueError("quantity must be positive")
+    for money_key in ("cost_per_share", "proceeds_per_share", "fee"):
+        if money_key in changes and Decimal(str(changes[money_key])) < 0:
+            raise ValueError(f"{money_key.replace('_', ' ')} cannot be negative")
+    values = {}
+    for k, v in changes.items():
+        if isinstance(v, date):
+            v = _iso(v)
+        elif isinstance(v, Decimal):
+            v = _s(v)
+        elif isinstance(v, bool):
+            v = 1 if v else 0
+        values[k] = v
+    with conn:
+        conn.execute(f"UPDATE {table} SET {', '.join(k + ' = ?' for k in values)} WHERE id = ?",
+                     tuple(values.values()) + (key,))
+        _audit(conn, "share_lot" if table == "share_lots" else "share_disposal", key, "update",
+               before, _row_as_dict(conn, table, key), note)
+    rebuild_allocations(conn)
+
+
+def edit_lot(conn, lot_id: str, changes: dict, note: str = "") -> None:
+    """Correct a lot as entered. Confirming one against a statement is the
+    change that turns an estimate into a record: ``estimated`` False."""
+    _edit_share_row(conn, "share_lots", lot_id, changes, LOT_EDITABLE, note)
+
+
+def edit_disposal(conn, disposal_id: str, changes: dict, note: str = "") -> None:
+    _edit_share_row(conn, "share_disposals", disposal_id, changes, DISPOSAL_EDITABLE, note)
 
 
 def redate_lot(conn, lot_id: str, on: date, note: str = "") -> None:

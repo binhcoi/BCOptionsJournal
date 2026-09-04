@@ -42,10 +42,18 @@ class App:
             ("GET", r"^/expiring$", self._expiring),
             ("GET", r"^/risk$", self._risk),
             ("GET", r"^/reports$", self._reports),
+            ("GET", r"^/data$", self._data),
+            ("POST", r"^/data/snapshot$", self._snapshot),
+            ("POST", r"^/data/restore$", self._restore),
+            ("POST", r"^/data/flag/(\d+)/resolve$", self._resolve_flag),
             ("GET", r"^/export/(positions\.csv|shares\.csv|journal\.json|journal\.db)$", self._export),
             ("POST", r"^/views/save$", self._save_view),
             ("POST", r"^/views/([0-9a-zA-Z_-]+)/delete$", self._delete_view),
             ("POST", r"^/position/([0-9a-zA-Z_-]+)/notes$", self._notes),
+            ("POST", r"^/position/([0-9a-zA-Z_-]+)/edit$", self._edit),
+            ("POST", r"^/position/([0-9a-zA-Z_-]+)/reopen$", self._reopen),
+            ("POST", r"^/position/([0-9a-zA-Z_-]+)/to-shares$", self._to_shares),
+            ("POST", r"^/position/([0-9a-zA-Z_-]+)/delete$", self._delete_position),
             ("GET", r"^/position/([0-9a-zA-Z_-]+)/roll-preview$", self._roll_preview),
             ("GET", r"^/audit$", self._audit),
             ("POST", r"^/audit/(\d+)/revert$", self._revert),
@@ -66,6 +74,8 @@ class App:
             ("POST", r"^/shares/disposal/([0-9a-zA-Z_:-]+)/delete$", self._delete_disposal),
             ("POST", r"^/shares/lot/([0-9a-zA-Z_:-]+)/delete$", self._delete_lot),
             ("POST", r"^/shares/lot/([0-9a-zA-Z_:-]+)/date$", self._redate_lot),
+            ("POST", r"^/shares/lot/([0-9a-zA-Z_:-]+)/edit$", self._edit_lot),
+            ("POST", r"^/shares/disposal/([0-9a-zA-Z_:-]+)/edit$", self._edit_disposal),
             ("GET", r"^/shares/([A-Za-z0-9.\-]+)$", self._ticker),
             ("GET", r"^/shares/([A-Za-z0-9.\-]+)/data$", self._ticker_data),
         ]
@@ -154,6 +164,18 @@ class App:
     def _reports(self, conn, query, form, args):
         return routes.reports_page(conn, query)
 
+    def _data(self, conn, query, form, args):
+        return routes.data_page(conn, self.db_path, self.csrf, query)
+
+    def _snapshot(self, conn, query, form, args):
+        routes.do_snapshot(conn, self.db_path, form)
+
+    def _restore(self, conn, query, form, args):
+        routes.do_restore(conn, self.db_path, form)
+
+    def _resolve_flag(self, conn, query, form, args):
+        routes.do_resolve_flag(conn, args[0], form)
+
     def _export(self, conn, query, form, args):
         return routes.export_file(conn, args[0])
 
@@ -165,6 +187,18 @@ class App:
 
     def _notes(self, conn, query, form, args):
         routes.do_notes(conn, args[0], form)
+
+    def _edit(self, conn, query, form, args):
+        routes.do_edit_position(conn, args[0], form)
+
+    def _reopen(self, conn, query, form, args):
+        routes.do_reopen_position(conn, args[0], form)
+
+    def _to_shares(self, conn, query, form, args):
+        routes.do_convert_position(conn, args[0], form)
+
+    def _delete_position(self, conn, query, form, args):
+        routes.do_delete_position(conn, args[0], form)
 
     def _roll_preview(self, conn, query, form, args):
         return routes.roll_preview_fragment(conn, args[0], query)
@@ -203,6 +237,12 @@ class App:
 
     def _redate_lot(self, conn, query, form, args):
         routes.do_redate_lot(conn, args[0], form)
+
+    def _edit_lot(self, conn, query, form, args):
+        routes.do_edit_lot(conn, args[0], form)
+
+    def _edit_disposal(self, conn, query, form, args):
+        routes.do_edit_disposal(conn, args[0], form)
         return 200, ""
 
 

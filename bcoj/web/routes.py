@@ -21,6 +21,7 @@ from ..domain.enums import Direction, Right, Status
 from ..domain.money import ZERO, fmt, parse_money, price, q2
 from ..domain.types import Position
 from ..engine import actions, decide, reports, validate, wheels
+from ..engine import health
 from ..engine.campaign import campaign
 from ..engine.chains import ChainIndex
 from ..engine.shares import InsufficientSharesError, match as match_lots
@@ -427,7 +428,7 @@ def positions_page(conn, query, token: str = "") -> tuple[int, str]:
 
     new_panel = (f'<div id="new-box" class="form-box"><div data-form="new" hidden>'
                  f'<a class="close-form" href="{here}" data-form-close title="Close this form" '
-                 'aria-label="Close this form">&times;</a>'
+                 'aria-label="Close this form">&times;</a><h3>New position</h3>'
                  + _new_form_body(conn, token, {}, (), back=here) + "</div></div>")
     new_button = ('<a class="btn new" href="/new" data-form-tab="new" data-tabs-for="new-box">'
                   "+ New position</a>")
@@ -599,11 +600,11 @@ def _new_form_body(conn, token, form, problems, back: str) -> str:
                                ("ASSIGNED", "Assigned")))
         + "</select>")
     grid = _leg_grid([leg], attrs=f' data-fee-rate="{r.esc(rate)}"')
-    # One compact row: when it opened, and -- for a trade being caught up on
-    # -- how it ended. The closing fields show only once an outcome is picked.
+    when = r.field("Opened", "opened_on", _one(form, "opened_on", r.today_iso()),
+                   kind="date", required=True)
+    # A compact row for a trade being caught up on: how it ended. The closing
+    # fields show only once an outcome is picked.
     over = '<div class="grid compact">' + "".join([
-        r.field("Opened", "opened_on", _one(form, "opened_on", r.today_iso()),
-                kind="date", required=True),
         r.select("Outcome", "outcome", [("OPEN", "Still open"), ("CLOSED", "Closed"),
                                         ("EXPIRED", "Expired"), ("ASSIGNED", "Assigned")], outcome),
         '<span class="when-over">'
@@ -625,7 +626,7 @@ def _new_form_body(conn, token, form, problems, back: str) -> str:
     ]) + "</div>"
     return (r.problems_block(problems)
             + r.datalist("tickers", tickers) + r.datalist("all-tags", store.all_tags(conn))
-            + r.form("/new", r.hidden("next", back) + grid + rest, token,
+            + r.form("/new", r.hidden("next", back) + when + grid + rest, token,
                      submit="Add position", cls="two-part", submit_cls="btn-open"))
     return 200, r.page("New position", body, nav_here="new")
 
@@ -773,10 +774,12 @@ def position_page(conn, position_id, token, query) -> tuple[int, str]:
         + r.datalist("all-tags", store.all_tags(conn)),
         token, submit="Save notes", cls="grid"))
 
+    raw = _raw_position_block(conn, position, token, here)
     body = f"""{strips}
 {chain_html}
 {actions_block}
 {notes}
+{raw}
 <p class="hint"><a href="/audit?entity={r.esc(position.id)}">History for this
 position</a></p>"""
     return 200, r.page(r.contract_text(position), body, nav_here="positions")
@@ -870,6 +873,155 @@ def _chain_cards(index, position, chain) -> list:
                       + (_sub(f"x{head.quantity / root.quantity:.1f}") if grew > 0
                          else _sub("contracts")), -1 if grew > 0 else None))
     return cells
+
+
+def _raw_position_block(conn, position, token: str, here: str) -> str:
+    """The record as entered, every field open to correction, plus reopen and
+    removal. Folded, because this is fixing a mistake, not trading."""
+    pid = r.esc(position.id)
+    p = position
+    side_select = (
+        '<select name="direction" id="f_direction" aria-label="Side" title="Side">'
+        + "".join(f'<option value="{v}"{" selected" if v == p.direction.value else ""}>{t}</option>'
+                  for v, t in (("SHORT", "STO"), ("LONG", "BTO"))) + "</select>")
+    right_select = (
+        '<select name="right" id="f_right" aria-label="Right" title="Right">'
+        + "".join(f'<option value="{v}"{" selected" if v == p.right.value else ""}>{t}</option>'
+                  for v, t in (("PUT", "Put"), ("CALL", "Call"))) + "</select>")
+    leg = [side_select,
+           _box("underlying", p.underlying, kind="text", label="Ticker",
+                attrs=' autocapitalize="characters" autocomplete="off"'),
+           _box("expiry", p.expiry.isoformat(), kind="date", label="Expiry"),
+           _box("strike", str(p.strike), step="0.5", label="Strike"),
+           right_select,
+           _box("quantity", str(p.quantity), step="1", label="Contracts", attrs=' min="1"'),
+           _box("open_price", str(p.open_price), label="Premium / share"),
+           _box("open_fee", str(p.open_fee), label="Fee", required=False)]
+    # Same shape as the close forms: the date first, the leg, then -- for a
+    # position that is over -- how it closed, whether or not a close date was
+    # ever recorded (that missing date is exactly what gets fixed here).
+    when = r.field("Opened", "opened_on", p.opened_on.isoformat(), kind="date", required=True)
+    closing = ""
+    if not p.is_open and p.status is not Status.SPLIT:
+        closing = '<div class="grid compact">' + "".join([
+            r.field(f"{p.status.value.title()} on", "closed_on",
+                    p.closed_on.isoformat() if p.closed_on else "", kind="date", required=True),
+            r.field("Close price", "close_price",
+                    str(p.close_price) if p.close_price is not None else "", kind="number",
+                    step="0.01"),
+            r.field("Close fee", "close_fee", str(p.close_fee), kind="number", step="0.01"),
+        ]) + "</div>"
+    edit = r.form(f"/position/{pid}/edit", r.hidden("next", here) + when + _leg_grid([leg]) + closing,
+                  token, submit="Save corrections", cls="two-part")
+
+    reopen = ""
+    if p.status in (Status.CLOSED, Status.EXPIRED):
+        reopen = r.form(f"/position/{pid}/reopen", r.hidden("next", here), token,
+                        submit=f"Reopen (undo the {p.status.value.lower()})", cls="inline reopen")
+    reasons = store.position_links(conn, p.id)
+    option_links = [x for x in reasons if "rolled" in x or "split" in x]
+    convert = ""
+    if not option_links:
+        convert = r.form(
+            f"/position/{pid}/to-shares",
+            r.hidden("next", f"/shares/{r.esc(p.underlying)}/data")
+            + '<label class="check"><input type="checkbox" name="sure" value="1"> '
+              "this row is really a stock trade</label>",
+            token, submit="Convert to share trade", cls="inline convert")
+    if reasons:
+        remove = ('<p class="hint">Cannot be removed: ' + r.esc("; ".join(reasons))
+                  + ". Remove or relink those first.</p>")
+    else:
+        remove = r.form(
+            f"/position/{pid}/delete",
+            r.hidden("next", "/?show=all")
+            + '<label class="check"><input type="checkbox" name="sure" value="1"> '
+              "remove this position from the journal</label>",
+            token, submit="Remove", cls="inline restore")
+    return f"""<details class="report raw" id="raw"><summary>Raw data</summary>
+<div class="bubble">
+<h3>{r.contract(p)} <small class="dim">as entered</small></h3>
+{edit}
+<div class="raw-actions">{reopen}{convert}{remove}</div>
+<p class="hint">Every change here is logged and can be undone from History. Status
+and chain links are not edited here: close, roll, expire, assign and split above keep
+the chain and the shares consistent. Convert is for a row the sheet wrote as an option
+that was really a stock purchase or sale: the shares it moved stay, as an outright
+trade, and the row goes. Removing is for a record that should never have existed,
+such as a placeholder.</p>
+</div>
+</details>"""
+
+
+def do_edit_position(conn, position_id, form) -> None:
+    p = store.load_position(conn, position_id)
+    if p is None:
+        raise BadRequest("no such position")
+    changes = {
+        "underlying": _one(form, "underlying").upper() or p.underlying,
+        "expiry": _date(form, "expiry", label="Expiry"),
+        "strike": _decimal(form, "strike", label="Strike"),
+        "right": Right(_one(form, "right", p.right.value)),
+        "direction": Direction(_one(form, "direction", p.direction.value)),
+        "quantity": _int(form, "quantity", label="Contracts"),
+        "opened_on": _past(_date(form, "opened_on", label="Opened"), "Opened"),
+        "open_price": _decimal(form, "open_price", label="Premium"),
+        "open_fee": _decimal(form, "open_fee", ZERO),
+    }
+    if not p.is_open and p.status is not Status.SPLIT:
+        changes["closed_on"] = _past(_date(form, "closed_on", label="Closed on"), "Closed on")
+        changes["close_price"] = (_decimal(form, "close_price", label="Close price")
+                                  if _one(form, "close_price") else None)
+        changes["close_fee"] = _decimal(form, "close_fee", p.close_fee)
+    try:
+        store.edit_position(conn, position_id, changes, "corrected by hand")
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from None
+    raise Redirect(_next(form, f"/position/{position_id}"), "Corrections saved")
+
+
+def do_convert_position(conn, position_id, form) -> None:
+    if _one(form, "sure") != "1":
+        raise BadRequest("Tick the box to confirm converting the row to a share trade")
+    try:
+        moved = store.convert_to_share_trade(conn, position_id, "converted to a share trade")
+    except (store.InUseError, ValueError) as exc:
+        raise BadRequest(str(exc)) from None
+    raise Redirect(_next(form, "/shares"), f"Converted: {moved}; the option row is gone")
+
+
+def do_reopen_position(conn, position_id, form) -> None:
+    try:
+        store.reopen_position(conn, position_id, "reopened by hand")
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from None
+    raise Redirect(_next(form, f"/position/{position_id}"), "Position reopened")
+
+
+def do_redate_position(conn, position_id, form) -> None:
+    kw = {}
+    for name, label in (("opened_on", "Opened"), ("expiry", "Expiry"), ("closed_on", "Closed on")):
+        if _one(form, name):
+            kw[name] = _date(form, name, label=label)
+            if name != "expiry":
+                _past(kw[name], label)
+    try:
+        store.redate_position(conn, position_id, note="dates moved by hand", **kw)
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from None
+    raise Redirect(_next(form, f"/position/{position_id}"), "Dates moved")
+
+
+def do_delete_position(conn, position_id, form) -> None:
+    if _one(form, "sure") != "1":
+        raise BadRequest("Tick the box to confirm removing the position")
+    try:
+        store.delete_position(conn, position_id, "removed by hand")
+    except store.InUseError as exc:
+        raise BadRequest(str(exc)) from None
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from None
+    raise Redirect(_next(form, "/?show=all"), "Position removed; undo from History if needed")
 
 
 def _campaign_cards(fam, word: str = "Campaign") -> list:
@@ -1686,6 +1838,135 @@ def export_file(conn, name: str):
     raise BadRequest("no such export")
 
 
+# ---------------------------------------------------------------------------
+# data health, snapshots, restore
+
+
+def _health_issues(conn) -> list:
+    positions = store.load_positions(conn)
+    index = ChainIndex(positions)
+    lots = store.load_lots(conn)
+    disposals = store.load_disposals(conn)
+    rule = store.matching_rule(conn)
+    tickers = wheels.by_ticker(index, positions, lots, disposals, rule)
+    blocked = {t.underlying: t.error for t in tickers if t.error}
+    views = wheels.lot_views(index, positions, lots, disposals, rule)
+    unlinked = len(wheels.suggest_covers(index, positions, views))
+    flags = [dict(f) for f in store.open_flags(conn)]
+    issues = health.check(positions, lots, disposals, blocked=blocked,
+                          unlinked_calls=unlinked, import_flags=flags)
+    # An import flag whose live check no longer fires was fixed: close it.
+    for f in health.cleared_flags(flags, issues):
+        store.resolve_flag(conn, f["id"], "fixed in the data")
+    return issues
+
+
+HEALTH_TITLES = {
+    "future_date": "Dated in the future",
+    "past_expiry": "Past expiry, no outcome",
+    "blocked_shares": "Share matching blocked",
+    "dangling_link": "Points at a missing record",
+    "roll_dates": "Roll dates do not line up",
+    "split_sum": "Split halves do not add up",
+    "duplicate": "Possible duplicate",
+    "estimated": "Reconstructed, not recorded",
+    "unlinked_calls": "Covered calls not linked",
+    "date_order": "Dates out of order",
+    "missing_close": "Closed with no close date",
+}
+
+
+def data_page(conn, db_path: str, token: str, query) -> tuple[int, str]:
+    issues = _health_issues(conn)
+    flags = {f["id"]: f for f in (dict(x) for x in store.open_flags(conn))}
+    errors = sum(1 for i in issues if i.severity == health.ERROR)
+    warnings = len(issues) - errors
+
+    cells = [("Errors", r.esc(errors), -1 if errors else None),
+             ("Warnings", r.esc(warnings), None),
+             ("Snapshots", r.esc(len(store.list_snapshots(db_path))), None)]
+    strip = _cards(cells)
+
+    if not issues:
+        health_html = '<p class="callout ok">All clear: nothing in the journal disagrees with itself.</p>'
+    else:
+        rows = []
+        for i in issues:
+            title = HEALTH_TITLES.get(i.kind)
+            if title is None and i.kind.startswith("import:"):
+                title = "Import: " + i.kind[7:].replace("_", " ")
+            badge = (f'<span class="badge st-blocked">error</span>' if i.severity == health.ERROR
+                     else '<span class="badge st-assigned">warning</span>')
+            who = r.esc(i.entity_id[:8]) if i.entity_id else '<span class="dim">-</span>'
+            fix = f'<a class="btn" href="{r.esc(i.href)}">Fix</a>'
+            if i.kind.startswith("import:"):
+                # Imported flags are advisory; once looked at they can be dismissed.
+                for fid, f in flags.items():
+                    if f["entity_id"] == i.entity_id and i.kind == "import:" + f["kind"]:
+                        fix += " " + r.form(f"/data/flag/{fid}/resolve", r.hidden("next", "/data"),
+                                            token, submit="Dismiss", cls="inline")
+                        break
+            rows.append([badge, r.esc(title or i.kind), r.esc(i.entity_type.replace("_", " ")),
+                         who, r.esc(i.detail), fix])
+        health_html = r.table(["", "What", "Kind", "Record", "Detail", ""], rows, cls="health")
+
+    snaps = store.list_snapshots(db_path)
+    snap_rows = []
+    for s in snaps:
+        restore_form = r.form(
+            "/data/restore",
+            r.hidden("name", s["name"]) + r.hidden("next", "/data")
+            + '<label class="check"><input type="checkbox" name="sure" value="1"> '
+              "replace the journal with this snapshot</label>",
+            token, submit="Restore", cls="inline restore")
+        snap_rows.append([r.esc(s["at"]), r.esc(s["name"]), f"{s['bytes'] // 1024} KB", restore_form])
+    take = r.form("/data/snapshot",
+                  r.hidden("next", "/data")
+                  + r.field("Label", "label", "", attrs=' placeholder="optional, e.g. before-cleanup"'),
+                  token, submit="Take a snapshot now", cls="inline save-view")
+    folder = store.snapshots_dir(db_path)
+
+    body = f"""{strip}
+<h2>Health</h2>
+<p class="hint">Records that disagree with each other or with the calendar. Each
+row leads to the page where it can be fixed; nothing here is changed for you.</p>
+{health_html}
+<h2>Snapshots</h2>
+<p class="hint">A snapshot is a complete copy of the journal, taken through
+SQLite's backup API so it is consistent even mid-write. They live in
+<code>{r.esc(folder)}</code>. Restoring replaces the journal with a snapshot
+after snapshotting what it replaces, so a restore can itself be undone.</p>
+{take}
+{r.table(["Taken", "File", "Size", ""], snap_rows)}
+<h2>Export</h2>
+<p><a href="/export/positions.csv">positions.csv</a> &middot;
+<a href="/export/shares.csv">shares.csv</a> &middot;
+<a href="/export/journal.json">journal.json</a> &middot;
+<a href="/export/journal.db">journal.db</a> (download the whole journal)</p>"""
+    return 200, r.page("Data", body, nav_here="data")
+
+
+def do_snapshot(conn, db_path: str, form) -> None:
+    name = store.snapshot(conn, db_path, _one(form, "label"))
+    raise Redirect(_next(form, "/data"), f"Snapshot written: {name}")
+
+
+def do_restore(conn, db_path: str, form) -> None:
+    if _one(form, "sure") != "1":
+        raise BadRequest("Tick the box to confirm: restoring replaces the whole journal")
+    try:
+        kept = store.restore(conn, db_path, _one(form, "name"))
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from None
+    raise Redirect(_next(form, "/data"),
+                   f"Journal restored from {_one(form, 'name')}; the journal as it was is kept as {kept}")
+
+
+def do_resolve_flag(conn, flag_id, form) -> None:
+    store.resolve_flag(conn, int(flag_id), "dismissed on the Data page")
+    raise Redirect(_next(form, "/data"), "Flag dismissed")
+
+
 def _past(on: date, label: str) -> date:
     """The journal records what has happened. A future date is a typo or a
     form default gone wrong, and a lot or a close dated ahead of today makes
@@ -2203,8 +2484,15 @@ def ticker_data_page(conn, underlying, token, query) -> tuple[int, str]:
     except InsufficientSharesError as exc:
         warn = f'<div class="callout">{r.esc(exc)}</div>'
 
-    linked = {p.share_lot_id for p in by_id.values() if p.share_lot_id}
-    pinned_to = {lot_id for d in disposals for lot_id in d.specific_lot_ids}
+    linked: dict[str, int] = {}          # open calls only: a closed call is history
+    for p in by_id.values():
+        if p.share_lot_id and p.is_open:
+            linked[p.share_lot_id] = linked.get(p.share_lot_id, 0) + 1
+    left = _remaining_by_lot(conn, name)
+    pinned_to: dict[str, int] = {}
+    for d in disposals:
+        for lot_id in d.specific_lot_ids:
+            pinned_to[lot_id] = pinned_to.get(lot_id, 0) + 1
 
     def via(pid):
         p = by_id.get(pid) if pid else None
@@ -2213,28 +2501,59 @@ def ticker_data_page(conn, underlying, token, query) -> tuple[int, str]:
 
     lot_rows = []
     for lot in lots:
-        redate = r.form(
-            f"/shares/lot/{r.esc(lot.id)}/date",
-            r.hidden("next", back)
-            + f'<input type="date" name="on" value="{min(lot.acquired_on, today)}"'
-            ' required aria-label="Acquired on">',
-            token, submit="re-date", cls="inline")
-        when = r.esc(lot.acquired_on)
-        if lot.acquired_on > today:
-            when = f'<span class="neg" title="dated after today">{when}</span>'
+        when = ('<span class="neg" title="dated after today">future</span> '
+                if lot.acquired_on > today else "")
+        # Why a lot cannot be removed is said, not hidden in a tooltip.
         if lot.id in linked:
-            remove = '<span class="dim" title="calls are written against it">in use</span>'
+            # Removable, but only after saying what it does to the calls.
+            n = linked[lot.id]
+            remove = r.form(
+                f"/shares/lot/{r.esc(lot.id)}/delete",
+                r.hidden("next", back)
+                + f'<span class="dim inuse">backs {n} open call(s)</span> '
+                + '<label class="check"><input type="checkbox" name="unlink" value="1"> '
+                  f"remove anyway; {n} open call(s) become naked</label>",
+                token, submit="remove", cls="inline unlink")
         elif lot.id in pinned_to:
-            remove = '<span class="dim" title="a sale is pinned to it">in use</span>'
+            remove = f'<span class="dim inuse">in use: {pinned_to[lot.id]} sale(s) pinned to it</span>'
         else:
             remove = r.form(f"/shares/lot/{r.esc(lot.id)}/delete", r.hidden("next", back),
                             token, submit="remove", cls="inline")
-        flags = " ".join(f for f in (
-            "estimated" if lot.estimated else "", r.esc(lot.notes)) if f)
+        # Every entered value in one form, folded behind "edit". Confirming
+        # against a statement is what turns an estimate into a record.
+        confirm = ("" if not lot.estimated else
+                   '<label class="check"><input type="checkbox" name="confirmed" value="1"> '
+                   "confirmed against a statement (no longer an estimate)</label>")
+        edit = (f'<details class="edit" id="lot-{r.esc(lot.id)}"><summary>edit</summary>'
+                + '<div class="bubble">' + r.form(
+                    f"/shares/lot/{r.esc(lot.id)}/edit",
+                    r.hidden("next", back) + '<div class="grid compact">' + "".join([
+                        r.field("Acquired", "acquired_on", lot.acquired_on.isoformat(),
+                                kind="date", required=True),
+                        r.field("Shares", "quantity", str(lot.quantity), kind="number", step="1",
+                                required=True),
+                        r.field("Cost / share", "cost_per_share", str(lot.cost_per_share),
+                                kind="number", step="0.01", required=True),
+                        r.field("Fee", "fee", str(lot.fee), kind="number", step="0.01"),
+                        r.field("Notes", "notes", lot.notes),
+                    ]) + "</div>" + confirm,
+                    token, submit="Save corrections", cls="two-part",
+                    cancel=back, cancel_attrs=" data-close-details")
+                + "</div></details>")
+        flags = ""
+        if lot.estimated:
+            flags += ('<span class="badge st-assigned" title="reconstructed from memory">'
+                      "estimated</span>")
+        if lot.notes:
+            flags += f' <small class="dim note">{r.esc(lot.notes)}</small>'
+        remaining = left.get(lot.id, lot.quantity)
         lot_rows.append([
-            f"{when} {redate}", r.esc(lot.source.value.replace("_", " ").lower()),
-            r.esc(lot.quantity), r.esc(price(lot.cost_per_share)), r.money(lot.fee),
-            via(lot.assigning_position_id), flags or '<span class="dim">-</span>', remove,
+            f"{when}{r.esc(lot.acquired_on)}", r.esc(lot.source.value.replace("_", " ").lower()),
+            r.esc(lot.quantity),
+            (r.esc(remaining) if remaining else '<span class="dim">0</span>'),
+            r.esc(price(lot.cost_per_share)), r.money(lot.fee),
+            via(lot.assigning_position_id), flags or '<span class="dim">-</span>',
+            f'<span class="rowtools">{edit}{remove}</span>',
         ])
 
     disp_rows = []
@@ -2243,23 +2562,41 @@ def ticker_data_page(conn, underlying, token, query) -> tuple[int, str]:
         if d.specific_lot_ids:
             names = [_lot_label(l) for l in lots if l.id in d.specific_lot_ids]
             lot_text = "&#128204; " + r.esc("; ".join(names) or "a lot no longer present")
+        edit = (f'<details class="edit" id="sale-{r.esc(d.id)}"><summary>edit</summary>'
+                + '<div class="bubble">' + r.form(
+                    f"/shares/disposal/{r.esc(d.id)}/edit",
+                    r.hidden("next", back) + '<div class="grid compact">' + "".join([
+                        r.field("Sold on", "disposed_on", d.disposed_on.isoformat(), kind="date",
+                                required=True),
+                        r.field("Shares", "quantity", str(d.quantity), kind="number", step="1",
+                                required=True),
+                        r.field("Price / share", "proceeds_per_share", str(d.proceeds_per_share),
+                                kind="number", step="0.01", required=True),
+                        r.field("Fee", "fee", str(d.fee), kind="number", step="0.01"),
+                        r.field("Notes", "notes", d.notes),
+                    ]) + "</div>",
+                    token, submit="Save corrections", cls="two-part",
+                    cancel=back, cancel_attrs=" data-close-details")
+                + "</div></details>")
+        remove = r.form(f"/shares/disposal/{r.esc(d.id)}/delete", r.hidden("next", back),
+                        token, submit="remove", cls="inline")
         disp_rows.append([
             r.esc(d.disposed_on), r.esc(d.kind.value.replace("_", " ").lower()),
             r.esc(d.quantity), r.esc(price(d.proceeds_per_share)), r.money(d.fee),
-            via(d.disposing_position_id), lot_text,
-            r.form(f"/shares/disposal/{r.esc(d.id)}/delete", r.hidden("next", back),
-                   token, submit="remove", cls="inline"),
+            via(d.disposing_position_id), lot_text, f'<span class="rowtools">{edit}{remove}</span>',
         ])
 
     body = f"""<p class="hint"><a href="/shares/{name}">&larr; {name} shares</a></p>
 {warn}
-<p class="hint">These are the records as entered. Remove one that is wrong, or move
-a lot's date; its assignment moves with it. Every change is logged and can be
-undone from <a href="/audit">History</a>.</p>
+<p class="hint">These are the records as entered. Edit one that is wrong, or remove
+it. A lot marked <em>estimated</em> was reconstructed from memory: check it against
+a statement, correct it, and confirm. Every change is logged and can be undone
+from <a href="/audit">History</a>.</p>
 <h2>Lots - {len(lot_rows)}</h2>
-{r.table(["Acquired", "Source", "Qty", "Cost/sh", "Fee", "From", "Flags", ""], lot_rows)}
+{r.table(["Acquired", "Source", "Qty", ("Left", "Shares of this lot still held"), "Cost/sh", "Fee",
+          "From", "Notes", ""], lot_rows, cls="rawdata")}
 <h2>Disposals - {len(disp_rows)}</h2>
-{r.table(["Date", "Kind", "Qty", "Price", "Fee", "Via", "Lot", ""], disp_rows)}"""
+{r.table(["Date", "Kind", "Qty", "Price", "Fee", "Via", "Lot", ""], disp_rows, cls="rawdata")}"""
     return 200, r.page(f"{name} raw data", body, nav_here="shares")
 
 
@@ -2419,12 +2756,48 @@ def do_delete_disposal(conn, disposal_id, form) -> None:
 
 def do_delete_lot(conn, lot_id, form) -> None:
     try:
-        store.delete_lot(conn, lot_id, "removed by hand")
+        store.delete_lot(conn, lot_id, "removed by hand", unlink_open=_one(form, "unlink") == "1")
     except store.InUseError as exc:
         raise BadRequest(str(exc)) from None
     except ValueError as exc:
         raise BadRequest(str(exc)) from None
     raise Redirect(_next(form, "/shares"), "Lot removed; matching rebuilt")
+
+
+def do_edit_lot(conn, lot_id, form) -> None:
+    changes = {
+        "acquired_on": _past(_date(form, "acquired_on", label="Acquired"), "Acquired"),
+        "quantity": _int(form, "quantity", label="Shares"),
+        "cost_per_share": _decimal(form, "cost_per_share", label="Cost per share"),
+        "fee": _decimal(form, "fee", ZERO),
+        "notes": _one(form, "notes"),
+    }
+    if _one(form, "confirmed") == "1":
+        changes["estimated"] = False
+    try:
+        current = next((l for l in store.load_lots(conn) if l.id == lot_id), None)
+        if current is not None and current.acquired_on != changes["acquired_on"]:
+            # The assignment that produced the lot moves with it.
+            store.redate_lot(conn, lot_id, changes["acquired_on"], "corrected by hand")
+        store.edit_lot(conn, lot_id, changes, "corrected by hand")
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from None
+    raise Redirect(_next(form, "/shares"), "Lot corrected; matching rebuilt")
+
+
+def do_edit_disposal(conn, disposal_id, form) -> None:
+    changes = {
+        "disposed_on": _past(_date(form, "disposed_on", label="Sold on"), "Sold on"),
+        "quantity": _int(form, "quantity", label="Shares"),
+        "proceeds_per_share": _decimal(form, "proceeds_per_share", label="Price per share"),
+        "fee": _decimal(form, "fee", ZERO),
+        "notes": _one(form, "notes"),
+    }
+    try:
+        store.edit_disposal(conn, disposal_id, changes, "corrected by hand")
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from None
+    raise Redirect(_next(form, "/shares"), "Sale corrected; matching rebuilt")
 
 
 def do_redate_lot(conn, lot_id, form) -> None:

@@ -302,3 +302,74 @@ class TestTagsNotesAndViews(StoreTestCase):
         self.assertEqual(store.load_views(self.conn), [])
         with self.assertRaises(ValueError):
             store.save_view(self.conn, "  ", "show=open")
+
+
+class TestSnapshots(StoreTestCase):
+    def _position(self, pid):
+        from datetime import date
+        from decimal import Decimal
+        from bcoj.domain.enums import Direction, Right
+        from bcoj.domain.types import Position
+        return Position(id=pid, underlying="ACME", expiry=date(2026, 3, 20), strike=Decimal("35"),
+                        right=Right.PUT, direction=Direction.SHORT, quantity=1,
+                        opened_on=date(2026, 1, 5), open_price=Decimal("1.00"))
+
+    def test_snapshot_restore_and_the_safety_copy(self):
+        store.save_positions(self.conn, [self._position("keep")])
+        name = store.snapshot(self.conn, self.path, "before cleanup")
+        self.assertTrue(name.startswith("journal-") and name.endswith("-before-cleanup.db"))
+        self.assertTrue((store.snapshots_dir(self.path) / name).exists())
+        self.assertEqual([s["name"] for s in store.list_snapshots(self.path)], [name])
+
+        store.save_positions(self.conn, [self._position("later")])
+        self.assertEqual(len(store.load_positions(self.conn)), 2)
+        kept = store.restore(self.conn, self.path, name)
+        self.assertEqual([p.id for p in store.load_positions(self.conn)], ["keep"])
+        self.assertIn("before-restore", kept)
+        names = {s["name"] for s in store.list_snapshots(self.path)}
+        self.assertEqual(names, {name, kept})
+        # And the safety copy brings "later" back.
+        store.restore(self.conn, self.path, kept)
+        self.assertEqual(len(store.load_positions(self.conn)), 2)
+
+    def test_restore_refuses_names_it_does_not_know(self):
+        with self.assertRaises(ValueError):
+            store.restore(self.conn, self.path, "../journal.db")
+
+
+class TestRepairingPositions(StoreTestCase):
+    def _position(self, pid, **kw):
+        from datetime import date
+        from decimal import Decimal
+        from bcoj.domain.enums import Direction, Right
+        from bcoj.domain.types import Position
+        base = dict(id=pid, underlying="ACME", expiry=date(2026, 3, 20), strike=Decimal("35"),
+                    right=Right.PUT, direction=Direction.SHORT, quantity=1,
+                    opened_on=date(2026, 1, 5), open_price=Decimal("1.00"))
+        base.update(kw)
+        return Position(**base)
+
+    def test_delete_is_refused_while_linked_and_undoable_otherwise(self):
+        from datetime import date
+        store.save_positions(self.conn, [self._position("root"),
+                                         self._position("next", rolled_from_id="root")])
+        with self.assertRaises(store.InUseError):
+            store.delete_position(self.conn, "root")
+        store.delete_position(self.conn, "next", "removed by hand")
+        self.assertIsNone(store.load_position(self.conn, "next"))
+        entry = [e for e in store.audit_entries(self.conn) if e["entity_id"] == "next"][0]
+        self.assertTrue(entry["action"].startswith("delete"))
+        store.revert_audit_entry(self.conn, entry["id"])
+        back = store.load_position(self.conn, "next")
+        self.assertIsNotNone(back)
+        self.assertEqual(back.rolled_from_id, "root")
+        self.assertEqual(back.opened_on, date(2026, 1, 5))
+
+    def test_redate_moves_only_what_is_given_and_keeps_order(self):
+        from datetime import date
+        store.save_positions(self.conn, [self._position("p")])
+        store.redate_position(self.conn, "p", expiry=date(2026, 4, 17), note="dates moved")
+        p = store.load_position(self.conn, "p")
+        self.assertEqual((p.opened_on, p.expiry), (date(2026, 1, 5), date(2026, 4, 17)))
+        with self.assertRaises(ValueError):
+            store.redate_position(self.conn, "p", expiry=date(2025, 12, 1))

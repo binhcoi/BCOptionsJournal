@@ -9,8 +9,10 @@ Offline, single user, one SQLite file. No dependencies below the UI.
 See [plan.md](plan.md) for the design and [docs/legacy-format.md](docs/legacy-format.md)
 for the import format.
 
-> **Status: M2.** The P/L engine, importer, reconciliation, storage and the
-> entry UI are done and tested (221 tests). Share pages and reporting are next.
+> **Status: complete through M6.** Engine, importer and reconciliation, entry
+> UI, shares and wheels, decision support, reporting with filters and saved
+> views, and a Data page with health checks, snapshots and restore. See
+> [docs/deploy.md](docs/deploy.md) to run it and keep the journal safe.
 
 ---
 
@@ -75,7 +77,8 @@ docker compose -f docker/compose.yml run --rm bcoj reconcile /import/export.csv
 ### LXC / bare
 
 Copy the repo, ensure `python3` is present, run the commands above. The journal
-is one SQLite file; back it up by copying it.
+is one SQLite file; the Data page takes consistent snapshots of it and can
+restore one. Details in [docs/deploy.md](docs/deploy.md).
 
 ---
 

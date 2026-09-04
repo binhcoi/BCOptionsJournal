@@ -127,6 +127,19 @@ table[data-fixed] tr.chain-head td { padding-top: .3rem; padding-bottom: .3rem; 
 .act-open { color: var(--accent); background: var(--accent-tint); border-color: var(--accent); }
 button.btn-open { background: var(--accent); }
 details.report { margin: 1.2rem 0; }
+details.raw > summary { font-size: .95rem; color: var(--dim); }
+details.raw form.compact { margin-bottom: .6rem; }
+.raw-actions { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; margin-top: .8rem; }
+form.inline.reopen button { background: var(--panel); color: var(--accent);
+  border: 1px solid var(--accent); border-radius: 6px; padding: .35rem .8rem; font-weight: 600;
+  text-decoration: none; }
+form.inline.reopen button:hover { background: var(--accent-tint); }
+form.convert { display: inline-flex; align-items: center; gap: .5rem; }
+form.convert label.check { flex-direction: row; align-items: center; gap: .3rem; font-size: .8rem;
+  color: var(--dim); }
+form.inline.convert button { background: var(--panel); color: var(--amber);
+  border: 1px solid var(--amber); border-radius: 6px; padding: .35rem .8rem; font-weight: 600;
+  text-decoration: none; }
 details.report summary { cursor: pointer; font-weight: 600; font-size: 1.15rem; margin: 0 0 .5rem; }
 details.report summary:hover { color: var(--accent); }
 .preview { grid-column: 1 / -1; }
@@ -218,6 +231,37 @@ a.act:hover, a.act.here { border-color: currentColor; }
 .tabs.even a { min-width: 5.4rem; text-align: center; }
 /* Filter bar: segments for the two filters used most, the rest folded. */
 .titlebar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.callout.ok { background: var(--ok-bg); border-color: var(--pos); }
+table.health td:nth-child(5) { white-space: normal; text-align: left; }
+table.rawdata td:nth-child(8) { white-space: normal; text-align: left; max-width: 22rem; }
+table.rawdata small.note { display: block; line-height: 1.35; margin-top: .15rem; }
+table.rawdata .rowtools { display: inline-flex; align-items: baseline; gap: .6rem;
+  white-space: nowrap; }
+table.rawdata .rowtools form.inline, table.rawdata .rowtools form.inline button,
+table.rawdata .rowtools .inuse { font-size: .85rem; line-height: 1.2; }
+table.rawdata details.edit { display: inline-block; vertical-align: baseline; }
+table.rawdata form.unlink { display: inline-flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+table.rawdata form.unlink label.check { flex-direction: row; align-items: center; gap: .3rem;
+  font-size: .8rem; color: var(--neg); }
+table.rawdata details.edit > summary { cursor: pointer; list-style: none; color: var(--accent);
+  text-decoration: underline; font-size: .85rem; display: inline; }
+table.rawdata details.edit > summary::-webkit-details-marker { display: none; }
+table.rawdata details.edit[open] { display: block; }
+table.rawdata details.edit .bubble { margin: .5rem 0; text-align: left; white-space: normal;
+  min-width: 34rem; }
+table.rawdata details.edit label.check { flex-direction: row; gap: .35rem; align-items: center;
+  font-size: .85rem; }
+form.restore { display: inline-flex; align-items: center; gap: .5rem; }
+form.restore label.check { flex-direction: row; align-items: center; gap: .3rem; font-size: .8rem;
+  color: var(--dim); }
+/* Real buttons where a click has consequences: restore is red on white
+   text, a snapshot is the accent, whatever the inline-form default says. */
+form.restore button, form.save-view button {
+  background: var(--accent); color: #fff; border: 1px solid transparent; border-radius: 6px;
+  padding: .35rem .8rem; font-weight: 600; text-decoration: none;
+}
+form.restore button { background: var(--neg); }
+form.restore button:hover, form.save-view button:hover { filter: brightness(1.08); }
 .titlebar h1 { margin-right: auto; }
 .filterbar { margin: 0 0 .8rem; }
 .chips.active { margin: .5rem 0 0; }
@@ -298,9 +342,10 @@ textarea:focus { outline: 2px solid var(--accent); }
 .form-box .actions button { min-width: 11rem; }
 .form-box:not(#new-box) > [data-form] { min-height: 17.5rem; }
 .form-box:not(#new-box) > [data-form] > form { min-height: 100%; }
-/* Compact field rows on the entry form. */
-.grid.compact { display: flex; flex-wrap: wrap; gap: .5rem .7rem; align-items: flex-end;
-  padding: .5rem .6rem; }
+/* Compact field rows: plain rows of small fields, no panel of their own,
+   so they read as part of the form they sit in. */
+.grid.compact { display: flex; flex-wrap: wrap; gap: .5rem .9rem; align-items: flex-end;
+  padding: 0; background: none; border: 0; }
 .grid.compact label { width: auto; min-width: 8rem; }
 .grid.compact input, .grid.compact select { padding: .3rem .45rem; }
 .grid.compact .when-over { display: contents; }
@@ -381,12 +426,16 @@ td a:hover .contract > :not(.qty) { text-decoration: underline; }
 tr.action-row > td { padding: .5rem .7rem .8rem; background: var(--bg); white-space: normal; }
 tr.action-row:hover { background: var(--bg); }
 /* A form is a bubble: rounded, bordered, lifted off the table. */
-.action-inline, #new-box > [data-form] {
+.action-inline, #new-box > [data-form], .bubble {
   padding: .9rem 1rem 1rem; border: 1px solid var(--line); border-radius: 12px;
   background: var(--panel); box-shadow: 0 2px 10px rgba(0,0,0,.08);
 }
 #new-box > [data-form] { margin: 0 0 1rem; }
-.action-inline { border-left: 4px solid var(--accent); }
+.action-inline, #new-box > [data-form], .bubble { border-left: 4px solid var(--accent); }
+.bubble { border-left-color: var(--dim); }
+.bubble h3, #new-box h3 { margin: 0 0 .6rem; font-size: .95rem; }
+.bubble h3 small { font-weight: 400; margin-left: .4rem; }
+.bubble p.hint { margin-bottom: 0; }
 .action-inline h3 { margin: 0 0 .6rem; font-size: .95rem; }
 .action-inline .callout, .action-inline p.hint { margin-top: 0; }
 
@@ -467,6 +516,28 @@ JS = """
         });
       });
   }
+
+  // A link to a folded section opens it: the Fix links on the Data page
+  // land on the raw-data section of a position.
+  var reveal = function () {
+    if (!window.location.hash) return;
+    var target = document.getElementById(window.location.hash.slice(1));
+    if (target && target.tagName === 'DETAILS') {
+      target.open = true;
+      target.scrollIntoView({ block: 'start' });
+    }
+  };
+  window.addEventListener('hashchange', reveal); reveal();
+
+  // Cancel inside a folded edit form folds it again.
+  document.addEventListener('click', function (event) {
+    var x = event.target.closest('[data-close-details]');
+    if (!x) return;
+    var box = x.closest('details');
+    if (!box) return;
+    event.preventDefault();
+    box.open = false;
+  });
 
   // The entry form's closing fields matter only for a trade already over.
   var outcome = document.getElementById('f_outcome');

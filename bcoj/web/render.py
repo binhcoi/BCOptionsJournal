@@ -55,6 +55,7 @@ def page(title: str, body: str, flash: str = "", nav_here: str = "", toolbar: st
     {tab("/expiring", "Expiring", "expiring")}
     {tab("/risk", "Risk", "risk")}
     {tab("/reports", "Reports", "reports")}
+    {tab("/data", "Data", "data")}
     {tab("/audit", "History", "audit")}
   </nav>
 </header>

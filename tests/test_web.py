@@ -609,6 +609,9 @@ class TestInlineActions(WebTestCase):
     def test_new_position_form_is_a_leg_row(self):
         body = self.get("/new")
         self.assertIn('class="leg-grid" data-fee-rate=', body)
+        # Same order as the close forms: the date, then the leg.
+        self.assertLess(body.index('name="opened_on"'), body.index('class="leg-grid"'))
+        self.assertIn("<h3>New position</h3>", self.get("/?show=open"))
         self.assertIn('<option value="SHORT" selected>STO</option>', body)
         self.assertIn('<option value="LONG">BTO</option>', body)
         self.assertIn('id="f_quantity"', body)
@@ -1651,6 +1654,219 @@ class TestCampaignStrip(WebTestCase):
         self.assertIn("Break-even", plain_page)
 
 
+class TestDataPage(WebTestCase):
+    def test_health_names_trouble_and_links_to_the_fix(self):
+        self.assertIn("All clear", self.get("/data"))
+        self.add_position(underlying="lap", opened_on="2026-01-05", expiry="2026-01-16")
+        p = [q for q in self.positions() if q.underlying == "LAP"][0]
+        page = self.get("/data")
+        self.assertIn("Past expiry, no outcome", page)
+        self.assertIn(f'href="/position/{p.id}?do=expire"', page)
+        self.assertIn('<span class="badge st-blocked">error</span>', page)
+        self.assertIn('<a href="/data" class="here">Data</a>', page)
+
+    def test_snapshots_are_taken_listed_and_restored_with_confirmation(self):
+        self.add_position(underlying="snp")
+        status, location, _ = self.post("/data/snapshot", {"label": "first", "next": "/data"})
+        self.assertEqual(status, 303)
+        self.assertIn("Snapshot written", location)
+        page = self.get("/data")
+        self.assertIn("-first.db", page)
+        name = re.search(r"(journal-[0-9-]+-first\.db)", page).group(1)
+        # Change the journal, then roll back.
+        self.add_position(underlying="gone")
+        status, _, body = self.post("/data/restore", {"name": name})
+        self.assertEqual(status, 400)
+        self.assertIn("Tick the box", body)
+        status, location, _ = self.post("/data/restore", {"name": name, "sure": "1", "next": "/data"})
+        self.assertEqual(status, 303)
+        self.assertIn("restored", location)
+        self.assertEqual([p.underlying for p in self.positions() if p.underlying in ("SNP", "GONE")],
+                         ["SNP"])
+        self.assertIn("before-restore", self.get("/data"))
+        status, _, _ = self.post("/data/restore", {"name": "../x.db", "sure": "1"})
+        self.assertEqual(status, 400)
+
+
+class TestRawPositionRepairs(WebTestCase):
+    def test_a_placeholder_can_be_removed_and_brought_back(self):
+        self.add_position(underlying="plc")
+        p = [q for q in self.positions() if q.underlying == "PLC"][0]
+        page = self.get(f"/position/{p.id}")
+        self.assertIn('<details class="report raw" id="raw">', page)
+        self.assertIn('<div class="bubble">', page)                 # a form, like the others
+        self.assertIn(f'action="/position/{p.id}/delete"', page)
+        status, _, body = self.post(f"/position/{p.id}/delete", {})
+        self.assertEqual(status, 400)
+        status, location, _ = self.post(f"/position/{p.id}/delete", {"sure": "1"})
+        self.assertEqual(status, 303)
+        self.assertIn("removed", location)
+        self.assertEqual([q for q in self.positions() if q.underlying == "PLC"], [])
+        conn = store.open_db(self.db_path)
+        try:
+            entry = [e for e in store.audit_entries(conn) if e["entity_id"] == p.id][0]
+        finally:
+            conn.close()
+        self.post(f"/audit/{entry['id']}/revert", {})
+        self.assertEqual(len([q for q in self.positions() if q.underlying == "PLC"]), 1)
+
+    def test_a_linked_position_cannot_be_removed(self):
+        self.add_position(underlying="lnk3")
+        p = [q for q in self.positions() if q.underlying == "LNK3"][0]
+        self.post(f"/position/{p.id}/roll", {"on": "2026-02-06", "close_price": "4.00",
+                                              "new_expiry": "2026-03-20", "new_strike": "34",
+                                              "new_price": "5.00"})
+        page = self.get(f"/position/{p.id}")
+        self.assertIn("Cannot be removed: 1 position(s) rolled from it", page)
+        status, _, body = self.post(f"/position/{p.id}/delete", {"sure": "1"})
+        self.assertEqual(status, 400)
+
+    def _edit(self, p, **over):
+        fields = {"underlying": p.underlying, "expiry": p.expiry.isoformat(), "strike": str(p.strike),
+                  "right": p.right.value, "direction": p.direction.value,
+                  "quantity": str(p.quantity), "opened_on": p.opened_on.isoformat(),
+                  "open_price": str(p.open_price), "open_fee": str(p.open_fee)}
+        fields.update(over)
+        return self.post(f"/position/{p.id}/edit", fields)
+
+    def test_every_entered_field_can_be_corrected_from_the_raw_section(self):
+        self.add_position(underlying="mvd")
+        p = [q for q in self.positions() if q.underlying == "MVD"][0]
+        page = self.get(f"/position/{p.id}")
+        self.assertIn(f'action="/position/{p.id}/edit"', page)
+        status, location, _ = self._edit(p, opened_on="2026-01-06", expiry="2026-04-17",
+                                         strike="34.5", quantity="8", open_price="2.75")
+        self.assertEqual(status, 303)
+        self.assertIn("Corrections saved", location)
+        m = [q for q in self.positions() if q.underlying == "MVD"][0]
+        self.assertEqual((m.opened_on.isoformat(), m.expiry.isoformat(), str(m.strike), m.quantity,
+                          str(m.open_price)), ("2026-01-06", "2026-04-17", "34.5", 8, "2.75"))
+        status, _, body = self._edit(p, opened_on="2099-01-06", expiry="2099-04-17")
+        self.assertEqual(status, 400)
+        self.assertIn("in the future", body)
+        status, _, body = self._edit(p, expiry="2025-01-01")
+        self.assertEqual(status, 400)
+        self.assertIn("before the position was opened", body)
+
+    def test_a_closed_record_with_no_close_date_can_be_given_one(self):
+        # As an import can leave it: closed, but with no date. Not reachable
+        # through the forms, so written directly.
+        self.add_position(underlying="ncd")
+        p = [q for q in self.positions() if q.underlying == "NCD"][0]
+        conn = store.open_db(self.db_path)
+        try:
+            with conn:
+                conn.execute("UPDATE positions SET status = 'CLOSED', close_price = '0.50'"
+                             " WHERE id = ?", (p.id,))
+        finally:
+            conn.close()
+        data = self.get("/data")
+        self.assertIn("Closed with no close date", data)
+        self.assertIn(f'href="/position/{p.id}#raw"', data)
+        page = self.get(f"/position/{p.id}")
+        self.assertRegex(page, r'name="closed_on" id="f_closed_on"\s+value=""')
+        self.assertIn("<span>Closed on</span>", page)
+        status, _, body = self._edit(p)                       # still no date: refused
+        self.assertEqual(status, 400)
+        status, location, _ = self._edit(p, closed_on="2026-02-06", close_price="0.50",
+                                         close_fee="0.65")
+        self.assertEqual(status, 303)
+        fixed = [q for q in self.positions() if q.underlying == "NCD"][0]
+        self.assertEqual(fixed.closed_on.isoformat(), "2026-02-06")
+        self.assertNotIn("Closed with no close date", self.get("/data"))
+        self.assertIn("hashchange", self.get("/static/app.js"))   # the Fix link opens the fold
+
+    def test_a_disguised_share_row_becomes_the_share_trade_it_was(self):
+        # The sheet wrote a stock purchase as an "assigned put": no premium,
+        # an odd strike. The importer derived the lot; now the row goes and
+        # the lot stays, as an outright buy.
+        self.add_position(underlying="dsg", quantity="2", strike="58.22", open_price="0")
+        p = [q for q in self.positions() if q.underlying == "DSG"][0]
+        self.post(f"/position/{p.id}/assign", {"on": "2026-03-20", "close_fee": "0", "share_fee": "0"})
+        conn = store.open_db(self.db_path)
+        try:
+            from bcoj.importer.triage import Flag
+            store.save_flags(conn, [Flag(entity_id=p.id, kind="disguised_share_row",
+                                         detail="probably a share transaction")])
+        finally:
+            conn.close()
+        self.assertIn("Import: disguised share row", self.get("/data"))
+        page = self.get(f"/position/{p.id}")
+        self.assertIn("Convert to share trade", page)
+        status, location, _ = self.post(f"/position/{p.id}/to-shares", {"sure": "1"})
+        self.assertEqual(status, 303)
+        self.assertIn("lot of 200", location)
+        self.assertEqual([q for q in self.positions() if q.underlying == "DSG"], [])
+        conn = store.open_db(self.db_path)
+        try:
+            lot = [l for l in store.load_lots(conn) if l.underlying == "DSG"][0]
+            self.assertEqual((lot.source.value, lot.quantity, str(lot.cost_per_share)),
+                             ("OUTRIGHT_BUY", 200, "58.22"))
+            self.assertIsNone(lot.assigning_position_id)
+            self.assertEqual(store.open_flags(conn), [])          # the flag went with the row
+        finally:
+            conn.close()
+        self.assertNotIn("Import: disguised share row", self.get("/data"))
+        # A real leg with a successor is not a share trade.
+        self.add_position(underlying="real")
+        q = [x for x in self.positions() if x.underlying == "REAL"][0]
+        self.post(f"/position/{q.id}/roll", {"on": "2026-02-06", "close_price": "4.00",
+                                              "new_expiry": "2026-03-20", "new_strike": "34",
+                                              "new_price": "5.00"})
+        status, _, body = self.post(f"/position/{q.id}/to-shares", {"sure": "1"})
+        self.assertEqual(status, 400)
+        self.assertIn("not a share trade", body)
+
+    def test_a_close_recorded_by_mistake_can_be_reopened(self):
+        self.add_position(underlying="rop")
+        p = [q for q in self.positions() if q.underlying == "ROP"][0]
+        self.post(f"/position/{p.id}/close", {"closed_on": "2026-02-06", "close_price": "1.00"})
+        page = self.get(f"/position/{p.id}")
+        self.assertIn("Reopen (undo the closed)", page)
+        status, location, _ = self.post(f"/position/{p.id}/reopen", {})
+        self.assertEqual(status, 303)
+        self.assertTrue([q for q in self.positions() if q.underlying == "ROP"][0].is_open)
+        # A rolled leg is not reopened here: its successor depends on it.
+        self.post(f"/position/{p.id}/roll", {"on": "2026-02-06", "close_price": "4.00",
+                                              "new_expiry": "2026-03-20", "new_strike": "34",
+                                              "new_price": "5.00"})
+        status, _, body = self.post(f"/position/{p.id}/reopen", {})
+        self.assertEqual(status, 400)
+        self.assertIn("not reopened here", body)
+
+    def test_an_import_flag_clears_once_the_data_is_fixed(self):
+        # A roll whose dates disagree, flagged as the importer would flag it.
+        self.add_position(underlying="flg")
+        p = [q for q in self.positions() if q.underlying == "FLG"][0]
+        self.post(f"/position/{p.id}/roll", {"on": "2026-02-06", "close_price": "4.00",
+                                              "new_expiry": "2026-03-20", "new_strike": "34",
+                                              "new_price": "5.00"})
+        head = [q for q in self.positions() if q.underlying == "FLG" and q.is_open][0]
+        conn = store.open_db(self.db_path)
+        try:
+            store.edit_position(conn, head.id, {"opened_on": date(2026, 2, 10)}, "test")
+            from bcoj.importer.triage import Flag
+            store.save_flags(conn, [Flag(entity_id=head.id, kind="chain_date_order",
+                                         detail="opens after its predecessor closed")])
+        finally:
+            conn.close()
+        page = self.get("/data")
+        self.assertIn("Import: chain date order", page)
+        self.assertIn("Roll dates do not line up", page)
+        # Fix the date: both the live warning and the import flag go away, and
+        # the flag is resolved in the store rather than merely hidden.
+        self._edit(head, opened_on="2026-02-06", expiry="2026-03-20", strike="34",
+                   open_price="5.00", quantity=str(head.quantity))
+        page = self.get("/data")
+        self.assertNotIn("Import: chain date order", page)
+        self.assertNotIn("Roll dates do not line up", page)
+        conn = store.open_db(self.db_path)
+        try:
+            self.assertEqual([dict(f)["kind"] for f in store.open_flags(conn)], [])
+        finally:
+            conn.close()
+
+
 class TestLongTargets(WebTestCase):
     def test_a_long_leg_targets_a_quarter_profit_on_its_debit(self):
         # Bought a put for 1.12, fee 0.65: debit 112.65. Target 1.40, less the
@@ -1783,6 +1999,59 @@ class TestShareRepairs(WebTestCase):
         self.assertEqual(status, 400)
         self.assertIn("in the future", body)
 
+    def test_an_estimated_lot_is_confirmed_by_correcting_it(self):
+        from bcoj.engine import actions
+        conn = store.open_db(self.db_path)
+        try:
+            result = actions.buy_shares("est", 100, Decimal("35"), date(2026, 1, 5))
+            result.lots[0].estimated = True
+            result.lots[0].notes = "price recalled as about 35"
+            store.apply(conn, result)
+            lot = result.lots[0]
+        finally:
+            conn.close()
+        data = self.get("/data")
+        self.assertIn("Reconstructed, not recorded", data)
+        self.assertIn(f'href="/shares/EST/data#lot-{lot.id}"', data)
+        page = self.get("/shares/EST/data")
+        self.assertIn(f'<details class="edit" id="lot-{lot.id}">', page)
+        self.assertIn("confirmed against a statement", page)
+        status, location, _ = self.post(f"/shares/lot/{lot.id}/edit", {
+            "acquired_on": "2026-01-07", "quantity": "100", "cost_per_share": "34.80",
+            "fee": "1.00", "notes": "per the January statement", "confirmed": "1",
+            "next": "/shares/EST/data"})
+        self.assertEqual(status, 303)
+        self.assertIn("corrected", location)
+        conn = store.open_db(self.db_path)
+        try:
+            fixed = [l for l in store.load_lots(conn) if l.underlying == "EST"][0]
+        finally:
+            conn.close()
+        self.assertFalse(fixed.estimated)
+        self.assertEqual((fixed.acquired_on.isoformat(), str(fixed.cost_per_share), str(fixed.fee)),
+                         ("2026-01-07", "34.80", "1.00"))
+        self.assertNotIn("Reconstructed, not recorded", self.get("/data"))
+        # A sale is corrected the same way, and the edit is refused for nonsense.
+        self.post("/shares/sell", {"underlying": "est", "on": "2026-02-01", "quantity": "40",
+                                   "price": "40"})
+        conn = store.open_db(self.db_path)
+        try:
+            sale = [d for d in store.load_disposals(conn) if d.underlying == "EST"][0]
+        finally:
+            conn.close()
+        status, _, body = self.post(f"/shares/disposal/{sale.id}/edit", {
+            "disposed_on": "2026-02-02", "quantity": "0", "proceeds_per_share": "41", "fee": "0"})
+        self.assertEqual(status, 400)
+        status, _, _ = self.post(f"/shares/disposal/{sale.id}/edit", {
+            "disposed_on": "2026-02-02", "quantity": "50", "proceeds_per_share": "41", "fee": "0"})
+        self.assertEqual(status, 303)
+        conn = store.open_db(self.db_path)
+        try:
+            sale = [d for d in store.load_disposals(conn) if d.underlying == "EST"][0]
+        finally:
+            conn.close()
+        self.assertEqual((sale.disposed_on.isoformat(), sale.quantity), ("2026-02-02", 50))
+
     def test_a_lot_can_be_re_dated_together_with_its_assignment(self):
         # An assignment written straight into the store with a future date,
         # as the old expiry default produced when a put was assigned early.
@@ -1841,7 +2110,10 @@ class TestShareRepairs(WebTestCase):
         self.assertIn('href="/shares/RAW/data"', ticker)
         data = self.get("/shares/RAW/data")
         self.assertEqual(data.count('/delete"'), 2)     # the lot and the sale
-        self.assertEqual(data.count('/date"'), 1)
+        self.assertEqual(data.count('/edit"'), 2)       # each has an edit form
+        self.assertEqual(data.count('class="btn cancel"'), 2)   # and each a Cancel
+        self.assertIn("data-close-details", data)
+        self.assertIn("data-close-details", self.get("/static/app.js"))
         self.assertIn("account rule", data)
 
     def test_removing_a_lot_in_use_is_refused(self):
@@ -1851,7 +2123,43 @@ class TestShareRepairs(WebTestCase):
                           share_lot_id=lot.id)
         status, _, body = self.post(f"/shares/lot/{lot.id}/delete", {})
         self.assertEqual(status, 400)
-        self.assertIn("written against this lot", body)
+        self.assertIn("open call(s) are written against this lot", body)
+        # The page says why, offers removal only behind a spelled-out
+        # confirmation, and shows what is left.
+        data = self.get("/shares/USE/data")
+        self.assertIn("backs 1 open call(s)", data)
+        self.assertIn("remove anyway; 1 open call(s) become naked", data)
+        self.assertIn('<abbr>Left</abbr>', data)
+        # Confirmed: the lot goes and the call is naked, audited on the call.
+        other = self._buy("use", 300)                       # a second lot to exercise on
+        status, _, _ = self.post(f"/shares/lot/{other.id}/delete", {})
+        self.assertEqual(status, 303)
+        self.add_position(underlying="use", right="CALL", strike="13", opened_on="2026-02-02",
+                          expiry="2026-03-20", share_lot_id=lot.id)
+        status, _, _ = self.post(f"/shares/lot/{lot.id}/delete", {"unlink": "1"})
+        self.assertEqual(status, 303)
+        conn = store.open_db(self.db_path)
+        try:
+            calls = [p for p in store.load_positions(conn) if p.underlying == "USE"
+                     and p.right.value == "CALL"]
+            self.assertEqual({p.share_lot_id for p in calls}, {None})
+            self.assertTrue(all(p.is_open for p in calls))
+            self.assertFalse(any(l.id == lot.id for l in store.load_lots(conn)))
+        finally:
+            conn.close()
+        return
+        # Once the call is closed it is history: the lot can go, and the call
+        # simply stops pointing at it.
+        call = [p for p in self.positions() if p.underlying == "USE" and p.right.value == "CALL"][0]
+        self.post(f"/position/{call.id}/close", {"closed_on": "2026-03-01", "close_price": "0.10"})
+        self.assertNotIn("backs", self.get("/shares/USE/data"))
+        status, _, _ = self.post(f"/shares/lot/{lot.id}/delete", {})
+        self.assertEqual(status, 303)
+        conn = store.open_db(self.db_path)
+        try:
+            self.assertIsNone(store.load_position(conn, call.id).share_lot_id)
+        finally:
+            conn.close()
 
     def test_removed_share_records_can_be_undone_from_history(self):
         lot = self._buy("und2", 100)

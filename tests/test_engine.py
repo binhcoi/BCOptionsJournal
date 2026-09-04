@@ -921,3 +921,55 @@ class TestCampaign(unittest.TestCase):
         # Net credit 3,000 - 603.90 = 2,396.10; half back -> price 2.00 -> P/L 1,196.10.
         self.assertEqual(self.fam.expected_at_target, D("1196.10"))
         self.assertEqual(self.fam.cost_to_close_at_target, D("1200.00"))
+
+
+class TestHealth(unittest.TestCase):
+    def setUp(self):
+        from bcoj.engine import health
+        self.health = health
+        self.today = date(2026, 9, 3)
+
+    def kinds(self, issues):
+        return [i.kind for i in issues]
+
+    def test_a_clean_journal_has_nothing_to_say(self):
+        self.assertEqual(self.health.check([position()], [], [], today=self.today), [])
+
+    def test_each_kind_of_trouble_is_named_and_points_somewhere(self):
+        future = position(id="f", opened_on=date(2099, 1, 1), expiry=date(2099, 3, 1))
+        lapsed = position(id="l", expiry=date(2026, 1, 16))
+        dangling = position(id="d", rolled_from_id="nope")
+        prev = closed(id="a", status=Status.ROLLED, closed_on=date(2026, 2, 6), close_price=D("1"))
+        late = position(id="b", rolled_from_id="a", opened_on=date(2026, 2, 10))
+        parent = closed(id="s", quantity=10, status=Status.SPLIT, close_price=None)
+        h1 = position(id="s1", quantity=4, split_from_id="s", split_from_quantity=10)
+        h2 = position(id="s2", quantity=5, split_from_id="s", split_from_quantity=10)
+        twin_a = position(id="t1", underlying="ZETA")
+        twin_b = position(id="t2", underlying="ZETA")
+        lot = ShareLot(id="lot", underlying="ACME", quantity=100, acquired_on=date(2026, 1, 5),
+                       cost_per_share=D("10"), estimated=True, assigning_position_id="gone")
+        sale = ShareDisposal(id="sale", underlying="ACME", quantity=50, disposed_on=date(2026, 2, 1),
+                             proceeds_per_share=D("12"), specific_lot_ids=("missing",))
+        issues = self.health.check(
+            [future, lapsed, dangling, prev, late, parent, h1, h2, twin_a, twin_b], [lot], [sale],
+            blocked={"BETA": "the sale of 5 needs more shares than were held"},
+            unlinked_calls=2,
+            import_flags=[{"kind": "share_row", "entity_type": "position", "entity_id": "f",
+                           "detail": "looks like a share purchase"}],
+            today=self.today)
+        kinds = self.kinds(issues)
+        for kind in ("future_date", "past_expiry", "dangling_link", "roll_dates", "split_sum",
+                     "duplicate", "estimated", "blocked_shares", "unlinked_calls",
+                     "import:share_row"):
+            with self.subTest(kind=kind):
+                self.assertIn(kind, kinds)
+        # Errors first, then warnings.
+        severities = [i.severity for i in issues]
+        self.assertEqual(severities, sorted(severities, key=lambda s: s != "error"))
+        by_kind = {i.kind: i for i in issues}
+        self.assertEqual(by_kind["past_expiry"].href, "/position/l?do=expire")
+        self.assertEqual(by_kind["blocked_shares"].href, "/shares/BETA/data")
+        self.assertEqual(by_kind["split_sum"].detail, "split into 9 contract(s) but held 10")
+        self.assertEqual(by_kind["duplicate"].entity_id, "t2")           # the later one is the twin
+        # d (missing predecessor), the lot's gone assignment, the sale's missing lot.
+        self.assertEqual(self.health.summary(issues)["dangling_link"], 3)
