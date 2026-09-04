@@ -22,7 +22,7 @@ from bcoj.domain.enums import (
 )
 from bcoj.domain.money import fmt, parse_money, q2
 from bcoj.domain.types import Position, ShareDisposal, ShareLot
-from bcoj.engine.basis import adjusted_basis, blended, round_up_to_strike
+from bcoj.engine.basis import adjusted_basis, round_up_to_strike
 from bcoj.engine.chains import ChainCycleError, ChainIndex
 from bcoj.engine.pnl import close_cash, days_held, open_cash, realized_pl
 from bcoj.engine.risk import break_even, capital_at_risk, credit_to_recover, put_risk
@@ -599,74 +599,42 @@ class TestShareMatching(unittest.TestCase):
 
 
 class TestAdjustedBasis(unittest.TestCase):
-    """What the shares really cost, before and after covered calls."""
+    """What the shares held really cost after everything the ticker paid back."""
 
-    LOT = ShareLot(
-        id="lot", underlying="DELTA", quantity=100,
-        acquired_on=date(2022, 2, 4), cost_per_share=D("130"),
-        source=ShareSource.PUT_ASSIGNMENT,
-    )
-
-    def test_basis_before_and_after_calls(self):
-        # 13,000 cost, less 600 of acquisition premium, less 2,400 of calls.
-        basis = adjusted_basis(
-            self.LOT, acq_premium=D("600.00"), cc_premium=D("2400.00")
-        )
+    def test_basis_is_cost_held_less_everything_paid_back(self):
+        # 13,000 cost, less 3,000 of option P/L, less 0 on shares.
+        basis = adjusted_basis("DELTA", 100, D("13000.00"), option_pl=D("3000.00"))
         self.assertTrue(basis.available)
-        self.assertEqual(basis.unit_price, D("124.00"))
-        self.assertEqual(basis.after_calls, D("100.00"))
+        self.assertEqual(basis.unit_price, D("100.00"))
         self.assertEqual(basis.min_call_strike, D("100.00"))
-        self.assertEqual(basis.calls_contributed, D("24.00"))
+        self.assertEqual(basis.paid_back, D("3000.00"))
 
-    def test_losing_call_chain_raises_the_basis(self):
-        """Premium enters as a net, so a loss pushes the basis up."""
-        basis = adjusted_basis(
-            self.LOT, acq_premium=D("600.00"), cc_premium=D("-1000.00")
-        )
-        self.assertGreater(basis.after_calls, basis.unit_price)
-        self.assertEqual(basis.after_calls, D("134.00"))
+    def test_losing_options_raise_the_basis(self):
+        basis = adjusted_basis("DELTA", 100, D("13000.00"), option_pl=D("-1000.00"))
+        self.assertEqual(basis.unit_price, D("140.00"))
 
-    def test_acquisition_fee_is_included(self):
-        lot = ShareLot(id="l", underlying="X", quantity=100,
-                       acquired_on=date(2025, 1, 1), cost_per_share=D("10"),
-                       fee=D("100.00"))
-        self.assertEqual(adjusted_basis(lot).unit_price, D("11.00"))
+    def test_sold_shares_count_through_their_pl(self):
+        # Half of a 100 x 130 lot sold for a 250 gain: the other half is
+        # held at 6,500 and owes 250 less.
+        basis = adjusted_basis("DELTA", 50, D("6500.00"), option_pl=D("600.00"), share_pl=D("250.00"))
+        self.assertEqual(basis.unit_price, D("113.00"))
 
     def test_no_shares_is_unavailable_not_an_error(self):
-        """A ticker holding nothing has no per-share basis to report."""
-        basis = adjusted_basis(self.LOT, quantity=0)
+        basis = adjusted_basis("DELTA", 0, D("0"))
         self.assertFalse(basis.available)
         self.assertIsNone(basis.unit_price)
         self.assertIsNone(basis.min_call_strike)
-        self.assertIsNone(basis.calls_contributed)
         self.assertIn("no shares", basis.reason)
 
-    def test_partial_holding_follows_the_shares_that_remain(self):
-        basis = adjusted_basis(self.LOT, acq_premium=D("600.00"), quantity=50)
-        self.assertEqual(basis.quantity, 50)
-        self.assertEqual(basis.lot_cost, D("6500.00"))
-        self.assertEqual(basis.unit_price, D("118.00"))
+    def test_paid_for_shares_have_no_floor(self):
+        basis = adjusted_basis("DELTA", 100, D("1000.00"), option_pl=D("1500.00"))
+        self.assertEqual(basis.unit_price, D("-5.00"))
+        self.assertEqual(basis.min_call_strike, D("0.00"))
 
     def test_min_call_strike_always_rounds_up(self):
         self.assertEqual(round_up_to_strike(D("100.7975")), D("101.00"))
         self.assertEqual(round_up_to_strike(D("100.00")), D("100.00"))
         self.assertEqual(round_up_to_strike(D("100.01")), D("100.50"))
-
-    def test_blended_across_uneven_lots(self):
-        lots = [
-            ShareLot(id="a", underlying="ZETA", quantity=300,
-                     acquired_on=date(2025, 8, 1), cost_per_share=D("24")),
-            ShareLot(id="b", underlying="ZETA", quantity=1500,
-                     acquired_on=date(2026, 2, 13), cost_per_share=D("29")),
-        ]
-        combined = blended([adjusted_basis(l) for l in lots])
-        self.assertEqual(combined.quantity, 1800)
-        self.assertEqual(combined.unit_price, D("28.17"))  # 50,700 / 1,800
-        self.assertIsNone(combined.lot_id)
-
-    def test_blended_of_nothing_is_none(self):
-        self.assertIsNone(blended([]))
-        self.assertIsNone(blended([adjusted_basis(self.LOT, quantity=0)]))
 
 
 if __name__ == "__main__":

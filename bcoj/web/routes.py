@@ -606,7 +606,6 @@ def _portfolio_totals(conn, positions, index) -> str:
     held_cost = q2(sum((t.held_cost for t in clean if t.held > 0), ZERO))
     held = sum(t.held for t in clean)
     holding = sum(1 for t in clean if t.held > 0)
-    lot_premium = q2(sum((t.option_premium for t in tickers), ZERO))
     wheel = q2(sum((t.total for t in clean), ZERO))
     blocked = [t.underlying for t in tickers if t.error]
     open_ones = [p for p in positions if p.is_open]
@@ -630,7 +629,6 @@ def _portfolio_totals(conn, positions, index) -> str:
         ("Shares held", r.esc(held)),
         ("At cost", r.money(held_cost if held_cost else None)),
         ("Tickers holding", r.esc(holding)),
-        ("Premium on these lots", r.money(lot_premium, dash="0.00")),
         ("Wheel total", r.money(wheel, dash="0.00")),
     ]
     warn = ""
@@ -2439,7 +2437,7 @@ def shares_page(conn, token, query) -> tuple[int, str]:
     rows = []
     for t in tickers:
         name = r.esc(t.underlying)
-        blended = t.blended
+        basis = t.basis
         if t.error and t.held < 0:
             state = (f'<span class="badge st-blocked" title="{r.esc(t.error)}">'
                      f"short {-t.held} shares</span>")
@@ -2454,10 +2452,10 @@ def shares_page(conn, token, query) -> tuple[int, str]:
             f'<a href="/shares/{name}"><b class="ticker">{name}</b></a>',
             state,
             r.money(t.held_cost if t.held > 0 else None),
-            r.money(blended.after_calls if blended else None),
-            r.money(blended.min_call_strike if blended else None),
+            r.money(basis.unit_price if basis else None),
+            r.money(basis.min_call_strike if basis else None),
             r.money(t.realized if not t.error else None),
-            r.money(t.option_premium),
+            r.money(t.option_pl),
             r.money(t.total if not t.error else None),
             r.esc(len(t.lots)),
         ])
@@ -2485,11 +2483,13 @@ def shares_page(conn, token, query) -> tuple[int, str]:
 {_kv("All tickers", "", totals)}
 {_share_forms(conn, kind, "", token, "/shares", "/shares?")}
 {r.table(["Ticker", "Position", "Held at cost", "Adj. basis", "Min call",
-          "Share P/L", "Option premium", "Wheel total", "Lots"], rows, cls="shares")}
-<p class="hint">Adjusted basis is what the shares held really cost after the
-premium that acquired them and the calls written against them. Min call is the
-lowest strike that does not lock in a loss. Wheel total is acquisition premium
-plus call premium plus share P/L, realized only.</p>"""
+          "Share P/L", "Option P/L", "Wheel total", "Lots"], rows, cls="shares")}
+<p class="hint">Shares are held at what was paid: the strike for an assignment,
+the fill for a purchase. Option P/L is every closed option on the ticker,
+lifetime. Adjusted basis is the cost of the shares held less option P/L and the
+P/L on shares already sold, per share held; negative means they are paid for.
+Min call is the lowest strike that does not lock in a loss. Wheel total is
+option P/L plus share P/L, realized only.</p>"""
     return 200, r.page("Shares", body, nav_here="shares")
 
 
@@ -2502,20 +2502,19 @@ def ticker_page(conn, underlying, token, query) -> tuple[int, str]:
     t = match_[0]
     by_id = {p.id: p for p in positions}
 
+    b = t.basis
     facts = [
         ("Held", r.esc(t.held) if not t.error else f'<span class="neg">{t.held}</span>'),
         ("Cost of shares held", r.money(t.held_cost if t.held > 0 else None)),
-        ("Share P/L realized", r.money(t.realized if not t.error else None)),
-        ("Option premium on these lots", r.money(t.option_premium)),
+        ("Share P/L", r.money(t.realized if not t.error else None)),
+        ("Option P/L", r.money(t.option_pl)),
+        ("Wheel total", r.money(t.total if not t.error else None)),
+        ("Adjusted basis", r.money(b.unit_price) if b else '<span class="dim">-</span>'),
+        ("Min call strike", r.money(b.min_call_strike) if b else '<span class="dim">-</span>'),
         ("Open calls", (f'<span class="{"neg" if t.uncovered_shares else "pos"}">'
                         f"{t.open_call_shares} of {max(t.held, 0)} shares</span>"
                         if t.open_call_shares else '<span class="dim">none</span>')),
-        ("Wheel total", r.money(t.total if not t.error else None)),
     ]
-    b = t.blended
-    if b:
-        facts += [("Adjusted basis", r.money(b.unit_price)),
-                  ("Min call strike", r.money(b.min_call_strike))]
     fact_html = _kv(name, f"{len(t.lots)} lot(s)", facts)
 
     warn = ""
@@ -2533,13 +2532,9 @@ def ticker_page(conn, underlying, token, query) -> tuple[int, str]:
         badge = f'<span class="badge st-{"open" if v.is_open else "closed"}">{r.esc(src)}</span>'
         if lot.estimated:
             badge += ' <span class="badge st-split" title="reconstructed from memory">estimated</span>'
-        acq = "-"
-        if v.acquisition is not None:
-            head = v.acquisition.head
-            acq = (f'<a href="/position/{r.esc(head.id)}">{r.money(v.acq_premium)}</a>')
-        calls = r.money(v.cc_premium) if v.call_chains else '<span class="dim">-</span>'
-        if v.call_chains:
-            calls += f' <span class="dim">({len(v.call_chains)})</span>'
+        origin = by_id.get(lot.assigning_position_id) if lot.assigning_position_id else None
+        if origin is not None:
+            badge += f' <a class="dim" href="/position/{r.esc(origin.id)}">{r.contract(origin)}</a>'
         cover = ""
         if v.is_open:
             cover = f"{v.covered}/{v.remaining}"
@@ -2561,13 +2556,8 @@ def ticker_page(conn, underlying, token, query) -> tuple[int, str]:
             r.esc(lot.quantity),
             r.esc(v.remaining) if v.is_open else '<span class="dim">0</span>',
             r.esc(price(lot.cost_per_share)),
-            acq,
-            calls,
             cover or '<span class="dim">-</span>',
             r.money(v.share_realized if v.disposed else None),
-            r.money(v.basis.unit_price if v.basis.available else None),
-            r.money(v.basis.after_calls if v.basis.available else None),
-            r.money(v.total),
             r.esc(v.days),
         ])
 
@@ -2594,9 +2584,8 @@ def ticker_page(conn, underlying, token, query) -> tuple[int, str]:
     body = f"""{warn}
 {fact_html}
 <h2>Lots - {len(t.lots)}</h2>
-{r.table(["Acquired", "Source", "Qty", "Held", "Cost/sh", "Acq. premium",
-          "Call premium", "Covered", "Share P/L", "Adj. basis", "After calls",
-          "Wheel", "Days"], lot_rows, cls="lots")}
+{r.table(["Acquired", "Source", "Qty", "Held", "Cost/sh", "Covered", "Share P/L", "Days"],
+         lot_rows, cls="lots")}
 <h2>Disposals - {len(disp_rows)}</h2>
 {r.table(["Date", "Qty", "Price", "Proceeds", "Via"], disp_rows)}
 {suggest_html}

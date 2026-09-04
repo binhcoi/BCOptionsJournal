@@ -247,29 +247,34 @@ through.
 
 ### 5.1 Adjusted share basis
 
-"What do I really own these at", as two figures rather than one:
+"What do I really own these at", one figure per ticker:
 
 ```
-adjusted_unit_price  = (lot_cost − acq_premium) / quantity
-adjusted_after_calls = (lot_cost − acq_premium − cc_premium) / quantity
-min_call_strike      = adjusted_after_calls, rounded up to a listed strike
+adjusted_basis  = (cost of shares held − option P/L − share P/L) / shares held
+min_call_strike = adjusted_basis, rounded up to a listed strike (never below 0)
 ```
 
-Two, so the covered-call contribution is visible instead of blended in: the
-first is the basis after the premium that acquired the shares, the second after
-the calls written against them since. `min_call_strike` is the actionable form —
-writing a call below the adjusted basis locks in a loss, so it is the floor
-worth knowing before selling one.
+Shares are held at what was paid: the strike for an assigned put, the fill for
+an outright buy, fees in. Everything the ticker has already paid back lowers what
+the remaining shares still need to fetch: every closed option leg on the ticker
+(puts and calls, rolled legs, long options bought, a put that expired worthless
+as much as one that assigned) and the P/L on every share already sold.
+`min_call_strike` is the actionable form: writing a call below the adjusted
+basis locks in a loss, so it is the floor worth knowing before selling one. A
+negative basis means the shares are paid for and any sale is profit.
 
 Rules that matter:
 
-- Chains contribute their **cumulative net**, not the last leg
-- **A losing call chain raises the basis** — net P/L handles the sign, no special case
-- **Only realized premium counts**; open premium is a separate projection
-- Premium spreads over the **linked lot's** shares, since the lot is the unit measured
-- Multiple lots report **individually and blended**, because a blend of lots
-  bought at very different prices describes none of them
-- Basis is **queryable at any past date**, not just today
+- **The unit is the ticker, not the lot.** Option premium is never apportioned
+  to lots: covered calls are covered by whatever the ticker holds and
+  assignment sells by the matching rule, so a per-lot premium describes nothing real
+- **Sold shares count through their realized P/L**, and only that. A part-sold
+  lot needs no special rule: the sold half has contributed its gain or loss,
+  the held half sits at raw cost
+- **Only realized P/L counts**; open premium is not yet money and is shown beside it
+- **Lifetime.** The clock never resets when the ticker goes flat
+- **A losing option raises the basis**: net P/L handles the sign, no special case
+- Dividends are out of scope
 
 ---
 
@@ -440,8 +445,8 @@ possible at all.
 ## 11. Reporting
 
 **Dashboard** — realized option P/L, realized share P/L, **true total**, cost
-basis, capital at risk; open call/put/share counts; adjusted basis before and
-after calls, and `min_call_strike`.
+basis, capital at risk; open call/put/share counts; per ticker, adjusted basis
+and `min_call_strike`.
 
 **No composite "unrealised P/L".** Without marks it isn't computable, so the
 three things that *are* known are reported side by side and never summed:
@@ -539,6 +544,7 @@ authoritative check, and it is not in this repository because the data isn't.
 | **No share record may be dated in the future** | Assignments and lot re-dates are refused past today. A lot dated after today is a recording error, and a sale dated today cannot draw from it -- the engine says so by name rather than reporting an empty lot |
 | **A lot's date can be moved, and its assignment moves with it** | The one repair a future-dated assignment needs. Lot and position are updated together and each update is audited and undoable, so they never disagree about when the shares arrived |
 | **Coverage is a fact about the ticker, not a link on the call** | A short call is covered by the shares the ticker holds, oldest lots first, and assignment sells them by the account's matching rule exactly as the broker does. Call premium is spread over the ticker's lots by size. Nothing is linked by hand: the "cover with lot" forms, the unlinked-calls queue and the per-call lot link are gone. A buy-write's lot still names the trade it came with |
+| **Adjusted basis is a ticker figure: cost held less everything paid back** | Shares are held at what was paid; every closed option leg on the ticker and the P/L on every share sold lowers what the remaining shares must fetch. Lifetime, realized only, never apportioned to lots. Replaced the per-lot acquisition-premium and call-premium model, which left out puts that never assigned and spread old calls over unrelated lots (2026-09-04). |
 | **One function, one form; one kind of list, one table** | Every trade form, options or shares, is the leg grid with the date first; the expiring queue is the positions table under a Due filter, not a page of its own; a buy-write can be entered from the entry form. New screens reuse what exists before they add anything |
 | **Undo takes back a whole action or nothing** | Every record an action writes is audited under one group, and History undoes the group in reverse order in one transaction. Undoing one record of a split left the halves alive beside the parent. An action a later one depends on is refused until that later one is undone |
 | **Health checks name problems and point at the fix; they never change data** | The entry guards stop most mistakes; the Data page catches what slipped past, was imported, or became true later (an option past expiry with no outcome). Fixing stays where the record lives, audited like any edit |

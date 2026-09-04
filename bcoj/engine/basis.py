@@ -1,26 +1,24 @@
 """Adjusted share basis -- "what do I really own these at".
 
-    adjusted_unit_price  = (lot_cost - acq_premium) / quantity
-    adjusted_after_calls = (lot_cost - acq_premium - cc_premium) / quantity
-    min_call_strike      = adjusted_after_calls, rounded up to a real strike
+One figure per ticker, never per lot:
 
-Two figures rather than one, so the covered-call contribution is visible
-instead of blended in: the first is the basis after the premium that acquired
-the shares, the second after the calls written against them since.
+    adjusted basis  = (cost of shares held - option P/L - share P/L) / shares held
+    min call strike = adjusted basis, rounded up to a real strike
 
-``min_call_strike`` is the actionable form -- writing a call below the adjusted
+Shares are bought at what was paid: the strike for an assigned put, the fill
+for an outright buy, fees in. Everything the ticker has already paid back --
+every closed option leg, put or call, whether or not it ever touched a share,
+and the P/L on every share sold -- lowers what the remaining shares still need
+to fetch. Lifetime, realized only: open premium is not yet money.
+
+``min_call_strike`` is the actionable form: writing a call below the adjusted
 basis locks in a loss, so it is the floor worth knowing before selling one.
-
-Premium enters as a chain's cumulative net, so a losing call chain correctly
-*raises* the basis. Only realized premium counts; open premium is projected
-separately.
 """
 
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING
 
 from ..domain.money import ZERO, q2
-from ..domain.types import ShareLot
 
 # Strike grids vary by underlying and price, so this is deliberately coarse:
 # a floor rounded up to the next half-dollar is always a safe floor, even if
@@ -28,79 +26,50 @@ from ..domain.types import ShareLot
 DEFAULT_STRIKE_INCREMENT = Decimal("0.50")
 
 
-@dataclass
+@dataclass(frozen=True)
 class AdjustedBasis:
-    """Per-lot effective cost. ``available`` is false when there is nothing to
-    divide by -- reported as unavailable, never as an error code."""
+    """A ticker's effective cost per share held. ``available`` is false when
+    there is nothing to divide by -- reported as unavailable, never as an
+    error code."""
 
-    lot_id: str | None
     underlying: str
-    quantity: int
-    lot_cost: Decimal
-    acq_premium: Decimal
-    cc_premium: Decimal
+    held: int
+    cost_held: Decimal
+    option_pl: Decimal
+    share_pl: Decimal
     available: bool
     unit_price: Decimal | None
-    after_calls: Decimal | None
     min_call_strike: Decimal | None
     reason: str = ""
 
     @property
-    def calls_contributed(self) -> Decimal | None:
-        """Per-share reduction the covered calls actually bought."""
-        if not self.available:
-            return None
-        return q2(self.unit_price - self.after_calls)
+    def paid_back(self) -> Decimal:
+        """What the ticker has already returned, options and shares together."""
+        return q2(self.option_pl + self.share_pl)
 
 
 def adjusted_basis(
-    lot: ShareLot,
-    acq_premium: Decimal = ZERO,
-    cc_premium: Decimal = ZERO,
-    quantity: int | None = None,
+    underlying: str,
+    held: int,
+    cost_held: Decimal,
+    option_pl: Decimal = ZERO,
+    share_pl: Decimal = ZERO,
     increment: Decimal = DEFAULT_STRIKE_INCREMENT,
 ) -> AdjustedBasis:
-    """Adjusted basis for one lot.
-
-    ``quantity`` overrides the lot size when only part of it is still held, so
-    the figure follows the shares that remain.
-    """
-    held = lot.quantity if quantity is None else quantity
-
+    """The ticker's adjusted basis. A negative figure means the shares are
+    already paid for: any sale is profit."""
     if held <= 0:
         return AdjustedBasis(
-            lot_id=lot.id,
-            underlying=lot.underlying,
-            quantity=held,
-            lot_cost=ZERO,
-            acq_premium=q2(acq_premium),
-            cc_premium=q2(cc_premium),
-            available=False,
-            unit_price=None,
-            after_calls=None,
-            min_call_strike=None,
-            reason="no shares held",
+            underlying=underlying, held=held, cost_held=ZERO,
+            option_pl=q2(option_pl), share_pl=q2(share_pl), available=False,
+            unit_price=None, min_call_strike=None, reason="no shares held",
         )
-
-    per_share_cost = lot.cost_per_share + (
-        lot.fee / Decimal(lot.quantity) if lot.quantity else ZERO
-    )
-    lot_cost = q2(per_share_cost * held)
-
-    unit_price = q2((lot_cost - acq_premium) / Decimal(held))
-    after_calls = q2((lot_cost - acq_premium - cc_premium) / Decimal(held))
-
+    unit_price = q2((cost_held - option_pl - share_pl) / Decimal(held))
     return AdjustedBasis(
-        lot_id=lot.id,
-        underlying=lot.underlying,
-        quantity=held,
-        lot_cost=lot_cost,
-        acq_premium=q2(acq_premium),
-        cc_premium=q2(cc_premium),
-        available=True,
+        underlying=underlying, held=held, cost_held=q2(cost_held),
+        option_pl=q2(option_pl), share_pl=q2(share_pl), available=True,
         unit_price=unit_price,
-        after_calls=after_calls,
-        min_call_strike=round_up_to_strike(after_calls, increment),
+        min_call_strike=round_up_to_strike(max(unit_price, ZERO), increment),
     )
 
 
@@ -116,37 +85,3 @@ def round_up_to_strike(
         return q2(price)
     steps = (price / increment).to_integral_value(rounding=ROUND_CEILING)
     return q2(steps * increment)
-
-
-def blended(bases, increment: Decimal = DEFAULT_STRIKE_INCREMENT) -> AdjustedBasis | None:
-    """Blend several lots of one underlying into a single adjusted basis.
-
-    The legacy sheet only ever showed a blended figure. Per-lot detail matters
-    whenever lots were acquired at sharply different prices, where the blend
-    describes none of them well.
-    """
-    usable = [b for b in bases if b.available]
-    if not usable:
-        return None
-
-    underlying = usable[0].underlying
-    held = sum(b.quantity for b in usable)
-    lot_cost = q2(sum((b.lot_cost for b in usable), ZERO))
-    acq = q2(sum((b.acq_premium for b in usable), ZERO))
-    cc = q2(sum((b.cc_premium for b in usable), ZERO))
-
-    unit_price = q2((lot_cost - acq) / Decimal(held))
-    after_calls = q2((lot_cost - acq - cc) / Decimal(held))
-
-    return AdjustedBasis(
-        lot_id=None,
-        underlying=underlying,
-        quantity=held,
-        lot_cost=lot_cost,
-        acq_premium=acq,
-        cc_premium=cc,
-        available=True,
-        unit_price=unit_price,
-        after_calls=after_calls,
-        min_call_strike=round_up_to_strike(after_calls, increment),
-    )
