@@ -11,6 +11,7 @@ carry changes underneath it.
 from dataclasses import dataclass
 from decimal import Decimal
 
+from ..domain.enums import Direction
 from ..domain.money import ZERO, q2
 from ..domain.types import Position
 from .pnl import close_cash_at, open_cash
@@ -63,12 +64,35 @@ def target_price(
     return price if price > 0 else ZERO
 
 
+DEFAULT_LONG_TARGET_PCT = Decimal("0.25")
+
+
+def long_target_price(position: Position, pct: Decimal | None = None) -> Decimal:
+    """A long leg has no credit to capture; it aims for a profit on the debit
+    paid. The default is a quarter: sell at 1.25 times what was paid."""
+    pct = position.target_pct if pct is None and position.target_pct is not None else pct
+    pct = DEFAULT_LONG_TARGET_PCT if pct is None else pct
+    return q2(position.open_price * (1 + pct))
+
+
 def target(
     position: Position, carry: Decimal = ZERO, pct: Decimal | None = None
 ) -> Target:
     """Full target figures for an open position."""
-    pct = _resolve_pct(position, pct)
     net = q2(open_cash(position) + carry)
+    if position.direction is Direction.LONG:
+        pct = _resolve_long_pct(position, pct)
+        price = long_target_price(position, pct)
+        expected_closing = close_cash_at(position, price)
+        return Target(
+            price=price,
+            expected_closing=expected_closing,
+            expected_pl=q2(open_cash(position) + expected_closing + carry),
+            net_credit=net,
+            pct=pct,
+            applicable=True,
+        )
+    pct = _resolve_pct(position, pct)
     price = target_price(position, carry, pct)
     expected_closing = close_cash_at(position, price)
     expected_pl = q2(open_cash(position) + expected_closing + carry)
@@ -81,6 +105,14 @@ def target(
         # A net debit chain has no credit to capture a fraction of.
         applicable=net > 0,
     )
+
+
+def _resolve_long_pct(position: Position, pct: Decimal | None) -> Decimal:
+    if pct is not None:
+        return pct
+    if position.target_pct is not None:
+        return position.target_pct
+    return DEFAULT_LONG_TARGET_PCT
 
 
 def _resolve_pct(position: Position, pct: Decimal | None) -> Decimal:

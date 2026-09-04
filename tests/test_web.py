@@ -433,21 +433,24 @@ class TestAuditAndUndo(WebTestCase):
 
 
 class TestPositionPage(WebTestCase):
-    def test_every_action_form_is_in_the_page_with_the_chosen_one_shown(self):
+    def test_every_action_form_opens_in_the_chain_table_with_the_chosen_one_shown(self):
         self.add_position(underlying="tabs")
         p = [q for q in self.positions() if q.underlying == "TABS"][0]
         page = self.get(f"/position/{p.id}?do=assign")
-        self.assertIn('data-tabs-for="actions"', page)
+        self.assertIn('class="action-row"', page)                 # under the row, as on the list
         self.assertIn('data-form="assign">', page)
         for key in ("close", "roll", "expire", "split"):
             with self.subTest(form=key):
                 self.assertIn(f'data-form="{key}" hidden', page)
         self.assertIn('data-form-tab="assign" class="tab-assign here"', page)
         self.assertEqual(page.count(f'action="/position/{p.id}/assign"'), 1)
-        # Every panel can be dismissed by its x or its Cancel, and each
-        # confirm wears its colour.
-        self.assertEqual(page.count("data-form-close"), 10)
         self.assertEqual(page.count('class="btn cancel"'), 5)
+        # The page serves the same partials the list does, so the script can
+        # open and switch forms in place.
+        frag = self.get(f"/position/{p.id}?&act={p.id}&do=close&partial=action")
+        self.assertTrue(frag.startswith(f'<tr id="row-{p.id}"'))
+        self.assertEqual(frag.count('class="action-row"'), 1)
+        self.assertIn(f'name="next" value="/position/{p.id}?"', frag)
         for cls in ("btn-close", "btn-roll", "btn-expire", "btn-assign", "btn-split"):
             with self.subTest(button=cls):
                 self.assertIn(f'class="{cls}"', page)
@@ -456,8 +459,8 @@ class TestPositionPage(WebTestCase):
         self.add_position(underlying="dec")
         position = [p for p in self.positions() if p.underlying == "DEC"][0]
         body = self.get(f"/position/{position.id}")
-        for label in ("Break-even", "50% target price", "Capital at risk",
-                      "Net chain credit", "Chain carry"):
+        for label in ("Break-even", "50% target", "Capital at risk",
+                      "Chain so far", "If all close at target"):
             with self.subTest(label=label):
                 self.assertIn(label, body)
 
@@ -487,7 +490,7 @@ class TestPositionPage(WebTestCase):
         successor = [p for p in self.positions()
                      if p.underlying == "CHN" and p.is_open][0]
         body = self.get(f"/position/{successor.id}")
-        self.assertIn("Chain - 2 leg(s)", body)
+        self.assertIn("Chain legs - 2", body)
 
 
 class TestPassword(unittest.TestCase):
@@ -540,7 +543,8 @@ class TestInlineActions(WebTestCase):
         position = self._fresh("lnk")
         body = self.get("/")
         self.assertIn(f"act={position.id}&do=close", body)
-        self.assertNotIn("&do=roll", body)           # one button per row, not five
+        visible = re.sub(r"<template.*?</template>", "", body, flags=re.S)
+        self.assertNotIn("&do=roll", visible)        # one button per row, not five
         opened = self.get(f"/?show=open&act={position.id}&do=close")
         for action in ("close", "roll", "expire", "assign", "split"):
             with self.subTest(action=action):
@@ -595,9 +599,10 @@ class TestInlineActions(WebTestCase):
         self.assertIn(">ASG</b>", assign)
         self.assertIn(">BUY</b>", assign)                   # the share leg
         self.assertIn('<span class="fixed">1000</span>', assign)
-        # All five forms in the row share the grid, so switching is not jarring.
+        # All five forms in the row share the grid, so switching is not jarring
+        # (the sixth grid on the page is the inline New form).
         for body in (close, expire, assign):
-            self.assertEqual(body.count('class="leg-grid"'), 5)
+            self.assertEqual(body.count('class="leg-grid"'), 6)
         self.assertIn(">SPLIT</b>", close)
         self.assertIn('aria-label="Contracts to peel off"', close)
 
@@ -674,10 +679,10 @@ class TestChainView(WebTestCase):
         # From the assigned half, the whole chain is visible: the split
         # record, both halves, and what became of the other one.
         body = self.get(f"/position/{four.id}")
-        self.assertIn("Chain - 4 leg(s)", body)
+        self.assertIn("Chain legs - 4", body)
         self.assertIn("split into 4 + 6", body)
         self.assertIn('class="badge st-split"', body)
-        self.assertIn("All legs realized", body)
+        self.assertIn("all legs", body)
         self.assertIn("2026-04-17", body)          # the other half's roll
         # Same columns as the positions page: one renderer.
         self.assertIn("<abbr>B/E</abbr>", body)
@@ -690,7 +695,7 @@ class TestChainView(WebTestCase):
         self.add_position(underlying="pln")
         position = [p for p in self.positions() if p.underlying == "PLN"][0]
         body = self.get(f"/position/{position.id}")
-        self.assertIn("Chain - 1 leg(s)", body)
+        self.assertIn("Chain legs - 1", body)
         self.assertNotIn("All legs realized", body)
 
     def test_days_show_while_open(self):
@@ -699,7 +704,7 @@ class TestChainView(WebTestCase):
                           expiry=(date.today() + timedelta(days=30)).isoformat())
         position = [p for p in self.positions() if p.underlying == "DYS"][0]
         body = self.get(f"/position/{position.id}")
-        self.assertIn("<span>Days</span><b>12</b>", body)
+        self.assertIn("12 days", body)
 
 
 class TestPositionsPageLayout(WebTestCase):
@@ -778,7 +783,8 @@ class TestPositionsOrderingAndAnchors(WebTestCase):
         self.post(f"/position/{late.id}/close",
                   {"closed_on": "2026-03-01", "close_price": "1.00"})
         body = self.get("/?show=closed")
-        self.assertLess(body.index("LAT"), body.index("ERL"))
+        table = body[body.index('<table class="positions'):]   # not the ticker datalist
+        self.assertLess(table.index("LAT"), table.index("ERL"))
 
     def test_closed_legs_are_not_called_branches(self):
         position = self._fresh("nob")
@@ -841,6 +847,28 @@ class TestChainExpansion(WebTestCase):
         self.assertIn(f'href="/?show=open&act={six.id}&do=close#row-{four.id}"', page)
         # The open action's own link closes just the form.
         self.assertIn(f'href="/?show=open&chain={four.id}#row-{six.id}"', page)
+
+    def test_closing_a_leg_inside_an_open_chain_keeps_the_rest_listed(self):
+        self.add_position(underlying="keep")
+        parent = [p for p in self.positions() if p.underlying == "KEEP"][0]
+        self.post(f"/position/{parent.id}/split", {"quantity": "4", "on": "2026-02-01"})
+        four, six = sorted([p for p in self.positions() if p.underlying == "KEEP" and p.is_open],
+                           key=lambda p: p.quantity)
+        # Close the four while its chain is expanded; the page returns with
+        # that chain still in the URL.
+        self.post(f"/position/{four.id}/close",
+                  {"closed_on": "2026-02-06", "close_price": "1.00",
+                   "next": f"/?show=open&chain={four.id}"})
+        page = self.get(f"/?show=open&chain={four.id}")
+        self.assertIn(f'id="row-{six.id}"', page)                 # the open half is still there
+        self.assertIn('class="chain-head"', page)                 # drawn as the chain, anchored on it
+        self.assertIn(f'id="row-{four.id}"', page)                # the closed half shown inside it
+        # And once no family member is listed at all, nothing is held back.
+        self.post(f"/position/{six.id}/close",
+                  {"closed_on": "2026-02-06", "close_price": "1.00"})
+        page = self.get(f"/?show=open&chain={four.id}")
+        self.assertNotIn("KEEP", page[page.index('<table class="positions'):])
+        self.assertNotIn('class="chain-head"', page)
 
     def test_open_sibling_inside_an_expansion_keeps_its_actions(self):
         self.add_position(underlying="sac")
@@ -966,10 +994,11 @@ class TestPartialAndProjection(WebTestCase):
         return [p for p in self.positions()
                 if p.underlying == ticker.upper() and p.is_open][0]
 
-    def test_partial_returns_only_the_table(self):
+    def test_partial_returns_the_table_and_its_strip_only(self):
         self._fresh("prt")
         body = self.get("/?show=open&partial=table")
-        self.assertTrue(body.startswith('<table class="positions"'), body[:60])
+        self.assertTrue(body.startswith('<div class="totals">'), body[:60])
+        self.assertIn('<table class="positions"', body)
         self.assertNotIn("<!doctype html>", body)
         self.assertNotIn("<header>", body)
         self.assertIn("PRT", body)
@@ -1002,6 +1031,35 @@ class TestPartialAndProjection(WebTestCase):
         self.assertNotIn("mouseover", js)         # and nothing is fetched speculatively
         self.assertNotIn("prefetchAll", js)
 
+    def test_table_partial_carries_the_strip_that_describes_it(self):
+        self.add_position(underlying="tps")
+        frag = self.get("/?show=open&ticker=TPS&partial=table")
+        self.assertTrue(frag.startswith('<div class="totals">'), frag[:60])
+        self.assertIn("1 position(s)", frag)
+        self.assertIn('<div class="filterbar">', frag)                 # the bar travels too
+        self.assertIn("Ticker: TPS", frag)
+        self.assertIn('<table class="positions">', frag)
+        js = self.get("/static/app.js")
+        self.assertIn("applyFilters", js)
+        self.assertIn("'change'", js)             # a dropdown applies itself
+
+    def test_every_open_row_ships_its_forms_hidden(self):
+        self.add_position(underlying="shp")
+        p = [q for q in self.positions() if q.underlying == "SHP"][0]
+        page = self.get("/?show=open")
+        self.assertIn(f'<template class="acts" data-for="{p.id}">', page)
+        tpl = page[page.index(f'data-for="{p.id}"'):]
+        tpl = tpl[:tpl.index("</template>")]
+        self.assertIn('class="action-row"', tpl)
+        self.assertIn('data-form="roll" hidden', tpl)
+        # Once a form is open the real row replaces the template for that leg.
+        opened = self.get(f"/?show=open&act={p.id}&do=close")
+        self.assertNotIn(f'<template class="acts" data-for="{p.id}">', opened)
+        js = self.get("/static/app.js")
+        self.assertIn("template.acts", js)
+        # The position page ships them too.
+        self.assertIn(f'<template class="acts" data-for="{p.id}">', self.get(f"/position/{p.id}"))
+
     def test_block_partial_is_just_the_chain_rows(self):
         self.add_position(underlying="blk")
         parent = [p for p in self.positions() if p.underlying == "BLK"][0]
@@ -1012,7 +1070,8 @@ class TestPartialAndProjection(WebTestCase):
         block = self.get(f"/?show=open&chain={four.id}&partial=block")
         self.assertNotIn("<table", block)
         self.assertIn('class="chain-head"', block)
-        self.assertEqual(block.count("<tr"), 4)                # head + three legs
+        rows_only = re.sub(r"<template.*?</template>", "", block, flags=re.S)
+        self.assertEqual(rows_only.count("<tr"), 4)            # head + three legs
         self.assertNotIn("OTH", block)
 
     def test_action_partial_is_the_row_and_its_form(self):
@@ -1174,7 +1233,7 @@ class TestShares(WebTestCase):
         self.assertIn("NFL @ 35.00", body)
 
     def test_dashboard_shows_true_total(self):
-        body = self.get("/")
+        body = self.get("/reports")
         for label in ("Realized options", "Realized shares", "True total"):
             with self.subTest(label=label):
                 self.assertIn(label, body)
@@ -1272,6 +1331,22 @@ class TestTransport(WebTestCase):
             _ORIGINAL_LOG_MESSAGE(handler, '"%s" %s %s', "GET / HTTP/1.1", "200", "-")
         self.assertIn("Bad request version", out.getvalue())
         self.assertIn("-> 200", out.getvalue())
+
+    def test_padding_before_a_request_line_is_ignored(self):
+        # Twelve NUL bytes ahead of GET, as seen through a forwarded port.
+        import socket
+        host, port = self.base.replace("http://", "").split(":")
+        with socket.create_connection((host, int(port)), timeout=5) as sock:
+            sock.sendall(b"\x00" * 12 + b"GET /?show=open HTTP/1.1\r\nHost: x\r\n"
+                         b"Connection: close\r\n\r\n")
+            data = b""
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        self.assertTrue(data.startswith(b"HTTP/1.1 200"), data[:60])
+        self.assertIn(b"Positions", data)
 
     def test_refusals_also_carry_a_length(self):
         status, _, body = self.post("/shares/sell", {"underlying": "none", "on": "2026-01-05",
@@ -1388,8 +1463,13 @@ class TestReportingAndViews(WebTestCase):
         self.assertIn(f'id="row-{beta.id}"', calls)
         self.assertNotIn(f'id="row-{acme.id}"', calls)
         self.assertIn('class="filters"', page)
-        self.assertIn("Save this view as", page)              # only once a filter is active
-        self.assertNotIn("Save this view as", self.get("/?show=open"))
+        self.assertIn("Save view as", page)
+        self.assertIn('name="filter" value="show=open&amp;q=fbe"', page)
+        self.assertIn('<div class="chips active">', page)             # active filters, own line
+        self.assertIn('<div class="chips views">', page)              # views, own line
+        self.assertNotIn('<div class="chips active">', self.get("/?show=open"))
+        self.assertIn('<details class="more">', page)                   # advanced folded
+        self.assertIn('<details class="more" open>', self.get("/?show=open&right=CALL"))
 
     def test_notes_and_tags_edit_and_filter(self):
         p = self._open("tag")
@@ -1415,7 +1495,7 @@ class TestReportingAndViews(WebTestCase):
                                         {"name": "Open puts", "filter": "show=open&right=PUT"})
         self.assertEqual(status, 303)
         page = self.get("/?show=open")
-        self.assertIn('<a href="/?show=open&amp;right=PUT">Open puts</a>', page)
+        self.assertIn('<a class="flt" href="/?show=open&amp;right=PUT">Open puts</a>', page)
         conn = store.open_db(self.db_path)
         try:
             view_id = store.load_views(conn)[0]["id"]
@@ -1446,6 +1526,145 @@ class TestReportingAndViews(WebTestCase):
             blob = res.read()
         self.assertTrue(blob.startswith(b"SQLite format 3"))
         self.assertEqual(self.get("/export/nothing.csv", expect=404)[:9], "<!doctype")
+
+
+class TestPositionsPagePolish(WebTestCase):
+    def test_new_position_form_is_inline_and_the_nav_tab_is_gone(self):
+        page = self.get("/?show=open")
+        self.assertIn('data-form-tab="new" data-tabs-for="new-box"', page)
+        self.assertLess(page.index('data-form-tab="new"'), page.index('class="totals"'))  # up top
+        self.assertIn('<div class="titlebar"><h1>Positions</h1>', page)
+        self.assertIn('data-form="new" hidden', page)
+        self.assertIn('action="/new"', page)
+        self.assertNotIn('<a href="/new">New</a>', page)
+
+    def test_a_past_position_can_be_entered_already_closed(self):
+        status, location, _ = self.add_position(
+            underlying="past", opened_on="2026-01-05", outcome="CLOSED",
+            closed_on="2026-02-06", close_price="1.00", close_fee="6.50", next="/?show=closed")
+        self.assertEqual(status, 303)
+        self.assertIn("/?show=closed", location)
+        form = self.get("/new")
+        self.assertIn('class="when-over"', form)
+        self.assertRegex(form, r'id="f_close_fee"\s+value="0.65"')             # prefilled
+        p = [q for q in self.positions() if q.underlying == "PAST"][0]
+        self.assertFalse(p.is_open)
+        self.assertEqual(str(p.close_price), "1.00")
+        # And already expired, or already assigned (which books the shares).
+        self.add_position(underlying="pex", outcome="EXPIRED", closed_on="2026-03-20")
+        self.assertEqual([q.status.value for q in self.positions() if q.underlying == "PEX"], ["EXPIRED"])
+        self.add_position(underlying="pas", outcome="ASSIGNED", closed_on="2026-03-20")
+        self.assertIn("1000 held", self.get("/shares").replace("&middot;", "·").replace("  ", " ")
+                      if "1000 held" in self.get("/shares") else "1000 held")
+        status, _, body = self.add_position(underlying="bad", outcome="CLOSED",
+                                            closed_on="2025-12-01", close_price="1")
+        self.assertEqual(status, 400)
+        self.assertIn("before the position was opened", body)
+
+    def test_period_shortcuts_filter_by_the_date_that_matters(self):
+        self.add_position(underlying="old", opened_on="2026-01-05")
+        self.add_position(underlying="rec", opened_on=date.today().isoformat(),
+                          expiry=(date.today() + timedelta(days=30)).isoformat())
+        page = self.get("/?show=open&period=3m")
+        table = page[page.index('<table class="positions'):]
+        self.assertIn("REC", table)
+        self.assertNotIn(">OLD<", table)
+        # Period and status are segmented controls; the chosen one is marked.
+        self.assertIn('href="/?show=open&amp;period=3m" class="flt here">3m</a>', page)
+        self.assertIn('class="flt here">Open</a>', page)
+        # A segment keeps the other filters when it switches.
+        self.assertIn('href="/?show=closed&amp;period=3m" class="flt">Closed</a>', page)
+        # What is active shows as a chip that can be removed.
+        self.assertIn('Period: Last 3 months<a class="flt x" href="/?show=open"', page)
+        self.assertIn("Clear all", page)
+        self.assertIn('<option value="OLD">OLD</option>', page)          # ticker dropdown
+        only = self.get("/?show=open&ticker=OLD")
+        self.assertNotIn(">REC<", only[only.index('<table class="positions'):])
+
+    def test_totals_describe_the_filtered_table(self):
+        self.add_position(underlying="tta", quantity="10", strike="35")
+        self.add_position(underlying="ttb", quantity="2", strike="20", right="CALL")
+        page = self.get("/?show=open&q=ttb")
+        self.assertIn("1 position(s)", page)
+        self.assertIn("0 put(s) &middot; 1 call(s) &middot; 2 contract(s)", page)
+        self.assertIn("Net credit", page)
+        self.assertIn("no cash committed", page)        # a naked call has no capital at risk
+        self.assertIn("% expected return", self.get("/?show=open&q=tta"))
+        self.assertIn("Next expiry", page)
+        self.assertNotIn("Realized options", page)     # portfolio-wide lives in Reports
+        self.assertIn('class="good"', page)             # net credit is positive: green card
+
+    def test_position_page_chain_rows_carry_the_button(self):
+        self.add_position(underlying="pcb")
+        p = [q for q in self.positions() if q.underlying == "PCB"][0]
+        self.post(f"/position/{p.id}/roll", {"on": "2026-02-06", "close_price": "4.00",
+                                              "new_expiry": "2026-03-20", "new_strike": "34",
+                                              "new_price": "5.00"})
+        head = [q for q in self.positions() if q.underlying == "PCB" and q.is_open][0]
+        page = self.get(f"/position/{head.id}")
+        self.assertIn(f'href="/position/{head.id}?&act={head.id}&do=close#row-{head.id}"', page)
+        # Two strips at the top: the chain's story, then this leg's.
+        self.assertLess(page.index("<h2>Chain</h2>"), page.index("<h2>This position</h2>"))
+        self.assertLess(page.index("<h2>This position</h2>"), page.index('<table class="positions'))
+        self.assertEqual(page.count("Chain so far"), 1)
+        self.assertIn("Break-even", page)
+        self.assertIn("1 roll(s)", page)
+        self.assertIn("less fee", page)                     # how the credit was made
+        self.assertIn("Days to expiry", page)
+        self.assertIn('<table class="positions chain" data-fixed>', page)
+        self.assertNotIn("Hide the chain", page)
+
+    def test_reports_page_folds_its_sections(self):
+        page = self.get("/reports")
+        self.assertIn('<details class="report" open><summary>Realized by period</summary>', page)
+        self.assertIn("<summary>Export</summary>", page)
+
+
+class TestCampaignStrip(WebTestCase):
+    def test_a_split_family_shows_the_campaign_then_the_branch(self):
+        self.add_position(underlying="cmp")
+        parent = [p for p in self.positions() if p.underlying == "CMP"][0]
+        self.post(f"/position/{parent.id}/split", {"quantity": "4", "on": "2026-02-01"})
+        four, six = sorted([p for p in self.positions() if p.underlying == "CMP" and p.is_open],
+                           key=lambda p: p.quantity)
+        self.post(f"/position/{four.id}/assign", {"on": "2026-03-20", "close_fee": "0", "share_fee": "0"})
+        self.post(f"/position/{six.id}/roll", {"on": "2026-03-20", "close_price": "4.00",
+                                                "new_expiry": "2026-04-17", "new_strike": "34",
+                                                "new_price": "5.00", "close_fee": "0", "new_fee": "0"})
+        head = [p for p in self.positions() if p.underlying == "CMP" and p.is_open][0]
+        page = self.get(f"/position/{head.id}")
+        self.assertLess(page.index("<h2>Campaign</h2>"), page.index("<h2>This branch</h2>"))
+        self.assertLess(page.index("<h2>This branch</h2>"), page.index("<h2>This position</h2>"))
+        self.assertIn("Campaign so far", page)
+        self.assertIn("10 &rarr; 6", page)                      # contracts
+        self.assertIn("400 shares", page)                        # assigned
+        self.assertIn("1 roll(s) &middot; 1 split(s)", page)
+        self.assertIn("buy-backs would cost", page)
+        # A plain chain has no campaign section: chain and branch are the same.
+        self.add_position(underlying="pln")
+        plain = [p for p in self.positions() if p.underlying == "PLN"][0]
+        plain_page = self.get(f"/position/{plain.id}")
+        self.assertIn("<h2>Chain</h2>", plain_page)
+        self.assertNotIn("<h2>Campaign</h2>", plain_page)
+        self.assertIn("Chain so far", plain_page)               # same cards, one lineage
+        self.assertIn("buy-backs would cost", plain_page)
+        self.assertIn("Break-even", plain_page)
+
+
+class TestLongTargets(WebTestCase):
+    def test_a_long_leg_targets_a_quarter_profit_on_its_debit(self):
+        # Bought a put for 1.12, fee 0.65: debit 112.65. Target 1.40, less the
+        # 0.65 closing fee the entry assumes -> +26.70.
+        self.add_position(underlying="lng2", direction="LONG", quantity="1",
+                          open_price="1.12", open_fee="0.65", strike="100")
+        p = [q for q in self.positions() if q.underlying == "LNG2"][0]
+        page = self.get(f"/position/{p.id}")
+        self.assertIn("25% target", page)
+        self.assertIn(">1.40<", page)
+        self.assertIn("expected 26.70", page)
+        strip = self.get("/?show=open&ticker=LNG2")
+        self.assertIn("profit target on the debit paid", strip)
+        self.assertNotIn("chain is net debit", strip)
 
 
 class TestShareRepairs(WebTestCase):

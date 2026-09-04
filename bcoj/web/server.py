@@ -214,6 +214,19 @@ class Handler(BaseHTTPRequestHandler):
     # Every response sets Content-Length, which keep-alive requires.
     protocol_version = "HTTP/1.1"
 
+    def parse_request(self):
+        # A kept-alive connection through a port forwarder has been seen to
+        # deliver a run of NUL bytes ahead of the next request line. The
+        # request behind them is fine; drop the padding rather than answer
+        # 501 to a method called "\x00\x00GET".
+        stripped = self.raw_requestline.lstrip(b"\x00\r\n")
+        if stripped != self.raw_requestline:
+            self.raw_requestline = stripped
+            if not stripped:
+                self.close_connection = True
+                return False
+        return super().parse_request()
+
     server_version = "bcoj"
     sys_version = ""
     app: App = None  # set by serve()

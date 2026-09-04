@@ -21,6 +21,7 @@ from ..domain.enums import Direction, Right, Status
 from ..domain.money import ZERO, fmt, parse_money, price, q2
 from ..domain.types import Position
 from ..engine import actions, decide, reports, validate, wheels
+from ..engine.campaign import campaign
 from ..engine.chains import ChainIndex
 from ..engine.shares import InsufficientSharesError, match as match_lots
 from ..engine.pnl import close_cash, open_cash, realized_pl
@@ -128,7 +129,8 @@ POSITION_COLUMNS = ["", "Contract", "DTE", "Status", ("Open", "Open price / shar
 def _position_row(p, index, *, here: str = "/", act_id: str = "", which: str = "",
                   chain_id: str = "", expanded: bool = False, in_chain: bool = False,
                   current: bool = False, siblings: int = 0, rail=None,
-                  with_actions: bool = True, collapse_to: str = "") -> str:
+                  with_actions: bool = True, collapse_to: str = "",
+                  pill_href: str = "", pill_attrs: str = "") -> str:
     """One position as a table row. The single renderer for positions.
 
     Used for the positions list, for the legs revealed when a chain is
@@ -177,10 +179,10 @@ def _position_row(p, index, *, here: str = "/", act_id: str = "", which: str = "
         # One small button per row. It opens the Close form; the form's own
         # tabs switch to any other action. Clicking it again closes the form.
         is_open = bool(p.id == act_id and which)
-        href = (f"{here}{chain_q}{anchor}" if is_open
-                else f"{here}{chain_q}&act={pid}&do=close{anchor}")
+        href = pill_href or (f"{here}{chain_q}{anchor}" if is_open
+                             else f"{here}{chain_q}&act={pid}&do=close{anchor}")
         actions_html = (f'<a class="act act-close{" here" if is_open else ""}" href="{href}"'
-                        ' title="Close, roll, expire, assign or split">Close</a>')
+                        f'{pill_attrs} title="Close, roll, expire, assign or split">Close</a>')
 
     if in_chain and not (current and expanded):
         legs_html = ""      # the chain is what is being shown
@@ -254,7 +256,7 @@ def _position_row(p, index, *, here: str = "/", act_id: str = "", which: str = "
     )
 
 
-def _chain_head_row(index, legs, clicked, here) -> str:
+def _chain_head_row(index, legs, clicked, here, hide: bool = True) -> str:
     """A header for an expanded chain: what it is, its total, and Hide.
 
     Marks where the block starts, so its rows are not mistaken for the
@@ -267,9 +269,17 @@ def _chain_head_row(index, legs, clicked, here) -> str:
         f'<tr class="chain-head"><td colspan="{len(POSITION_COLUMNS)}">'
         f"<span>Chain &middot; {len(legs)} leg(s) &middot; "
         f"realized {r.money(realized)} &middot; {chain.days} days</span>"
-        f'<a class="legs here" href="{here}#row-{pid}" title="Hide the chain">&#9650;</a>'
-        f"</td></tr>"
+        + (f'<a class="legs here" href="{here}#row-{pid}" title="Hide the chain">&#9650;</a>'
+           if hide else "")
+        + "</td></tr>"
     )
+
+
+def _action_template(p, index, token, here) -> str:
+    """A row's forms, shipped hidden with the row. A round trip through a
+    forwarded port is a third of a second; opening a form should be none."""
+    return (f'<template class="acts" data-for="{r.esc(p.id)}">'
+            + _action_row(p, index, "close", token, here) + "</template>")
 
 
 def _action_row(p, index, which, token, here) -> str:
@@ -302,7 +312,7 @@ def positions_page(conn, query, token: str = "") -> tuple[int, str]:
         listed = [p for p in positions if not p.is_open and not p.is_superseded]
     else:
         listed = open_ones
-    listed = _apply_filters(listed, query)
+    listed = _apply_filters(listed, query, show)
 
     act_id = (query.get("act") or [""])[0]
     which = (query.get("do") or [""])[0]
@@ -312,14 +322,13 @@ def positions_page(conn, query, token: str = "") -> tuple[int, str]:
     filter_qs = _filter_qs(query)
     here = f"/?show={show}" + (f"&{filter_qs}" if filter_qs else "")
 
-    if show == "closed":
-        listed = sorted(listed, key=lambda p: (p.closed_on or p.expiry, p.underlying),
-                        reverse=True)
-    elif show == "all":
-        listed = sorted(listed, key=lambda p: (p.opened_on, p.underlying),
-                        reverse=True)
-    else:
+    # Expiry orders every view: soonest first while open, latest first once
+    # over (ties by close date, so the most recent activity leads).
+    if show == "open":
         listed = sorted(listed, key=lambda p: (p.expiry, p.underlying, -p.quantity))
+    else:
+        listed = sorted(listed, key=lambda p: (p.expiry, p.closed_on or p.opened_on, p.underlying),
+                        reverse=True)
 
     # Open positions sharing a root belong to one chain; mark them.
     roots = {p.id: index.root(p).id for p in open_ones}
@@ -335,6 +344,16 @@ def positions_page(conn, query, token: str = "") -> tuple[int, str]:
     expanded_legs = ([leg for leg, _ in index.family(expanded_target)]
                      if expanded_target else [])
     expanded_ids = {leg.id for leg in expanded_legs}
+    # The block is drawn where the clicked leg sits in the list. If that leg
+    # is no longer listed -- it was just closed while its chain was open --
+    # anchor on the first family member that is, or expand nothing: the
+    # family's rows must never be held back and then not drawn.
+    anchor_id = chain_id
+    if chain_id and chain_id not in {p.id for p in listed}:
+        anchor = next((p for p in listed if p.id in expanded_ids), None)
+        anchor_id = anchor.id if anchor else ""
+        if anchor is None:
+            expanded_legs, expanded_ids = [], set()
 
     queue = validate.expiring(open_ones)
     banner = ""
@@ -353,10 +372,10 @@ def positions_page(conn, query, token: str = "") -> tuple[int, str]:
     block = (0, 0)
     act_row_at = action_at = None
     for p in listed:
-        if p.id in expanded_ids and p.id != chain_id:
+        if p.id in expanded_ids and p.id != anchor_id:
             continue  # rendered as part of the expanded chain
 
-        if p.id == chain_id:
+        if p.id == anchor_id and expanded_legs:
             start = len(rows)
             rows.append(_chain_head_row(index, expanded_legs, p, here + act_q))
             for leg in expanded_legs:
@@ -370,6 +389,8 @@ def positions_page(conn, query, token: str = "") -> tuple[int, str]:
                 if leg.id == act_id and which and leg.is_open:
                     action_at = len(rows)
                     rows.append(_action_row(leg, index, which, token, here + chain_q))
+                elif leg.is_open:
+                    rows.append(_action_template(leg, index, token, here + chain_q))
             block = (start, len(rows))
             continue
 
@@ -384,6 +405,8 @@ def positions_page(conn, query, token: str = "") -> tuple[int, str]:
         if p.id == act_id and which and p.is_open:
             action_at = len(rows)
             rows.append(_action_row(p, index, which, token, here + chain_q))
+        elif p.is_open:
+            rows.append(_action_template(p, index, token, here + chain_q))
 
     partial = (query.get("partial") or [""])[0]
     if partial == "block":
@@ -393,26 +416,92 @@ def positions_page(conn, query, token: str = "") -> tuple[int, str]:
             return 200, ""
         return 200, rows[act_row_at] + rows[action_at]
 
-    totals = _portfolio_totals(conn, positions, index)
-    tabs = " ".join(
-        f'<a href="/?show={k}" class="{"here" if show == k else ""}">{label}</a>'
-        for k, label in (("open", "Open"), ("closed", "Closed"), ("all", "All"))
-    )
+    totals = _table_totals(listed, index)
 
     table_html = r.table(POSITION_COLUMNS, rows, cls="positions")
+    filter_bar = _filter_bar(conn, query, show, token, positions)
     if partial == "table":
-        # Just the table, for the script that swaps it in place.
-        return 200, table_html
+        # The table, the strip that describes it and the filter bar that
+        # produced it, for the script that swaps them in place.
+        return 200, totals + filter_bar + table_html
 
-    body = f"""{banner}
+    new_panel = (f'<div id="new-box" class="form-box"><div data-form="new" hidden>'
+                 f'<a class="close-form" href="{here}" data-form-close title="Close this form" '
+                 'aria-label="Close this form">&times;</a>'
+                 + _new_form_body(conn, token, {}, (), back=here) + "</div></div>")
+    new_button = ('<a class="btn new" href="/new" data-form-tab="new" data-tabs-for="new-box">'
+                  "+ New position</a>")
+    body = f"""{new_panel}{banner}
 {totals}
-<div class="tabs">{tabs}</div>
-{_filter_bar(conn, query, show, token)}
+{filter_bar}
 {table_html}
 <p class="hint">Credit is what came in on opening. Carry is what the chain
 brought forward. They are different scopes and are never added together.
 Click a row or its leg count to show the whole chain in place; again to hide.</p>"""
-    return 200, r.page("Positions", body, nav_here="positions")
+    return 200, r.page("Positions", body, nav_here="positions", toolbar=new_button)
+
+
+def _cards(cells, cls: str = "totals") -> str:
+    """Summary cards. Each cell is (label, html, sign) and the sign, when
+    given, tints the card so the strip reads at a glance."""
+    out = []
+    for label, html, sign in cells:
+        tone = ""
+        if sign is not None and sign != 0:
+            tone = ' class="good"' if sign > 0 else ' class="bad"'
+        out.append(f"<div{tone}><span>{r.esc(label)}</span><b>{html}</b></div>")
+    return f'<div class="{cls}">' + "".join(out) + "</div>"
+
+
+def _table_totals(listed, index) -> str:
+    """What is in the table, and only that: filtering changes these figures.
+
+    Built for a glance: the headline on each card is the figure that decides
+    something, the small line under it says what it is made of.
+    """
+    def sub(text) -> str:
+        return f"<small>{text}</small>"
+
+    open_ones = [p for p in listed if p.is_open]
+    closed = [p for p in listed if not p.is_open]
+    premium = q2(sum((open_cash(p) for p in open_ones), ZERO))
+    carry = q2(sum((index.carry(p) for p in open_ones), ZERO))
+    net = q2(premium + carry)
+    at_risk = q2(sum((capital_at_risk(p) or ZERO for p in open_ones), ZERO))
+    expected = q2(sum((target(p, index.carry(p)).expected_pl for p in open_ones), ZERO))
+    realized = q2(sum((realized_pl(p) for p in closed), ZERO))
+
+    puts = sum(1 for p in open_ones if p.right is Right.PUT)
+    calls = len(open_ones) - puts
+    contracts = sum(p.quantity for p in open_ones)
+    what = (f"{puts} put(s) &middot; {calls} call(s) &middot; {contracts} contract(s)"
+            if open_ones else f"{len(closed)} closed leg(s)")
+    cells = [("In this table", f"{len(listed)} position(s)" + sub(what), None)]
+
+    if open_ones:
+        cells.append(("Net credit", r.money(net)
+                      + sub(f"premium {fmt(premium)} &middot; carry {fmt(carry)}"), net))
+        if net > 0:
+            capture = f"{q2(expected / net * 100)}% of net credit"
+        elif expected > 0:
+            capture = "profit target on the debit paid"
+        else:
+            capture = "chain is net debit"
+        cells.append(("Expected at target", r.money(expected) + sub(capture), expected))
+        ret = (f"{q2(expected / at_risk * 100)}% expected return" if at_risk > 0
+               else "no cash committed")
+        cells.append(("Capital at risk", r.money(at_risk) + sub(ret), None))
+        soon = min(open_ones, key=lambda p: p.expiry)
+        dte = (soon.expiry - date.today()).days
+        within = sum(1 for p in open_ones if (p.expiry - date.today()).days <= 30)
+        tone = -1 if dte <= 7 else None
+        cells.append(("Next expiry", r.esc(soon.expiry)
+                      + sub(f"{dte}d &middot; {within} within 30 days"), tone))
+    if closed:
+        per_leg = q2(realized / len(closed))
+        cells.append(("Realized by these legs", r.money(realized)
+                      + sub(f"{len(closed)} leg(s) &middot; {fmt(per_leg)} per leg"), realized))
+    return _cards(cells)
 
 
 def _portfolio_totals(conn, positions, index) -> str:
@@ -440,19 +529,16 @@ def _portfolio_totals(conn, positions, index) -> str:
         total_cell += (f' <a href="/shares" class="neg" title="{r.esc(", ".join(blocked))}'
                        ' cannot be matched">&#9888;</a>')
     cells = [
-        ("Realized options", r.money(realized)),
-        ("Realized shares", r.money(shares_pl)),
-        ("True total", total_cell),
-        ("Open premium", r.money(premium)),
-        ("Expected at target", r.money(expected)),
-        ("Chain carry", r.money(carry)),
-        ("Capital at risk", r.money(at_risk)),
-        ("Open positions", r.esc(len(open_ones))),
+        ("Realized options", r.money(realized), realized),
+        ("Realized shares", r.money(shares_pl), shares_pl),
+        ("True total", total_cell, realized + shares_pl),
+        ("Open premium", r.money(premium), premium),
+        ("Expected at target", r.money(expected), expected),
+        ("Chain carry", r.money(carry), carry),
+        ("Capital at risk", r.money(at_risk), None),
+        ("Open positions", r.esc(len(open_ones)), None),
     ]
-    return '<div class="totals">' + "".join(
-        f'<div><span>{r.esc(label)}</span><b>{value}</b></div>'
-        for label, value in cells
-    ) + "</div>"
+    return _cards(cells)
 
 
 # ---------------------------------------------------------------------------
@@ -460,7 +546,17 @@ def _portfolio_totals(conn, positions, index) -> str:
 
 
 def new_position_form(conn, token, form=None, problems=()) -> tuple[int, str]:
-    form = form or {}
+    body = _new_form_body(conn, token, form or {}, problems, back="/new")
+    body += f"""<p class="hint">STO sells to open (short), BTO buys to open (long). Fee is
+auto-filled at {fmt(_fee_rate(conn))} per contract and editable. Shortcuts: <kbd>+7</kbd>,
+<kbd>+14</kbd>, <kbd>+30</kbd> in the expiry box jump that many days out.
+Submitting leaves you on a fresh form.</p>"""
+    return 200, r.page("New position", body, nav_here="positions")
+
+
+def _new_form_body(conn, token, form, problems, back: str) -> str:
+    """The entry form: one leg row, and a second row for a position that is
+    already over -- a past trade being caught up on."""
     rate = _fee_rate(conn)
     tickers = store.recent_underlyings(conn)
 
@@ -495,28 +591,42 @@ def new_position_form(conn, token, form=None, problems=()) -> tuple[int, str]:
         _box("open_price", _one(form, "open_price"), label="Premium / share"),
         _box("open_fee", _one(form, "open_fee", default_fee), label="Fee", required=False),
     ]
+    outcome = _one(form, "outcome", "OPEN")
+    outcome_select = (
+        '<select name="outcome" id="f_outcome" aria-label="Outcome" title="Outcome">'
+        + "".join(f'<option value="{v}"{" selected" if v == outcome else ""}>{t}</option>'
+                  for v, t in (("OPEN", "Open"), ("CLOSED", "Closed"), ("EXPIRED", "Expired"),
+                               ("ASSIGNED", "Assigned")))
+        + "</select>")
     grid = _leg_grid([leg], attrs=f' data-fee-rate="{r.esc(rate)}"')
-    rest = '<div class="grid">' + "".join([
+    # One compact row: when it opened, and -- for a trade being caught up on
+    # -- how it ended. The closing fields show only once an outcome is picked.
+    over = '<div class="grid compact">' + "".join([
         r.field("Opened", "opened_on", _one(form, "opened_on", r.today_iso()),
                 kind="date", required=True),
-        r.field("Notes", "notes", _one(form, "notes"),
-                hint="Why this trade, in your words"),
-        r.field("Tags", "tags", _one(form, "tags"), attrs=' list="all-tags" autocomplete="off"',
-                hint="Comma separated"),
+        r.select("Outcome", "outcome", [("OPEN", "Still open"), ("CLOSED", "Closed"),
+                                        ("EXPIRED", "Expired"), ("ASSIGNED", "Assigned")], outcome),
+        '<span class="when-over">'
+        + r.field("Closed on", "closed_on", _one(form, "closed_on"), kind="date")
+        + r.field("Close price", "close_price", _one(form, "close_price"), kind="number", step="0.01")
+        + r.field("Close fee", "close_fee", _one(form, "close_fee", default_fee), kind="number",
+                  step="0.01")
+        + "</span>",
+    ]) + "</div>"
+    rest = over + '<div class="grid compact">' + "".join([
+        r.field("Notes", "notes", _one(form, "notes"), attrs=' placeholder="why this trade"'),
+        r.field("Tags", "tags", _one(form, "tags"), attrs=' list="all-tags" autocomplete="off"'
+                                                        ' placeholder="wheel, earnings"'),
         r.select("Cover with lot", "share_lot_id",
                  [("", "- not covered -")] + [
                      (l.id, _lot_label(l)) for l in sorted(
                          store.load_lots(conn), key=lambda l: (l.underlying, l.acquired_on))
-                 ], _one(form, "share_lot_id"),
-                 hint="For a short call written against shares you hold"),
+                 ], _one(form, "share_lot_id")),
     ]) + "</div>"
-    body = f"""{r.problems_block(problems)}
-{r.datalist("tickers", tickers)}{r.datalist("all-tags", store.all_tags(conn))}
-{r.form("/new", grid + rest, token, submit="Add position", cls="two-part")}
-<p class="hint">STO sells to open (short), BTO buys to open (long). Fee is
-auto-filled at {fmt(rate)} per contract and editable. Shortcuts: <kbd>+7</kbd>,
-<kbd>+14</kbd>, <kbd>+30</kbd> in the expiry box jump that many days out.
-Submitting leaves you on a fresh form.</p>"""
+    return (r.problems_block(problems)
+            + r.datalist("tickers", tickers) + r.datalist("all-tags", store.all_tags(conn))
+            + r.form("/new", r.hidden("next", back) + grid + rest, token,
+                     submit="Add position", cls="two-part", submit_cls="btn-open"))
     return 200, r.page("New position", body, nav_here="new")
 
 
@@ -560,14 +670,32 @@ def create_position(conn, form, token) -> None:
     if validate.errors(problems):
         raise Invalid(problems, form)
 
+    outcome = _one(form, "outcome", "OPEN").upper()
+    ended = None
+    if outcome != "OPEN":
+        on = _past(_date(form, "closed_on", label="Closed on"), "Closed on")
+        if on < position.opened_on:
+            raise BadRequest("Closed on cannot be before the position was opened")
+        fee = _decimal(form, "close_fee", ZERO)
+        if outcome == "CLOSED":
+            ended = actions.close(position, on, _decimal(form, "close_price", label="Close price"), fee)
+        elif outcome == "EXPIRED":
+            ended = actions.expire(position, on, close_fee=fee)
+        elif outcome == "ASSIGNED":
+            ended = actions.assign(position, on=on, close_fee=fee)
+        else:
+            raise BadRequest("Outcome must be open, closed, expired or assigned")
+
     store.apply(conn, actions.ActionResult(created=[position]), "entered by hand")
+    if ended is not None:
+        store.apply(conn, ended, "entered by hand, already over")
     warned = validate.warnings(problems)
     note = f"Added {position.underlying} {fmt(position.strike)}" \
-           f"{position.right.value[0]}"
+           f"{position.right.value[0]}" + (f", {outcome.lower()}" if ended else "")
     if warned:
         note = "!" + note + f" - {len(warned)} warning(s): " + \
                "; ".join(p.message for p in warned)
-    raise Redirect("/new", note)
+    raise Redirect(_next(form, "/new"), note)
 
 
 class Invalid(Exception):
@@ -593,52 +721,39 @@ def position_page(conn, position_id, token, query) -> tuple[int, str]:
     carry = index.carry(position)
     here = f"/position/{r.esc(position.id)}"
 
-    facts = [
-        ("Status", r.esc(position.status.value.title())),
-        ("Opened", r.esc(position.opened_on)),
-        ("Expiry", r.esc(position.expiry)),
-        ("Credit received", r.money(open_cash(position))),
-        ("Chain carry", r.money(carry, dash="0.00")),
-        ("Capital at risk", r.money(capital_at_risk(position))),
-    ]
-    if position.is_open:
-        tgt = target(position, carry)
-        be = break_even(chain)
-        facts += [
-            ("Net chain credit", r.money(chain.net_credit)),
-            ("Break-even", r.money(be.price if be else None)),
-            ("50% target price", r.money(tgt.price if tgt.applicable else None)),
-            ("Expected at target", r.money(tgt.expected_pl)),
-        ]
-        recover = credit_to_recover(chain)
-        if recover > 0:
-            facts.append(("Credit needed to recover", r.money(recover)))
-    else:
-        facts.append(("Realized", r.money(realized_pl(position))))
-
     lots = store.load_lots(conn)
-    lot_by_id = {l.id: l for l in lots}
-    if position.right is Right.CALL and position.direction is Direction.SHORT:
-        covering = lot_by_id.get(position.share_lot_id) if position.share_lot_id else None
-        if covering:
-            facts.append(("Covered by", f'<a href="/shares/{r.esc(covering.underlying)}">'
-                                        f"{r.esc(_lot_label(covering))}</a>"))
-        else:
-            facts.append(("Covered by", '<span class="neg">nothing - naked</span>'))
-    created = [l for l in lots if l.assigning_position_id == position.id
-               and position.right is Right.PUT]
-    if created:
-        facts.append(("Shares acquired", f'<a href="/shares/{r.esc(created[0].underlying)}">'
-                                         f"{r.esc(_lot_label(created[0]))}</a>"))
+    fam = campaign(index, position)
+    if fam.splits:
+        # Several branches grew from one trade: the campaign is all of them,
+        # this branch is the lineage that leads here.
+        strips = ("<h2>Campaign</h2>" + _cards(_campaign_cards(fam, "Campaign"), "totals wide")
+                  + "<h2>This branch</h2>"
+                  + _cards(_chain_cards(index, position, chain), "totals wide"))
+    else:
+        # One lineage: the campaign cards tell its story, plus the two figures
+        # that only exist for a single line -- break-even and what it still
+        # owes.
+        cards = _campaign_cards(fam, "Chain")
+        extra = [c for c in _chain_cards(index, position, chain)
+                 if c[0] in ("Break-even", "Credit to recover")]
+        cards[2:2] = extra
+        strips = "<h2>Chain</h2>" + _cards(cards, "totals wide")
+    strips += ("<h2>This position</h2>"
+               + _cards(_position_cards(position, chain, carry, lots), "totals wide"))
 
-    fact_rows = "".join(
-        f"<div><span>{r.esc(k)}</span><b>{v}</b></div>" for k, v in facts
-    )
+    # Actions open in the chain table below, exactly as on the positions
+    # page. ``?do=X`` alone means this position; ``act`` may name another leg.
+    which = (query.get("do") or [""])[0]
+    act_id = (query.get("act") or [position.id if which else ""])[0]
+    chain_html = _chain_block(index, position, chain, act_id, which, token)
+    partial = (query.get("partial") or [""])[0]
+    if partial in ("table", "block"):
+        return 200, chain_html
+    if partial == "action":
+        return 200, _chain_action_partial(index, position, act_id, which, token)
 
+    actions_block = ""
     if position.is_open:
-        which = (query.get("do") or [""])[0]
-        actions_block = ("<h2>Actions</h2>"
-                         + _action_panels(position, which, token, carry, here))
         if position.right is Right.CALL and position.direction is Direction.SHORT:
             candidates = [l for l in lots if l.underlying == position.underlying]
             if candidates:
@@ -648,9 +763,6 @@ def position_page(conn, position_id, token, query) -> tuple[int, str]:
                     r.hidden("next", here) + r.select("Shares this call is written against",
                                                       "lot_id", options, position.share_lot_id or ""),
                     token, submit="Save", cls="grid"))
-    else:
-        actions_block = '<p class="dim">This position is closed. Nothing to do.</p>'
-
     notes = ("<h2>Notes</h2>" + r.form(
         f"/position/{r.esc(position.id)}/notes",
         r.hidden("next", here)
@@ -661,56 +773,183 @@ def position_page(conn, position_id, token, query) -> tuple[int, str]:
         + r.datalist("all-tags", store.all_tags(conn)),
         token, submit="Save notes", cls="grid"))
 
-    body = f"""<div class="totals wide">{fact_rows}</div>
+    body = f"""{strips}
+{chain_html}
 {actions_block}
-{_chain_block(index, position, chain)}
 {notes}
 <p class="hint"><a href="/audit?entity={r.esc(position.id)}">History for this
 position</a></p>"""
     return 200, r.page(r.contract_text(position), body, nav_here="positions")
 
 
-def _chain_block(index, position, chain) -> str:
+def _chain_rows(index, position, act_id: str, which: str, token: str):
+    """The chain's rows, with the open form under its leg. ``here`` ends in
+    "?" so the shared row code can append "&act=..." as it does on the list;
+    the page then serves the same partials the list does."""
+    here = f"/position/{r.esc(position.id)}?"
+    legs = [leg for leg, _ in index.family(position)]
+    rows = [_chain_head_row(index, legs, position, here, hide=False)]
+    act_row_at = action_at = None
+    for leg in legs:
+        if leg.id == act_id:
+            act_row_at = len(rows)
+        rows.append(_position_row(leg, index, here=here, act_id=act_id, which=which,
+                                  in_chain=True, current=(leg.id == position.id)))
+        if leg.id == act_id and which and leg.is_open:
+            action_at = len(rows)
+            rows.append(_action_row(leg, index, which, token, here))
+        elif leg.is_open:
+            rows.append(_action_template(leg, index, token, here))
+    return legs, rows, act_row_at, action_at
+
+
+def _chain_action_partial(index, position, act_id, which, token) -> str:
+    _, rows, act_row_at, action_at = _chain_rows(index, position, act_id, which, token)
+    if act_row_at is None or action_at is None:
+        return ""
+    return rows[act_row_at] + rows[action_at]
+
+
+def _chain_block(index, position, chain, act_id: str = "", which: str = "", token: str = "") -> str:
     """Every leg of this position's chain, as the same rows the list uses.
 
     A lineage shows one path; this shows the whole chain including the other
     half of any split and what became of it, in order, with this position
-    marked. Same columns, same figures, as the positions page.
+    marked. Same columns, same figures, same buttons, same forms, as the
+    positions page.
     """
-    legs = [leg for leg, _ in index.family(position)]
+    legs, rows, _, _ = _chain_rows(index, position, act_id, which, token)
     has_split = any(leg.is_superseded for leg in legs)
-    rows = [
-        _position_row(leg, index, in_chain=True,
-                      current=(leg.id == position.id), with_actions=False)
-        for leg in legs
-    ]
-
-    totals = [("This chain realized", r.money(chain.realized)),
-              ("Days", r.num(chain.days))]
-    if len(legs) > 1:
-        root = legs[0]
-        drift = q2(position.strike - root.strike)
-        totals.append(("Strike", f"{r.esc(price(root.strike))} &rarr; "
-                                 f"{r.esc(price(position.strike))}"
-                                 + (f' <small>{"down" if drift < 0 else "up"} '
-                                    f"{r.esc(price(abs(drift)))}</small>" if drift else "")))
-        grew = position.quantity - root.quantity
-        totals.append(("Size", f"{root.quantity} &rarr; {position.quantity}"
-                               + (f' <small class="neg">x{position.quantity / root.quantity:.1f}</small>'
-                                  if grew > 0 else "")))
     explain = ""
     if has_split:
-        everything = q2(sum((realized_pl(leg) for leg in legs), ZERO))
-        totals.insert(1, ("All legs realized", r.money(everything)))
         explain = ('<p class="hint">A split position stays as the record of the '
                    'split and realizes nothing itself; its credit is carried by '
                    'the halves, which follow it here.</p>')
 
-    return f"""<h2>Chain - {len(legs)} leg(s)</h2>
-{r.table(POSITION_COLUMNS, rows, cls="positions chain")}
-<div class="totals">{"".join(
-    f"<div><span>{r.esc(k)}</span><b>{v}</b></div>" for k, v in totals)}</div>
+    return f"""<h2>Chain legs - {len(legs)}</h2>
+{r.table(POSITION_COLUMNS, rows, cls="positions chain").replace('<table class="positions chain">', '<table class="positions chain" data-fixed>', 1)}
 {explain}"""
+
+
+def _sub(text) -> str:
+    return f"<small>{text}</small>"
+
+
+def _chain_cards(index, position, chain) -> list:
+    """What the whole chain has done, wherever this leg sits in it."""
+    legs = [leg for leg, _ in index.family(position)]
+    root = legs[0]
+    head = chain.head
+    cells = []
+    detail = f"{len(legs)} leg(s) &middot; {chain.days} days"
+    if any(leg.is_superseded for leg in legs):
+        everything = q2(sum((realized_pl(leg) for leg in legs), ZERO))
+        detail += f" &middot; all legs {fmt(everything)}"
+    cells.append(("Chain realized", r.money(chain.realized) + _sub(detail), chain.realized))
+
+    if head.is_open:
+        cells.append(("Net chain credit", r.money(chain.net_credit)
+                      + _sub(f"premium {fmt(open_cash(head))} &middot; carry {fmt(chain.carry)}"),
+                      chain.net_credit))
+        be = break_even(chain)
+        if be:
+            cells.append(("Break-even", r.money(be.price)
+                          + _sub(f"strike {fmt(be.strike)} less {fmt(be.per_share)} per share"),
+                          None))
+        recover = credit_to_recover(chain)
+        if recover > 0:
+            cells.append(("Credit to recover", r.money(recover)
+                          + _sub("before the chain nets positive"), -1))
+    if len(legs) > 1:
+        drift = q2(head.strike - root.strike)
+        cells.append(("Strike", f"{r.esc(price(root.strike))} &rarr; {r.esc(price(head.strike))}"
+                      + (_sub(f'{"down" if drift < 0 else "up"} {price(abs(drift))}') if drift
+                         else _sub("unchanged")), None))
+        grew = head.quantity - root.quantity
+        cells.append(("Size", f"{root.quantity} &rarr; {head.quantity}"
+                      + (_sub(f"x{head.quantity / root.quantity:.1f}") if grew > 0
+                         else _sub("contracts")), -1 if grew > 0 else None))
+    return cells
+
+
+def _campaign_cards(fam, word: str = "Campaign") -> list:
+    """Everything that grew from one opening trade, summed once."""
+    cells = [(f"{word} so far", r.money(fam.net_so_far)
+              + _sub(f"realized {fmt(fam.realized)} &middot; premium in hand "
+                     f"{fmt(fam.open_premium)}"), fam.net_so_far)]
+    if fam.is_open:
+        cells.append(("If all close at target", r.money(fam.expected_at_target)
+                      + _sub(f"buy-backs would cost {fmt(fam.cost_to_close_at_target)}"),
+                      fam.expected_at_target))
+        grew = fam.contracts_now - fam.contracts_start
+        growth = (f" &middot; x{fam.contracts_now / fam.contracts_start:.1f}" if grew > 0 else "")
+        cells.append(("Contracts", f"{fam.contracts_start} &rarr; {fam.contracts_now}"
+                      + _sub(f"{len(fam.open_legs)} open leg(s){growth}"), -1 if grew > 0 else None))
+        cells.append(("Capital at risk", r.money(fam.at_risk_now)
+                      + _sub(f"was {fmt(fam.at_risk_start)} at the start"),
+                      -1 if fam.at_risk_now > fam.at_risk_start else None))
+        strikes = " / ".join(price(s) for s in fam.strikes_now)
+        cells.append(("Strikes", f"{r.esc(price(fam.root.strike))} &rarr; {r.esc(strikes)}"
+                      + _sub("start &rarr; open now"), None))
+    if fam.assigned_legs:
+        cells.append(("Assigned", f"{fam.assigned_shares} shares"
+                      + _sub(f"{fam.assigned_legs} leg(s) &middot; {fmt(fam.assigned_cash)} at strike"),
+                      None))
+    cells.append(("Span", f"{fam.days} days"
+                  + _sub(f"since {fam.started} &middot; {len(fam.legs)} legs &middot; "
+                         f"{fam.rolls} roll(s) &middot; {fam.splits} split(s)"), None))
+    return cells
+
+
+def _position_cards(position, chain, carry, lots) -> list:
+    """This leg alone: its terms, its cash, and where it stands."""
+    cells = [("Status", r.status_badge(position.status)
+              + _sub(f"opened {position.opened_on} &middot; expiry {position.expiry}"), None)]
+    if position.is_open:
+        dte = (position.expiry - date.today()).days
+        cells.append(("Days to expiry", f"{dte}d" + _sub(f"expires {position.expiry}"),
+                      -1 if dte <= 7 else None))
+    cells.append(("Credit received", r.money(open_cash(position))
+                  + _sub(f"{position.quantity} x {price(position.open_price)} x "
+                         f"{position.multiplier} less fee {fmt(position.open_fee)}"),
+                  open_cash(position)))
+    risk = capital_at_risk(position)
+    if position.direction is Direction.LONG:
+        why = "the debit paid"
+    elif position.right is Right.PUT:
+        why = f"{position.shares} shares at {fmt(position.strike)}"
+    else:
+        why = "shares behind the call" if risk is not None else "naked: no ceiling"
+    cells.append(("Capital at risk", r.money(risk) + _sub(why), None))
+
+    if position.is_open:
+        tgt = target(position, carry)
+        label = f"{int(tgt.pct * 100)}% target"
+        why = ("profit on the debit paid" if position.direction is Direction.LONG
+               else "of the chain's net credit")
+        cells.append((label, (r.esc(price(tgt.price)) if tgt.applicable
+                              else '<span class="dim">none: net debit</span>')
+                      + _sub(f"expected {fmt(tgt.expected_pl)} &middot; {why}"), tgt.expected_pl))
+    else:
+        cells.append(("Realized", r.money(realized_pl(position))
+                      + _sub(f"closed {position.closed_on} at "
+                             f"{price(position.close_price) if position.close_price is not None else '-'}"),
+                      realized_pl(position)))
+
+    lot_by_id = {l.id: l for l in lots}
+    if position.right is Right.CALL and position.direction is Direction.SHORT:
+        covering = lot_by_id.get(position.share_lot_id) if position.share_lot_id else None
+        if covering:
+            cells.append(("Covered by", f'<a href="/shares/{r.esc(covering.underlying)}">'
+                                        f"{r.esc(_lot_label(covering))}</a>", None))
+        else:
+            cells.append(("Covered by", '<span class="neg">nothing - naked</span>', -1))
+    created = [l for l in lots if l.assigning_position_id == position.id
+               and position.right is Right.PUT]
+    if created:
+        cells.append(("Shares acquired", f'<a href="/shares/{r.esc(created[0].underlying)}">'
+                                         f"{r.esc(_lot_label(created[0]))}</a>", None))
+    return cells
 
 
 def _action_form(position, which: str, token: str, carry, back: str,
@@ -1091,7 +1330,17 @@ that way.</p>"""
 # ---------------------------------------------------------------------------
 # filtering and saved views
 
-FILTER_KEYS = ("q", "right", "side", "tag", "since", "until")
+FILTER_KEYS = ("ticker", "q", "right", "side", "tag", "since", "until", "period")
+PERIODS = (("3m", "Last 3 months", 91), ("6m", "Last 6 months", 182),
+           ("ytd", "This year", None), ("1y", "Last 12 months", 365))
+
+
+def _period_cutoff(code: str) -> date | None:
+    today = date.today()
+    for key, _, days in PERIODS:
+        if key == code:
+            return date(today.year, 1, 1) if days is None else today - timedelta(days=days)
+    return None
 
 
 def _filter_qs(query) -> str:
@@ -1100,8 +1349,10 @@ def _filter_qs(query) -> str:
     return urllib.parse.urlencode([(k, v) for k, v in parts if v])
 
 
-def _apply_filters(listed, query):
+def _apply_filters(listed, query, show: str = "open"):
+    cutoff = _period_cutoff((query.get("period") or [""])[0].strip())
     q = (query.get("q") or [""])[0].strip().casefold()
+    ticker = (query.get("ticker") or [""])[0].strip().upper()
     right = (query.get("right") or [""])[0].strip().upper()
     side = (query.get("side") or [""])[0].strip().upper()
     tag = (query.get("tag") or [""])[0].strip().casefold()
@@ -1109,6 +1360,8 @@ def _apply_filters(listed, query):
     until = (query.get("until") or [""])[0].strip()
     out = []
     for p in listed:
+        if ticker and p.underlying != ticker:
+            continue
         if q and q not in p.underlying.casefold() and q not in p.notes.casefold() \
                 and not any(q in t.casefold() for t in p.tags):
             continue
@@ -1122,45 +1375,107 @@ def _apply_filters(listed, query):
             continue
         if until and p.opened_on.isoformat() > until:
             continue
+        if cutoff:
+            # The date that matters is the one the list is about: when a
+            # closed leg closed, when an open one was opened; either for all.
+            when = (p.closed_on or p.opened_on) if show != "open" else p.opened_on
+            if when < cutoff:
+                continue
         out.append(p)
     return out
 
 
-def _filter_bar(conn, query, show: str, token: str) -> str:
-    get = lambda k: (query.get(k) or [""])[0]  # noqa: E731
+ADVANCED = ("right", "side", "tag", "since", "until")
+LABELS = {"ticker": "Ticker", "q": "Find", "right": "Right", "side": "Side", "tag": "Tag",
+          "since": "Opened from", "until": "Opened to", "period": "Period"}
+
+
+def _with(query, show: str, **changes) -> str:
+    """The list URL with the current filters, some of them changed. An empty
+    value drops that filter."""
+    params = [("show", show)]
+    for k in FILTER_KEYS:
+        v = changes[k] if k in changes else (query.get(k) or [""])[0].strip()
+        if v:
+            params.append((k, v))
+    return r.esc("/?" + urllib.parse.urlencode(params))
+
+
+def _filter_bar(conn, query, show: str, token: str, positions=()) -> str:
+    """Status and period as segmented controls, ticker and search beside
+    them, the rest behind More. Every control applies itself; what is active
+    shows as chips that can be removed one at a time."""
+    get = lambda k: (query.get(k) or [""])[0].strip()  # noqa: E731
     tags = store.all_tags(conn)
-    tag_options = [("", "any tag")] + [(t, t) for t in tags]
-    fields = "".join([
-        r.hidden("show", show),
-        r.field("Find", "q", get("q"), attrs=' placeholder="ticker, note or tag"'),
+    tickers = store.recent_underlyings(conn, limit=500)      # most recently traded first
+
+    def seg(items, key, current) -> str:
+        links = []
+        for value, label in items:
+            cls = ' class="flt here"' if value == current else ' class="flt"'
+            href = _with(query, value, **{}) if key == "show" else _with(query, show, **{key: value})
+            links.append(f'<a href="{href}"{cls}>{label}</a>')
+        return '<nav class="seg">' + "".join(links) + "</nav>"
+
+    status = seg((("open", "Open"), ("closed", "Closed"), ("all", "All")), "show", show)
+    period = seg((("", "All time"),) + tuple((c, l.replace("Last ", "").replace(" months", "m")
+                                                 .replace("This year", "YTD").replace("12 m", "12m"))
+                                              for c, l, _ in PERIODS), "period", get("period"))
+
+    advanced_on = any(get(k) for k in ADVANCED)
+    more = "".join([
         r.select("Right", "right", [("", "any"), ("PUT", "Put"), ("CALL", "Call")], get("right")),
         r.select("Side", "side", [("", "any"), ("SHORT", "Short"), ("LONG", "Long")], get("side")),
-        r.select("Tag", "tag", tag_options, get("tag")) if tags else "",
+        r.select("Tag", "tag", [("", "any")] + [(t, t) for t in tags], get("tag")) if tags else "",
         r.field("Opened from", "since", get("since"), kind="date"),
         r.field("to", "until", get("until"), kind="date"),
+        '<div class="actions"><button type="submit">Apply</button></div>',
     ])
-    active = _filter_qs(query)
-    clear = f' <a class="btn cancel" href="/?show={show}">Clear</a>' if active else ""
-    bar = (f'<form class="filters" method="get" action="/">{fields}'
-           f'<div class="actions"><button type="submit">Filter</button>{clear}</div></form>')
-
+    form = (f'<form class="filters" method="get" action="/">'
+            + r.hidden("show", show) + r.hidden("period", get("period"))
+            + r.select("Ticker", "ticker", [("", "any")] + [(t, t) for t in tickers], get("ticker"))
+            + r.field("Find", "q", get("q"), attrs=' placeholder="note or tag" autocomplete="off"')
+            + f'<details class="more"{" open" if advanced_on else ""}><summary>More</summary>'
+            f'<div class="more-fields">{more}</div></details>'
+            + "</form>")
     chips = []
+    for k in FILTER_KEYS:
+        v = get(k)
+        if not v:
+            continue
+        shown = v
+        if k == "period":
+            shown = next((l for c, l, _ in PERIODS if c == v), v)
+        chips.append(f'<span class="chip on">{r.esc(LABELS[k])}: {r.esc(shown)}'
+                     f'<a class="flt x" href="{_with(query, show, **{k: ""})}" '
+                     f'title="Remove this filter">&times;</a></span>')
+    active = _filter_qs(query)
+    if chips:
+        chips.append(f'<a class="flt clear" href="/?show={show}">Clear all</a>')
+    active_line = f'<div class="chips active">{"".join(chips)}</div>' if chips else ""
+
+    # Saved views are their own line: named, one click each, and a folded
+    # control to keep the current filter under a name.
+    current = f"show={show}" + (f"&{active}" if active else "")
+    views = []
     for v in store.load_views(conn):
-        current = " here" if v["filter"] == f"show={show}" + (f"&{active}" if active else "") else ""
-        chips.append(
-            f'<span class="chip{current}"><a href="/?{r.esc(v["filter"])}">{r.esc(v["name"])}</a>'
+        here_cls = " here" if v["filter"] == current else ""
+        views.append(
+            f'<span class="chip view{here_cls}"><a class="flt" href="/?{r.esc(v["filter"])}">'
+            f'{r.esc(v["name"])}</a>'
             + r.form(f"/views/{r.esc(v['id'])}/delete", r.hidden("next", f"/?show={show}"),
                      token, submit="\u00d7", cls="inline") + "</span>")
-    save = ""
-    if active:
-        save = r.form("/views/save",
-                      r.hidden("next", f"/?show={show}&{active}")
-                      + r.hidden("filter", f"show={show}&{active}")
-                      + r.field("Save this view as", "name", "", required=True,
-                                attrs=' placeholder="a name"'),
-                      token, submit="Save view", cls="inline save-view")
-    views = (f'<div class="chips">{"".join(chips)}{save}</div>' if chips or save else "")
-    return bar + views
+    save = ('<details class="save"><summary title="Keep the current filter under a name">'
+            "Save view as&hellip;</summary>"
+            + r.form("/views/save",
+                     r.hidden("next", f"/?{current}") + r.hidden("filter", current)
+                     + r.field("Name", "name", "", required=True, attrs=' placeholder="a name"'),
+                     token, submit="Save", cls="inline save-view")
+            + "</details>")
+    views_line = (f'<div class="chips views"><span class="dim lbl">Views</span>'
+                  f'{"".join(views)}{save}</div>')
+    return (f'<div class="filterbar"><div class="fbar">{status}{period}{form}</div>'
+            f"{active_line}{views_line}</div>")
 
 
 def do_save_view(conn, form) -> None:
@@ -1218,9 +1533,16 @@ def reports_page(conn, query) -> tuple[int, str]:
     tabs = " ".join(
         f'<a href="/reports?by={g}" class="{"here" if by == g else ""}">{g.title()}</a>'
         for g in reports.GRANULARITIES)
+    all_periods = list(reversed(reports.by_period(positions, events, by)))
+    show_all = (query.get("all") or [""])[0] == "1"
+    shown = all_periods if show_all or len(all_periods) <= 12 else all_periods[:12]
     period_rows = [[r.esc(row.key), r.money(row.options), r.money(row.shares),
                     f"<b>{r.money(row.total)}</b>", r.esc(row.legs), r.money(row.running)]
-                   for row in reversed(reports.by_period(positions, events, by))]
+                   for row in shown]
+    more = ""
+    if len(shown) < len(all_periods):
+        more = (f'<p class="hint"><a href="/reports?by={by}&all=1">Show all '
+                f"{len(all_periods)} periods</a></p>")
 
     ticker_rows = [[f'<a href="/shares/{r.esc(t.underlying)}">{r.esc(t.underlying)}</a>',
                     r.money(t.options), r.money(t.shares), f"<b>{r.money(t.total)}</b>",
@@ -1251,30 +1573,35 @@ def reports_page(conn, query) -> tuple[int, str]:
 
     body = f"""{_portfolio_totals(conn, positions, index)}
 {counts}
-<h2>Realized by period</h2>
+<details class="report" open><summary>Realized by period</summary>
 <div class="tabs">{tabs}</div>
 {r.table(["Period", "Options", "Shares", "Total", "Legs closed", "Running total"], period_rows)}
+{more}
 <p class="hint">Options are booked on the leg's close date, shares on the sale's
 date. Legs still open are not here, at any value.</p>
-<h2>By ticker</h2>
+</details>
+<details class="report"><summary>By ticker</summary>
 {r.table(["Ticker", "Options", "Shares", "Total", "Open premium", "At risk", "Open", "Legs closed"],
          ticker_rows)}
-<h2>How short legs ended</h2>
-<h3>By ticker</h3>
+</details>
+<details class="report"><summary>How short legs ended, by ticker</summary>
 {r.table(outcome_head, outcome_rows(by_ticker_outcomes))}
-<h3>By days to expiry when opened</h3>
-{r.table(outcome_head, outcome_rows(by_dte_outcomes))}
 <p class="hint">Hit means the leg ended at or past its target: closed at or
 under the target price, or expired worthless. A roll or an assignment is
 neither a hit nor a miss on its own; what the chain finally does is.</p>
-<h2>Export</h2>
+</details>
+<details class="report"><summary>How short legs ended, by days to expiry when opened</summary>
+{r.table(outcome_head, outcome_rows(by_dte_outcomes))}
+</details>
+<details class="report"><summary>Export</summary>
 <p><a href="/export/positions.csv">positions.csv</a> &middot;
 <a href="/export/shares.csv">shares.csv</a> &middot;
 <a href="/export/journal.json">journal.json</a> &middot;
 <a href="/export/journal.db">journal.db</a> (full SQLite backup)</p>
 <p class="hint">The CSV files carry the computed columns too: realized, carry,
 break-even, capital at risk. The .db file is the whole journal; copy it
-somewhere safe.</p>"""
+somewhere safe.</p>
+</details>"""
     return 200, r.page("Reports", body, nav_here="reports")
 
 

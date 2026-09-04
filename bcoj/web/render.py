@@ -30,7 +30,7 @@ def num(value, dash: str = "-") -> str:
     return esc(dash) if value is None else esc(value)
 
 
-def page(title: str, body: str, flash: str = "", nav_here: str = "") -> str:
+def page(title: str, body: str, flash: str = "", nav_here: str = "", toolbar: str = "") -> str:
     def tab(href: str, label: str, key: str) -> str:
         cls = ' class="here"' if key == nav_here else ""
         return f'<a href="{href}"{cls}>{esc(label)}</a>'
@@ -51,7 +51,6 @@ def page(title: str, body: str, flash: str = "", nav_here: str = "") -> str:
   <strong>{esc(APP_NAME)}</strong>
   <nav>
     {tab("/", "Positions", "positions")}
-    {tab("/new", "New", "new")}
     {tab("/shares", "Shares", "shares")}
     {tab("/expiring", "Expiring", "expiring")}
     {tab("/risk", "Risk", "risk")}
@@ -61,7 +60,7 @@ def page(title: str, body: str, flash: str = "", nav_here: str = "") -> str:
 </header>
 <main>
 {banner}
-<h1>{esc(title)}</h1>
+<div class="titlebar"><h1>{esc(title)}</h1>{toolbar}</div>
 {body}
 </main>
 <script src="/static/app.js?v={VERSION["app.js"]}"></script>

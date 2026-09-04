@@ -112,6 +112,23 @@ td:first-child a { text-decoration: none; }
 .totals b { font-variant-numeric: tabular-nums; font-size: 1.05rem; }
 .totals.wide > div { flex: 1 1 190px; }
 .totals small { display: block; font-size: .7rem; font-weight: 400; color: var(--dim); }
+.totals .pos { color: var(--pos); } .totals .neg { color: var(--neg); }
+.totals > div.good { background: var(--pos-tint); border-color: var(--pos); }
+.totals b small { font-weight: 400; margin-top: .15rem; }
+.totals > div.bad { background: var(--neg-tint); border-color: var(--neg); }
+.grow { flex: 1; }
+a.btn.new { padding: .45rem .9rem; font-size: inherit; font-weight: 600;
+  color: var(--accent); border-color: var(--accent); background: var(--panel); }
+a.btn.new:hover, a.btn.new.here { background: var(--accent); color: #fff; }
+table[data-fixed] tr[data-chain] { cursor: default; }
+table[data-fixed] tr.chain-head td { padding-top: .3rem; padding-bottom: .3rem; }
+.tabs.quick { margin: 0 0 .4rem; }
+.tabs.quick a { font-size: .8rem; padding: .15rem .6rem; }
+.act-open { color: var(--accent); background: var(--accent-tint); border-color: var(--accent); }
+button.btn-open { background: var(--accent); }
+details.report { margin: 1.2rem 0; }
+details.report summary { cursor: pointer; font-weight: 600; font-size: 1.15rem; margin: 0 0 .5rem; }
+details.report summary:hover { color: var(--accent); }
 .preview { grid-column: 1 / -1; }
 .preview .totals { margin: .4rem 0 0; }
 .preview .callout { margin: .5rem 0 0; }
@@ -199,14 +216,51 @@ a.act:hover, a.act.here { border-color: currentColor; }
 /* Tabs of equal width, confirm buttons of equal width, so switching forms
    moves nothing. */
 .tabs.even a { min-width: 5.4rem; text-align: center; }
-/* Filter bar, saved-view chips, tags. */
-form.filters { display: flex; flex-wrap: wrap; gap: .5rem; align-items: flex-end;
-  margin: 0 0 .6rem; }
-form.filters label { width: auto; }
+/* Filter bar: segments for the two filters used most, the rest folded. */
+.titlebar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.titlebar h1 { margin-right: auto; }
+.filterbar { margin: 0 0 .8rem; }
+.chips.active { margin: .5rem 0 0; }
+.chips.views { margin: .5rem 0 0; padding-top: .5rem; border-top: 1px dashed var(--line); }
+.chips .lbl { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em;
+  font-weight: 600; margin-right: .2rem; }
+.chip.view { background: var(--panel); }
+details.save { display: inline-block; }
+details.save > summary { cursor: pointer; list-style: none; font-size: .8rem; color: var(--accent);
+  padding: .1rem .4rem; }
+details.save > summary::-webkit-details-marker { display: none; }
+details.save[open] > summary { color: var(--dim); }
+details.save form.save-view { margin-left: .3rem; }
+.filterbar .fbar { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+  background: var(--panel); }
+.seg a { padding: .35rem .75rem; text-decoration: none; color: var(--dim); font-size: .85rem;
+  font-weight: 600; border-right: 1px solid var(--line); }
+.seg a:last-child { border-right: 0; }
+.seg a:hover { background: var(--bg); color: var(--ink); }
+.seg a.here { background: var(--accent); color: #fff; }
+form.filters { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin: 0; }
+form.filters label { width: auto; flex-direction: row; align-items: center; gap: .35rem; }
+form.filters label > span { font-size: .8rem; }
 form.filters input, form.filters select { padding: .3rem .45rem; }
-form.filters input[name=q] { width: 13rem; }
-form.filters .actions { grid-column: auto; }
+form.filters input[name=q] { width: 11rem; }
 form.filters button { padding: .35rem .9rem; }
+details.more { position: relative; }
+details.more > summary { cursor: pointer; list-style: none; padding: .35rem .75rem;
+  border: 1px solid var(--line); border-radius: 8px; font-size: .85rem; font-weight: 600;
+  color: var(--dim); background: var(--panel); }
+details.more > summary::-webkit-details-marker { display: none; }
+details.more[open] > summary { color: var(--ink); border-color: var(--accent); }
+details.more .more-fields { position: absolute; z-index: 5; top: 110%; left: 0;
+  display: flex; flex-wrap: wrap; gap: .6rem; align-items: flex-end; padding: .7rem .8rem;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 6px 18px rgba(0,0,0,.12); min-width: 34rem; }
+details.more .more-fields label { flex-direction: column; align-items: stretch; }
+details.more .more-fields .actions { grid-column: auto; }
+.chip.on { background: var(--accent-tint); border-color: var(--accent); }
+.chip a.x { padding: 0 .35rem; color: var(--dim); font-size: 1rem; line-height: 1; }
+.chip a.x:hover { color: var(--neg); }
+a.flt.clear { font-size: .8rem; color: var(--dim); }
 .chips { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin: 0 0 .8rem; }
 .chip { display: inline-flex; align-items: center; gap: .2rem; border: 1px solid var(--line);
   border-radius: 999px; padding: .05rem .2rem .05rem .6rem; font-size: .8rem; }
@@ -242,8 +296,15 @@ textarea:focus { outline: 2px solid var(--accent); }
 .tabs a.tab-assign.here, .tabs a.tab-assign.here:hover { background: var(--amber);  color: #fff; }
 .tabs a.tab-split.here,  .tabs a.tab-split.here:hover  { background: var(--dim);    color: #fff; }
 .form-box .actions button { min-width: 11rem; }
-.form-box > [data-form] { min-height: 17.5rem; }
-.form-box > [data-form] > form { min-height: 100%; }
+.form-box:not(#new-box) > [data-form] { min-height: 17.5rem; }
+.form-box:not(#new-box) > [data-form] > form { min-height: 100%; }
+/* Compact field rows on the entry form. */
+.grid.compact { display: flex; flex-wrap: wrap; gap: .5rem .7rem; align-items: flex-end;
+  padding: .5rem .6rem; }
+.grid.compact label { width: auto; min-width: 8rem; }
+.grid.compact input, .grid.compact select { padding: .3rem .45rem; }
+.grid.compact .when-over { display: contents; }
+.grid.compact .when-over.off { display: none; }
 .action-inline .tabs { margin: .2rem 0 .7rem; }
 
 /* Status pills. Open is the one that matters; everything else is history. */
@@ -317,9 +378,15 @@ tr[data-chain] a, tr[data-chain] button { cursor: pointer; }
 td.unit { font-variant-numeric: tabular-nums; }
 /* Hovering a contract underlines the whole thing, not just the ticker. */
 td a:hover .contract > :not(.qty) { text-decoration: underline; }
-tr.action-row > td { padding: 0; background: var(--bg); white-space: normal; }
+tr.action-row > td { padding: .5rem .7rem .8rem; background: var(--bg); white-space: normal; }
 tr.action-row:hover { background: var(--bg); }
-.action-inline { padding: .8rem .9rem 1rem; border-left: 3px solid var(--accent); }
+/* A form is a bubble: rounded, bordered, lifted off the table. */
+.action-inline, #new-box > [data-form] {
+  padding: .9rem 1rem 1rem; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--panel); box-shadow: 0 2px 10px rgba(0,0,0,.08);
+}
+#new-box > [data-form] { margin: 0 0 1rem; }
+.action-inline { border-left: 4px solid var(--accent); }
 .action-inline h3 { margin: 0 0 .6rem; font-size: .95rem; }
 .action-inline .callout, .action-inline p.hint { margin-top: 0; }
 
@@ -388,16 +455,25 @@ JS = """
   if (grid) {
     var rate = parseFloat(grid.getAttribute('data-fee-rate'));
     var qty = document.getElementById('f_quantity');
-    var fee = document.getElementById('f_open_fee');
-    if (qty && fee && !isNaN(rate)) {
-      var touched = false;
-      fee.addEventListener('input', function () { touched = true; });
-      qty.addEventListener('input', function () {
-        if (touched) return;
-        var n = Math.abs(parseInt(qty.value, 10));
-        if (n > 0) fee.value = (rate * n).toFixed(2);
+    [document.getElementById('f_open_fee'), document.getElementById('f_close_fee')]
+      .forEach(function (fee) {
+        if (!qty || !fee || isNaN(rate)) return;
+        var touched = false;
+        fee.addEventListener('input', function () { touched = true; });
+        qty.addEventListener('input', function () {
+          if (touched) return;
+          var n = Math.abs(parseInt(qty.value, 10));
+          if (n > 0) fee.value = (rate * n).toFixed(2);
+        });
       });
-    }
+  }
+
+  // The entry form's closing fields matter only for a trade already over.
+  var outcome = document.getElementById('f_outcome');
+  if (outcome) {
+    var over = outcome.closest('form').querySelector('.when-over');
+    var reflect = function () { if (over) over.classList.toggle('off', outcome.value === 'OPEN'); };
+    outcome.addEventListener('change', reflect); reflect();
   }
 
   // "+7" in a date box means seven days from today. Faster than a picker for
@@ -495,6 +571,23 @@ JS = """
         var fresh = holder.querySelector('table.positions');
         if (!fresh) { window.location.href = href; return; }
         if (!patchRows(cur, fresh)) cur.replaceWith(fresh);
+        // The strip and the filter bar describe the table: they travel with it.
+        var freshTotals = holder.querySelector('.totals');
+        var curTotals = document.querySelector('.totals');
+        if (freshTotals && curTotals) curTotals.replaceWith(freshTotals);
+        var freshBar = holder.querySelector('.filterbar');
+        var curBar = document.querySelector('.filterbar');
+        if (freshBar && curBar) {
+          var wasOpen = curBar.querySelector('details.more[open]');
+          var q = curBar.querySelector('#f_q');
+          var typing = q && document.activeElement === q ? [q.selectionStart, q.selectionEnd] : null;
+          if (wasOpen) { var m = freshBar.querySelector('details.more'); if (m) m.open = true; }
+          curBar.replaceWith(freshBar);
+          if (typing) {
+            var nq = freshBar.querySelector('#f_q');
+            if (nq) { nq.focus({ preventScroll: true }); nq.setSelectionRange(typing[0], typing[1]); }
+          }
+        }
         settle(href, push);
       }).catch(function () { window.location.href = href; });
     };
@@ -511,11 +604,36 @@ JS = """
       });
     };
 
+    // Show one of the forms a row shipped with, no request involved.
+    var showTab = function (row, key) {
+      row.querySelectorAll('a[data-form-tab]').forEach(function (t) {
+        t.classList.toggle('here', t.getAttribute('data-form-tab') === key);
+      });
+      row.querySelectorAll('.form-box > [data-form]').forEach(function (p) {
+        p.hidden = p.getAttribute('data-form') !== key;
+      });
+    };
+    var openLocal = function (href, target) {
+      var tpl = current().querySelector('template.acts[data-for="' + param(href, 'act') + '"]');
+      if (!tpl || !tpl.content || !tpl.content.firstElementChild) return false;
+      closeForms();
+      var row = tpl.content.firstElementChild.cloneNode(true);
+      target.after(row);
+      showTab(row, param(href, 'do') || 'close');
+      var pill = target.querySelector('a.act');
+      if (pill) {
+        pill.classList.add('here');
+        pill.setAttribute('href', href.replace(/&act=[^&#]*&do=[^&#]*/, ''));
+      }
+      return true;
+    };
+
     var openForm = function (href, push) {
       var target = document.getElementById('row-' + param(href, 'act'));
       if (!target) return full(href, push);
       var cur = current();
       if (!cache[here()]) remember(here(), cur.outerHTML);
+      if (openLocal(href, target)) { settle(href, push); return Promise.resolve(); }
       return get(href, 'action').then(function (html) {
         var rows = rowsOf(html);
         if (rows.length < 2) return full(href, push);
@@ -553,6 +671,8 @@ JS = """
       var chainOpen = !!tb.querySelector('tr.chain-head');
       var formOpen = !!tb.querySelector('tr.action-row');
       var wantsChain = param(href, 'chain') !== null;
+      // A position page shows one chain, always; only forms come and go.
+      if (current().hasAttribute('data-fixed')) chainOpen = wantsChain;
       var wantsForm = param(href, 'act') !== null && param(href, 'do') !== null;
       if (wantsChain === chainOpen) {
         if (wantsForm) return openForm(href, push);            // a form, chain as is
@@ -568,13 +688,17 @@ JS = """
         'table.positions a.legs, table.positions a.act, table.positions a.close-form, ' +
         'table.positions a.cancel');
       if (link) {
+        var path = link.getAttribute('href').split('?')[0];
+        if (path !== window.location.pathname) return;               // another page: go there
+        if (link.hasAttribute('data-form-tab')) return;               // handled as a tab
+        if (link.classList.contains('legs') && link.closest('table[data-fixed]')) return;
         event.preventDefault();
         swap(link.getAttribute('href'), true);
         return;
       }
       if (event.target.closest('a, button, input, select, label, form')) return;
       var row = event.target.closest('table.positions tr[data-chain]');
-      if (!row) return;
+      if (!row || row.closest('table[data-fixed]')) return;
       swap(row.getAttribute('data-chain'), true);
     });
     window.addEventListener('popstate', function (event) {
@@ -582,16 +706,43 @@ JS = """
       full(href, false).catch(function () { window.location.reload(); });
     });
     // Filtering is a table change too: no page load, rows diffed in place.
+    // Every control applies itself: segments and chips are links, selects
+    // and dates apply on change, the search box as you type.
+    document.addEventListener('click', function (event) {
+      if (event.metaKey || event.ctrlKey || event.button !== 0) return;
+      var flt = event.target.closest('.filterbar a.flt');
+      if (!flt) return;
+      event.preventDefault();
+      full(flt.getAttribute('href'), true);
+    });
+    document.addEventListener('change', function (event) {
+      var form = event.target.closest('form.filters');
+      if (form && (event.target.tagName === 'SELECT' || event.target.type === 'date')) {
+        applyFilters(form);
+      }
+    });
+    var typeTimer = null;
+    document.addEventListener('input', function (event) {
+      var form = event.target.closest('form.filters');
+      if (!form || event.target.name !== 'q') return;
+      clearTimeout(typeTimer);
+      typeTimer = setTimeout(function () { applyFilters(form); }, 300);
+    });
     document.addEventListener('submit', function (event) {
       var form = event.target.closest('form.filters');
       if (!form) return;
       event.preventDefault();
+      applyFilters(form);
+    });
+    var applyFilters = function (form) {
       var params = new URLSearchParams(new FormData(form));
       Array.prototype.slice.call(params.keys()).forEach(function (k) {
         if (!params.get(k)) params.delete(k);
       });
+      var filterField = document.querySelector('form.save-view input[name=filter]');
+      if (filterField) filterField.value = params.toString();
       full('/?' + params.toString(), true);
-    });
+    };
   }
 
   // Delegated, so tab strips inside a freshly swapped-in row work too.
@@ -602,12 +753,12 @@ JS = """
     if (!tab && !closer) return;
     var strip, box;
     if (tab) {
-      strip = tab.closest('.tabs[data-tabs-for]');
-      box = strip && document.getElementById(strip.getAttribute('data-tabs-for'));
+      var owner = tab.hasAttribute('data-tabs-for') ? tab : tab.closest('.tabs[data-tabs-for]');
+      box = owner && document.getElementById(owner.getAttribute('data-tabs-for'));
     } else {
       box = closer.closest('.form-box');
-      strip = box && document.querySelector('.tabs[data-tabs-for="' + box.id + '"]');
     }
+    strip = box && (document.querySelector('.tabs[data-tabs-for="' + box.id + '"]') || box);
     if (!box || !strip) return;
     // Inside the positions table the header x closes the form via the table
     // swap; a re-click on the open tab there is simply nothing to do.
@@ -618,7 +769,9 @@ JS = """
     var key = tab ? tab.getAttribute('data-form-tab') : null;
     var tabs = strip.querySelectorAll('a[data-form-tab]');
     var panels = box.querySelectorAll(':scope > [data-form]');
-    tabs.forEach(function (t) { t.classList.toggle('here', !closing && t === tab); });
+    tabs.forEach(function (t) {
+      t.classList.toggle('here', !closing && t.getAttribute('data-form-tab') === key);
+    });
     panels.forEach(function (p) { p.hidden = closing || p.getAttribute('data-form') !== key; });
     if (!closing) {
       var shown = box.querySelector(':scope > [data-form="' + key + '"]');

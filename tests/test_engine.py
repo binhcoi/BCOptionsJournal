@@ -866,3 +866,58 @@ class TestReports(unittest.TestCase):
         by_dte = self.reports.target_performance(self.all, key=self.reports.dte_bucket)
         self.assertEqual([o.label for o in by_dte], ["60+ DTE", "8-30 DTE"] if False else sorted(o.label for o in by_dte))
         self.assertIn("60+ DTE", [o.label for o in by_dte])
+
+
+class TestLongTarget(unittest.TestCase):
+    def test_long_leg_aims_for_a_quarter_over_the_debit(self):
+        leg = position(direction=Direction.LONG, quantity=1, open_price=D("1.12"), open_fee=D("0.65"))
+        tgt = target(leg)
+        self.assertEqual(tgt.price, D("1.40"))
+        self.assertEqual(tgt.expected_pl, D("27.35"))          # -112.65 + 140.00
+        self.assertTrue(tgt.applicable)
+        self.assertEqual(tgt.pct, D("0.25"))
+        custom = target(position(direction=Direction.LONG, quantity=1, open_price=D("2.00"),
+                                 open_fee=D("0"), target_pct=D("0.5")))
+        self.assertEqual(custom.price, D("3.00"))
+
+
+class TestCampaign(unittest.TestCase):
+    """Ten puts at 35 for 3.00 (fee 6.50). Split 4/6; the 4 are assigned, the
+    6 roll to 34 for 5.00 after a 4.00 buy-back. By hand:
+      four : open cash 1,200 - 2.60 = 1,197.40, assigned -> realized 1,197.40
+      six  : open cash 1,800 - 3.90 = 1,796.10, bought back 2,400 -> -603.90
+      new  : 6 x 34 for 5.00 -> premium 3,000, carries -603.90
+    """
+
+    def setUp(self):
+        from bcoj.engine import actions
+        from bcoj.engine.campaign import campaign
+        parent = position(quantity=10, open_price=D("3.00"), open_fee=D("6.50"))
+        split = actions.split(parent, 4, on=date(2026, 2, 1))
+        parent_after = split.updated[0]
+        four, six = sorted(split.created, key=lambda p: p.quantity)
+        assigned = actions.assign(four, on=date(2026, 3, 20))
+        rolled = actions.roll(six, close_price=D("4.00"), new_expiry=date(2026, 4, 17),
+                              new_strike=D("34"), new_price=D("5.00"), on=date(2026, 3, 20))
+        self.new = rolled.created[0]
+        everything = [parent_after, assigned.updated[0], rolled.updated[0], self.new]
+        self.fam = campaign(ChainIndex(everything), self.new)
+
+    def test_sums_the_whole_family_once(self):
+        f = self.fam
+        self.assertEqual(len(f.legs), 4)
+        self.assertEqual(f.realized, D("593.50"))            # 1,197.40 - 603.90
+        self.assertEqual(f.open_premium, D("3000.00"))
+        self.assertEqual(f.net_so_far, D("3593.50"))
+        self.assertEqual((f.contracts_start, f.contracts_now), (10, 6))
+        self.assertEqual((f.at_risk_start, f.at_risk_now), (D("35000.00"), D("20400.00")))
+        self.assertEqual(f.strikes_now, (D("34.00"),))
+        self.assertEqual((f.assigned_legs, f.assigned_shares, f.assigned_cash), (1, 400, D("14000.00")))
+        self.assertEqual((f.rolls, f.splits), (1, 1))
+        self.assertEqual(f.started, date(2026, 1, 5))
+        self.assertTrue(f.is_open)
+
+    def test_target_figures_include_the_carry(self):
+        # Net credit 3,000 - 603.90 = 2,396.10; half back -> price 2.00 -> P/L 1,196.10.
+        self.assertEqual(self.fam.expected_at_target, D("1196.10"))
+        self.assertEqual(self.fam.cost_to_close_at_target, D("1200.00"))
