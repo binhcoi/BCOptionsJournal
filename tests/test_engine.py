@@ -901,10 +901,10 @@ class TestCampaign(unittest.TestCase):
                               new_strike=D("34"), new_price=D("5.00"), on=date(2026, 3, 20))
         self.new = rolled.created[0]
         everything = [parent_after, assigned.updated[0], rolled.updated[0], self.new]
-        self.fam = campaign(ChainIndex(everything), self.new)
+        self.camp = campaign(ChainIndex(everything), self.new)
 
-    def test_sums_the_whole_family_once(self):
-        f = self.fam
+    def test_sums_the_whole_campaign_once(self):
+        f = self.camp
         self.assertEqual(len(f.legs), 4)
         self.assertEqual(f.realized, D("593.50"))            # 1,197.40 - 603.90
         self.assertEqual(f.open_premium, D("3000.00"))
@@ -919,8 +919,8 @@ class TestCampaign(unittest.TestCase):
 
     def test_target_figures_include_the_carry(self):
         # Net credit 3,000 - 603.90 = 2,396.10; half back -> price 2.00 -> P/L 1,196.10.
-        self.assertEqual(self.fam.expected_at_target, D("1196.10"))
-        self.assertEqual(self.fam.cost_to_close_at_target, D("1200.00"))
+        self.assertEqual(self.camp.expected_at_target, D("1196.10"))
+        self.assertEqual(self.camp.cost_to_close_at_target, D("1200.00"))
 
 
 class TestHealth(unittest.TestCase):
@@ -1004,7 +1004,7 @@ class TestScorecard(unittest.TestCase):
         self.assertEqual((sc.closed_legs, sc.wins, sc.premium_closed), (2, 1, D("2993.50")))
         self.assertEqual(sc.kept, D("19.83"))
         self.assertEqual(sc.win_rate, D("50.00"))
-        # Handing in every leg of the family counts the family once.
+        # Handing in every leg of the campaign counts the campaign once.
         whole = scorecard(index, everything)
         self.assertEqual((whole.campaigns, whole.so_far), (1, D("3593.50")))
         # Scoped to the listed legs only, a closed leg brings just its own figures.

@@ -4,7 +4,7 @@ A chain is one lineage. Once a position is split, the same opening trade has
 several branches, and the question "how is this going?" is about all of them
 together: cash in and out so far, what it would take to close, how the size
 and the capital at risk moved, what got assigned. These are sums over the
-family, so nothing is counted twice: a leg realizes once, an open leg carries
+campaign, so nothing is counted twice: a leg realizes once, an open leg carries
 its premium once.
 """
 
@@ -28,7 +28,7 @@ class Campaign:
     open_legs: tuple[Position, ...]
     realized: Decimal              # every leg that booked something
     open_premium: Decimal          # credit still held against open legs
-    expected_at_target: Decimal    # family P/L if every open leg closes at target
+    expected_at_target: Decimal    # campaign P/L if every open leg closes at target
     cost_to_close_at_target: Decimal
     at_risk_start: Decimal
     at_risk_now: Decimal
@@ -71,7 +71,7 @@ class Campaign:
 
 
 def campaign(index: ChainIndex, position: Position) -> Campaign:
-    legs = tuple(leg for leg, _ in index.family(position))
+    legs = tuple(leg for leg, _ in index.campaign(position))
     root = legs[0]
     open_legs = tuple(p for p in legs if p.is_open)
     expected = ZERO

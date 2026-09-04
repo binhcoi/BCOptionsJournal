@@ -1,8 +1,8 @@
 """The scorecard: four figures that say how a set of campaigns is doing.
 
 The same card appears on the positions list and on a position's page, so
-the scope is defined once, here: the campaigns (whole families) behind the
-positions handed in. Summing over families rather than over listed rows is
+the scope is defined once, here: the campaigns (whole by_root) behind the
+positions handed in. Summing over by_root rather than over listed rows is
 what keeps a figure from being counted twice when a chain is half listed.
 
     so far     = banked + premium in hand (every open leg)
@@ -29,8 +29,8 @@ from .targets import target
 @dataclass(frozen=True)
 class Scorecard:
     positions: int          # rows handed in
-    campaigns: int          # families they belong to
-    legs: int               # every leg in those families
+    campaigns: int          # by_root they belong to
+    legs: int               # every leg in those by_root
     open_legs: int
     contracts: int          # open contracts
     banked: Decimal
@@ -82,17 +82,17 @@ class Scorecard:
 
 
 def scorecard(index: ChainIndex, positions, whole_campaigns: bool = True) -> Scorecard:
-    """``whole_campaigns`` sums over the families behind the positions -- the
+    """``whole_campaigns`` sums over the by_root behind the positions -- the
     position page's view. Off, only the positions handed in count: what a
     filtered list shows is what its scorecard describes."""
     positions = list(positions)
-    families: dict[str, list] = {}
+    by_root: dict[str, list] = {}
     for p in positions:
         root = index.root(p)
-        if root.id not in families:
-            families[root.id] = [leg for leg, _ in index.family(root)]
+        if root.id not in by_root:
+            by_root[root.id] = [leg for leg, _ in index.campaign(root)]
     if whole_campaigns:
-        legs = [leg for fam in families.values() for leg in fam]
+        legs = [leg for camp in by_root.values() for leg in camp]
     else:
         seen = set()
         legs = [p for p in positions if not (p.id in seen or seen.add(p.id))]
@@ -122,7 +122,7 @@ def scorecard(index: ChainIndex, positions, whole_campaigns: bool = True) -> Sco
 
     return Scorecard(
         positions=len(list(positions)),
-        campaigns=len(families),
+        campaigns=len(by_root),
         legs=len(legs),
         open_legs=len(open_legs),
         contracts=sum(p.quantity for p in open_legs),

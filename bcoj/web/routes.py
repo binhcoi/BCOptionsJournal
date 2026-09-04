@@ -155,7 +155,7 @@ def _position_row(p, index, *, here: str = "/", act_id: str = "", which: str = "
     if current:
         classes.append("current")
     if rail is not None and not in_chain:
-        classes.append(f"fam fam-{rail}")
+        classes.append(f"camp camp-{rail}")
     cls = f' class="{" ".join(classes)}"' if classes else ""
 
     note = ""
@@ -163,13 +163,13 @@ def _position_row(p, index, *, here: str = "/", act_id: str = "", which: str = "
         halves = sorted(index.successors(p), key=lambda h: h.quantity)
         if halves:
             parts = [str(h.quantity) for h in halves]
-            note = (f'<span class="fam-note" title="split into {" + ".join(parts)}">'
+            note = (f'<span class="camp-note" title="split into {" + ".join(parts)}">'
                     f'&#x2442; {"+".join(parts)}</span>')
     elif siblings > 1 and p.is_open and not in_chain:
-        note = (f'<span class="fam-note" title="1 of {siblings} open in this chain">'
+        note = (f'<span class="camp-note" title="1 of {siblings} open in this chain">'
                 f"&#x2442;{siblings}</span>")
 
-    family_size = len(index.family(p))
+    campaign_size = len(index.campaign(p))
 
     # Every link out of a row keeps the other state the page is showing: an
     # action link keeps the expanded chain, a chain link keeps the open form.
@@ -188,11 +188,11 @@ def _position_row(p, index, *, here: str = "/", act_id: str = "", which: str = "
 
     if in_chain and not (current and expanded):
         legs_html = ""      # the chain is what is being shown
-    elif family_size > 1:
+    elif campaign_size > 1:
         target_url = (f"{here}{act_q}{anchor}" if expanded
                       else f"{here}{act_q}&chain={pid}{anchor}")
         title = "Hide the chain" if expanded else "Show the whole chain"
-        text = "&#9650;" if expanded else str(family_size)
+        text = "&#9650;" if expanded else str(campaign_size)
         legs_html = (f'<a class="legs{" here" if expanded else ""}"'
                      f' href="{target_url}" title="{title}">{text}</a>')
     else:
@@ -215,7 +215,7 @@ def _position_row(p, index, *, here: str = "/", act_id: str = "", which: str = "
         # Collapse lands on the row that was clicked: a closed leg's own row
         # is gone once the chain folds, so anchoring to it would go nowhere.
         toggle = f' data-chain="{here}{act_q}#row-{r.esc(collapse_to)}"'
-    elif family_size > 1 and with_actions:
+    elif campaign_size > 1 and with_actions:
         toggle = f' data-chain="{here}{act_q}&chain={pid}{anchor}"'
 
     # Prices and cash flows. Open positions project to the target.
@@ -343,13 +343,13 @@ def positions_page(conn, query, token: str = "") -> tuple[int, str]:
     # An expanded chain is shown whole, in order, where its clicked row was.
     # Its legs are then not listed again elsewhere in the table.
     expanded_target = index.get(chain_id) if chain_id else None
-    expanded_legs = ([leg for leg, _ in index.family(expanded_target)]
+    expanded_legs = ([leg for leg, _ in index.campaign(expanded_target)]
                      if expanded_target else [])
     expanded_ids = {leg.id for leg in expanded_legs}
     # The block is drawn where the clicked leg sits in the list. If that leg
     # is no longer listed -- it was just closed while its chain was open --
-    # anchor on the first family member that is, or expand nothing: the
-    # family's rows must never be held back and then not drawn.
+    # anchor on the first leg of the campaign that is, or expand nothing: the
+    # campaign's rows must never be held back and then not drawn.
     anchor_id = chain_id
     if chain_id and chain_id not in {p.id for p in listed}:
         anchor = next((p for p in listed if p.id in expanded_ids), None)
@@ -445,104 +445,201 @@ Click a row or its leg count to show the whole chain in place; again to hide.</p
     return 200, r.page("Positions", body, nav_here="positions", toolbar=new_button)
 
 
-def _cards(cells, cls: str = "totals") -> str:
-    """Summary cards. Each cell is (label, html, sign) and the sign, when
-    given, tints the card so the strip reads at a glance."""
-    out = []
-    for label, html, sign in cells:
-        tone = ""
-        if sign is not None and sign != 0:
-            tone = ' class="good"' if sign > 0 else ' class="bad"'
-        out.append(f"<div{tone}><span>{r.esc(label)}</span><b>{html}</b></div>")
-    return f'<div class="{cls}">' + "".join(out) + "</div>"
 
 
-def _table_totals(listed, index) -> str:
-    """What is in the table, and only that: filtering changes these figures.
+# ---------------------------------------------------------------------------
+# the facts table
+#
+# One vocabulary for every page. A row is a figure with its usual trading
+# name; a column is a scope (this leg, its branch, the campaign; options,
+# shares, both). A figure is never shown twice under two names.
 
-    Built for a glance: the headline on each card is the figure that decides
-    something, the small line under it says what it is made of.
-    """
-    def sub(text) -> str:
-        return f"<small>{text}</small>"
+REALIZED = "Realized P/L"
+OPEN_PREMIUM = "Open premium"
+TO_CLOSE = "Cost to close"
+AT_TARGET = "P/L at target"
+AT_RISK = "Capital at risk"
+BREAK_EVEN = "Break-even"
+TARGET_PRICE = "Target price"
+CONTRACTS = "Contracts"
+STRIKE = "Strike"
+OPENED = "Opened"
+ENDS = "Expires"
+DAYS = "Days"
+LEGS = "Legs"
+CLOSED_LEGS = "Legs won"
+SHARES = "Shares"
+ROW_ORDER = (REALIZED, OPEN_PREMIUM, TO_CLOSE, AT_TARGET, AT_RISK, BREAK_EVEN, TARGET_PRICE,
+             CONTRACTS, STRIKE, OPENED, ENDS, DAYS, LEGS, CLOSED_LEGS, SHARES)
 
-    open_ones = [p for p in listed if p.is_open]
-    closed = [p for p in listed if not p.is_open]
-    premium = q2(sum((open_cash(p) for p in open_ones), ZERO))
-    carry = q2(sum((index.carry(p) for p in open_ones), ZERO))
-    net = q2(premium + carry)
-    at_risk = q2(sum((capital_at_risk(p) or ZERO for p in open_ones), ZERO))
-    expected = q2(sum((target(p, index.carry(p)).expected_pl for p in open_ones), ZERO))
-    realized = q2(sum((realized_pl(p) for p in closed), ZERO))
 
-    puts = sum(1 for p in open_ones if p.right is Right.PUT)
-    calls = len(open_ones) - puts
-    contracts = sum(p.quantity for p in open_ones)
-    what = (f"{puts} put(s) &middot; {calls} call(s) &middot; {contracts} contract(s)"
-            if open_ones else f"{len(closed)} closed leg(s)")
-    cells = [("In this table", f"{len(listed)} position(s)" + sub(what), None)]
+def _sign(value):
+    return None if value is None or value == 0 else (1 if value > 0 else -1)
 
-    if open_ones:
-        cells.append(("Net credit", r.money(net)
-                      + sub(f"premium {fmt(premium)} &middot; carry {fmt(carry)}"), net))
-        if net > 0:
-            capture = f"{q2(expected / net * 100)}% of net credit"
-        elif expected > 0:
-            capture = "profit target on the debit paid"
+
+def _cell(html, tone=None):
+    """One value, nothing after it. A row reads the same in every column."""
+    return (html, tone)
+
+
+def _money(value, tone="sign", dash: str = "-"):
+    if value is None:
+        return None
+    return _cell(r.money(value, dash=dash), _sign(value) if tone == "sign" else tone)
+
+
+def _facts(title: str, note: str, rows, chips: str = "") -> str:
+    """The strip: equal cells across the page, label over figure. Every figure
+    is present, a dash where it does not apply, so the strip has the same shape
+    wherever it appears. ``rows`` are (label, cell) with cell (html, tone) or
+    None. ``chips`` is an optional line of facts under the figures."""
+    cap = f'<p class="cap">{r.esc(title)}' + (f" <small>{note}</small>" if note else "") + "</p>"
+    cells = []
+    for label, c in rows:
+        if c is None:
+            cells.append(f'<div><span>{r.esc(label)}</span><b class="none">-</b></div>')
         else:
-            capture = "chain is net debit"
-        cells.append(("Expected at target", r.money(expected) + sub(capture), expected))
-        ret = (f"{q2(expected / at_risk * 100)}% expected return" if at_risk > 0
-               else "no cash committed")
-        cells.append(("Capital at risk", r.money(at_risk) + sub(ret), None))
-        soon = min(open_ones, key=lambda p: p.expiry)
-        dte = (soon.expiry - date.today()).days
-        within = sum(1 for p in open_ones if (p.expiry - date.today()).days <= 30)
-        tone = -1 if dte <= 7 else None
-        cells.append(("Next expiry", r.esc(soon.expiry)
-                      + sub(f"{dte}d &middot; {within} within 30 days"), tone))
-    if closed:
-        per_leg = q2(realized / len(closed))
-        cells.append(("Realized by these legs", r.money(realized)
-                      + sub(f"{len(closed)} leg(s) &middot; {fmt(per_leg)} per leg"), realized))
-    return _cards(cells)
+            cells.append(f'<div><span>{r.esc(label)}</span><b>{c[0]}</b></div>')
+    return (f'<div class="strip"><div class="facts wide">{cap}'
+            f'<div class="cells" style="--n:{len(cells)}">{"".join(cells)}</div>{chips}</div></div>')
+
+
+def _chips(items) -> str:
+    """A line of short facts. ``items`` are html or (html, "warn")."""
+    out = []
+    for it in items:
+        html, cls = (it, "") if isinstance(it, str) else it
+        out.append(f'<span class="chip{" " + cls if cls else ""}">{html}</span>')
+    return f'<div class="chips facts">{"".join(out)}</div>' if out else ""
+
+
+def _columns(title: str, note: str, col: dict, chips: str = "") -> str:
+    """A label -> cell dict laid out in ROW_ORDER."""
+    order = [l for l in ROW_ORDER if l in col] + [l for l in col if l not in ROW_ORDER]
+    return _facts(title, note, [(l, col[l]) for l in order], chips)
+
+
+def _kv(title: str, note: str, pairs, chips: str = "") -> str:
+    """A strip from (label, html[, tone]) pairs."""
+    rows = [(p[0], (p[1], p[2] if len(p) > 2 else None)) for p in pairs]
+    return _facts(title, note, rows, chips)
+
+
+def _score_column(sc) -> dict:
+    """The scorecard as a column: always the same eight figures, None where
+    one does not apply, so every strip has the same shape."""
+    open_ = bool(sc.open_legs)
+    return {
+        REALIZED: _money(sc.banked, dash="0.00"),
+        OPEN_PREMIUM: _money(sc.in_hand, dash="0.00") if open_ else None,
+        TO_CLOSE: _money(-sc.to_close, dash="0.00") if open_ else None,
+        AT_TARGET: _cell(f"<b>{r.money(sc.at_target, dash='0.00')}</b>", _sign(sc.at_target)) if open_ else None,
+        AT_RISK: _money(sc.at_risk, dash="0.00", tone=None) if open_ else None,
+        BREAK_EVEN: _money(sc.break_even, tone=None),
+        CONTRACTS: _cell(str(sc.contracts)) if open_ else None,
+    }
+
+
+def _scorecard_html(sc, scope: str) -> str:
+    """Positions page: one column, the table in front of you."""
+    return _columns("This table", scope, _score_column(sc))
+
+
+def _campaign_strip(index, camp, sc, chain, lineage=None, conn=None) -> str:
+    """The strip for the campaign, or for one branch of it when ``lineage``
+    is given, with a line of chips saying how the trade has moved."""
+    legs = lineage or list(camp.legs)
+    root, head = legs[0], chain.head
+    opens = [l for l in legs if l.is_open]
+    whole = lineage is None
+    chips = [f"{len(legs)} leg(s) since {root.opened_on}"]
+    if whole and camp.rolls:
+        chips.append(f"{camp.rolls} roll(s)")
+    if whole and camp.splits:
+        chips.append(f"{camp.splits} split(s)")
+    days = ((date.today() if opens else max((l.closed_on or l.expiry) for l in legs)) - root.opened_on).days
+    chips.append(f"{days} days")
+    now = sum(l.quantity for l in opens) if opens else head.quantity
+    if now != root.quantity:
+        chips.append((f"{root.quantity} &rarr; {now} contracts (x{now / root.quantity:.1f})",
+                      "warn" if now > root.quantity else ""))
+    strikes = sorted({l.strike for l in (opens or [head])})
+    if len(legs) > 1 and strikes != [root.strike]:
+        drift = q2(strikes[-1] - root.strike)
+        chips.append(f"strike {r.esc(price(root.strike))} &rarr; "
+                     f"{' / '.join(r.esc(price(x)) for x in strikes)} "
+                     f"({'down' if drift < 0 else 'up'} {r.esc(price(abs(drift)))})")
+    if whole and opens and camp.at_risk_now != camp.at_risk_start:
+        chips.append(f"at risk {fmt(camp.at_risk_start)} &rarr; {fmt(camp.at_risk_now)}")
+    if head.is_open:
+        owed = credit_to_recover(chain)
+        if owed > 0:
+            chips.append((f"{fmt(owed)} still to recover before it nets positive", "warn"))
+    if sc.closed_legs:
+        chips.append(f"{sc.wins} of {sc.closed_legs} closed leg(s) won")
+    if whole and camp.assigned_legs:
+        chips.append(f"{camp.assigned_shares} shares assigned")
+    if conn is not None and head.is_open and head.right is Right.CALL and head.direction is Direction.SHORT:
+        held = _shares_held(conn, head.underlying)
+        called = sum(q.shares for q in store.load_positions(conn, head.underlying)
+                     if q.is_open and q.right is Right.CALL and q.direction is Direction.SHORT)
+        link = f'<a href="/shares/{r.esc(head.underlying)}">{held} shares held</a>'
+        if held <= 0:
+            chips.append(("no shares behind it: naked", "warn"))
+        elif called > held:
+            chips.append((f"{link}, {called - held} uncovered", "warn"))
+        else:
+            chips.append(link)
+    title = "Campaign" if whole else "This branch"
+    return _columns(title, "", _score_column(sc), _chips(chips))
 
 
 def _portfolio_totals(conn, positions, index) -> str:
-    """Three figures that are known, side by side and never summed.
-
-    Unrealised P/L is not computable without marks, so it is not shown.
-    """
-    open_ones = [p for p in positions if p.is_open]
-    premium = q2(sum((open_cash(p) for p in open_ones), ZERO))
-    realized = q2(sum((realized_pl(p) for p in positions), ZERO))
-    carry = q2(sum((index.carry(p) for p in open_ones), ZERO))
-    at_risk = q2(sum(
-        (capital_at_risk(p) or ZERO for p in open_ones), ZERO
-    ))
-    expected = q2(sum(
-        (target(p, index.carry(p)).expected_pl for p in open_ones), ZERO
-    ))
+    """Reports dashboard: three strips, each with only what applies to it.
+    Portfolio puts options and shares together; the other two keep them apart."""
+    sc = scorecard(index, positions)
     lots = store.load_lots(conn)
     disposals = store.load_disposals(conn)
     tickers = wheels.by_ticker(index, positions, lots, disposals, store.matching_rule(conn))
+    clean = [t for t in tickers if not t.error]
     shares_pl = wheels.realized_shares(tickers)
+    held_cost = q2(sum((t.held_cost for t in clean if t.held > 0), ZERO))
+    held = sum(t.held for t in clean)
+    holding = sum(1 for t in clean if t.held > 0)
+    lot_premium = q2(sum((t.option_premium for t in tickers), ZERO))
+    wheel = q2(sum((t.total for t in clean), ZERO))
     blocked = [t.underlying for t in tickers if t.error]
-    total_cell = r.money(q2(realized + shares_pl))
-    if blocked:
-        total_cell += (f' <a href="/shares" class="neg" title="{r.esc(", ".join(blocked))}'
-                       ' cannot be matched">&#9888;</a>')
-    cells = [
-        ("Realized options", r.money(realized), realized),
-        ("Realized shares", r.money(shares_pl), shares_pl),
-        ("True total", total_cell, realized + shares_pl),
-        ("Open premium", r.money(premium), premium),
-        ("Expected at target", r.money(expected), expected),
-        ("Chain carry", r.money(carry), carry),
-        ("Capital at risk", r.money(at_risk), None),
-        ("Open positions", r.esc(len(open_ones)), None),
+    open_ones = [p for p in positions if p.is_open]
+    puts = sum(1 for p in open_ones if p.right is Right.PUT)
+    calls = sum(1 for p in open_ones if p.right is Right.CALL)
+
+    # Cash the open puts could still demand and money already spent on shares
+    # are different things; they sit side by side and are never added.
+    portfolio = [
+        (REALIZED, r.money(q2(sc.banked + shares_pl), dash="0.00")),
+        (AT_TARGET, f"<b>{r.money(q2(sc.at_target + shares_pl), dash='0.00')}</b>"),
+        (AT_RISK, r.money(sc.at_risk, dash="0.00")),
+        ("Shares at cost", r.money(held_cost, dash="0.00")),
     ]
-    return _cards(cells)
+    options = _score_column(sc)
+    del options[BREAK_EVEN]
+    options["Open positions"] = _cell(f"{len(open_ones)}")
+    options["Puts / calls"] = _cell(f"{puts} / {calls}")
+    shares = [
+        (REALIZED, r.money(shares_pl, dash="0.00")),
+        ("Shares held", r.esc(held)),
+        ("At cost", r.money(held_cost if held_cost else None)),
+        ("Tickers holding", r.esc(holding)),
+        ("Premium on these lots", r.money(lot_premium, dash="0.00")),
+        ("Wheel total", r.money(wheel, dash="0.00")),
+    ]
+    warn = ""
+    if blocked:
+        warn = _chips([(f'<a href="/shares">{len(blocked)} ticker(s) cannot be matched: '
+                        f"{r.esc(', '.join(blocked))}</a>", "warn")])
+    return (_kv("Portfolio", "options and shares together", portfolio)
+            + _columns("Options", "", options)
+            + _kv("Shares", "", shares, warn))
 
 
 # ---------------------------------------------------------------------------
@@ -750,18 +847,18 @@ def position_page(conn, position_id, token, query) -> tuple[int, str]:
     here = f"/position/{r.esc(position.id)}"
 
     lots = store.load_lots(conn)
-    fam = campaign(index, position)
+    camp = campaign(index, position)
     # The same scorecard as the positions page, over this campaign, then the
     # campaign's shape in a line of chips.
-    strips = _scorecard_html(scorecard(index, [position]),
-                             f"this campaign &middot; {len(fam.legs)} leg(s) since {fam.started}",
-                             extra_chips=_campaign_chips(fam))
-    if fam.splits:
-        # Several branches grew from one trade; this is the lineage that leads here.
-        strips += ("<h2>This branch</h2>"
-                   + _cards(_chain_cards(index, position, chain), "totals wide"))
-    strips += ("<h2>This position</h2>"
-               + _cards(_position_cards(position, chain, carry, lots, conn), "totals wide"))
+    # The same one-line strip as the positions page, scoped to the campaign.
+    # The leg itself is the highlighted row in the table below; a branch of a
+    # split campaign gets a second strip of its own.
+    sc = scorecard(index, [position])
+    strips = _campaign_strip(index, camp, sc, chain, conn=conn)
+    if camp.splits:
+        lineage = list(index.lineage(position))
+        scb = scorecard(index, lineage, whole_campaigns=False)
+        strips += _campaign_strip(index, camp, scb, chain, lineage, conn=conn)
 
     # Actions open in the chain table below, exactly as on the positions
     # page. ``?do=X`` alone means this position; ``act`` may name another leg.
@@ -801,7 +898,7 @@ def _chain_rows(index, position, act_id: str, which: str, token: str):
     "?" so the shared row code can append "&act=..." as it does on the list;
     the page then serves the same partials the list does."""
     here = f"/position/{r.esc(position.id)}?"
-    legs = [leg for leg, _ in index.family(position)]
+    legs = [leg for leg, _ in index.campaign(position)]
     rows = [_chain_head_row(index, legs, position, here, hide=False)]
     act_row_at = action_at = None
     for leg in legs:
@@ -849,41 +946,6 @@ def _sub(text) -> str:
     return f"<small>{text}</small>"
 
 
-def _chain_cards(index, position, chain) -> list:
-    """What the whole chain has done, wherever this leg sits in it."""
-    legs = [leg for leg, _ in index.family(position)]
-    root = legs[0]
-    head = chain.head
-    cells = []
-    detail = f"{len(legs)} leg(s) &middot; {chain.days} days"
-    if any(leg.is_superseded for leg in legs):
-        everything = q2(sum((realized_pl(leg) for leg in legs), ZERO))
-        detail += f" &middot; all legs {fmt(everything)}"
-    cells.append(("Chain realized", r.money(chain.realized) + _sub(detail), chain.realized))
-
-    if head.is_open:
-        cells.append(("Net chain credit", r.money(chain.net_credit)
-                      + _sub(f"premium {fmt(open_cash(head))} &middot; carry {fmt(chain.carry)}"),
-                      chain.net_credit))
-        be = break_even(chain)
-        if be:
-            cells.append(("Break-even", r.money(be.price)
-                          + _sub(f"strike {fmt(be.strike)} less {fmt(be.per_share)} per share"),
-                          None))
-        recover = credit_to_recover(chain)
-        if recover > 0:
-            cells.append(("Credit to recover", r.money(recover)
-                          + _sub("before the chain nets positive"), -1))
-    if len(legs) > 1:
-        drift = q2(head.strike - root.strike)
-        cells.append(("Strike", f"{r.esc(price(root.strike))} &rarr; {r.esc(price(head.strike))}"
-                      + (_sub(f'{"down" if drift < 0 else "up"} {price(abs(drift))}') if drift
-                         else _sub("unchanged")), None))
-        grew = head.quantity - root.quantity
-        cells.append(("Size", f"{root.quantity} &rarr; {head.quantity}"
-                      + (_sub(f"x{head.quantity / root.quantity:.1f}") if grew > 0
-                         else _sub("contracts")), -1 if grew > 0 else None))
-    return cells
 
 
 def _raw_position_block(conn, position, token: str, here: str) -> str:
@@ -1035,145 +1097,24 @@ def do_delete_position(conn, position_id, form) -> None:
     raise Redirect(_next(form, "/?show=all"), "Position removed; undo from History if needed")
 
 
-def _scorecard_html(sc, scope: str, extra_chips=()) -> str:
-    """One figure per card, nothing to decode; the finer stats are chips."""
-    def tone(value):
-        return None if value == 0 else (1 if value > 0 else -1)
-
-    cards = [
-        ("Banked", r.money(sc.banked, dash="0.00"), tone(sc.banked)),
-        ("In hand", r.money(sc.in_hand, dash="0.00"), tone(sc.in_hand)),
-        ("To close at target", (f'<span class="neg">({fmt(sc.to_close)})</span>' if sc.to_close > 0
-                                else r.money(-sc.to_close, dash="0.00")), -1 if sc.to_close > 0 else None),
-        ("Net at target", r.money(sc.at_target, dash="0.00"), tone(sc.at_target)),
-        ("At risk", r.money(sc.at_risk, dash="0.00"), None),
-    ]
-    chips = []
-    if sc.closed_legs:
-        kept = sc.kept
-        if kept is not None:
-            cls = "pos" if kept >= 50 else ("neg" if kept < 0 else "")
-            chips.append((f"kept {kept}% of premium", cls))
-        chips.append((f"won {sc.wins} of {sc.closed_legs} closed", ""))
-        chips.append((f"avg {sc.avg_days} days", ""))
-    if sc.open_legs:
-        chips.append((f"{sc.open_legs} open leg(s) &middot; {sc.contracts} contract(s)", ""))
-        if sc.return_at_target is not None:
-            chips.append((f"{sc.return_at_target}% return at target", ""))
-        if sc.break_even is not None:
-            chips.append((f"break-even {fmt(sc.break_even)}", ""))
-    chips.extend(extra_chips)
-    chips.append((scope, "dim"))
-    return (_cards(cards, "totals score")
-            + '<div class="chips facts">' + "".join(
-                f'<span class="chip{" " + cls if cls else ""}">{text}</span>' for text, cls in chips)
-            + "</div>")
 
 
-def _campaign_chips(fam) -> list:
-    """The campaign's shape, as chips: size, strikes, assignments, span."""
-    chips = []
-    if fam.is_open:
-        grew = fam.contracts_now - fam.contracts_start
-        growth = f" &middot; x{fam.contracts_now / fam.contracts_start:.1f}" if grew > 0 else ""
-        chips.append((f"contracts {fam.contracts_start} &rarr; {fam.contracts_now}{growth}",
-                      "neg" if grew > 0 else ""))
-        strikes = " / ".join(price(x) for x in fam.strikes_now)
-        chips.append((f"strikes {r.esc(price(fam.root.strike))} &rarr; {r.esc(strikes)}", ""))
-        if fam.at_risk_now != fam.at_risk_start:
-            chips.append((f"at risk was {fmt(fam.at_risk_start)} at the start",
-                          "neg" if fam.at_risk_now > fam.at_risk_start else ""))
-    if fam.assigned_legs:
-        chips.append((f"assigned {fam.assigned_shares} shares &middot; {fmt(fam.assigned_cash)} at strike", ""))
-    chips.append((f"{fam.days} days &middot; {fam.rolls} roll(s) &middot; {fam.splits} split(s)", ""))
-    return chips
 
 
-def _campaign_cards(fam, word: str = "Campaign") -> list:
-    """Everything that grew from one opening trade, summed once."""
-    cells = [(f"{word} so far", r.money(fam.net_so_far)
-              + _sub(f"realized {fmt(fam.realized)} &middot; premium in hand "
-                     f"{fmt(fam.open_premium)}"), fam.net_so_far)]
-    if fam.is_open:
-        cells.append(("If all close at target", r.money(fam.expected_at_target)
-                      + _sub(f"buy-backs would cost {fmt(fam.cost_to_close_at_target)}"),
-                      fam.expected_at_target))
-        grew = fam.contracts_now - fam.contracts_start
-        growth = (f" &middot; x{fam.contracts_now / fam.contracts_start:.1f}" if grew > 0 else "")
-        cells.append(("Contracts", f"{fam.contracts_start} &rarr; {fam.contracts_now}"
-                      + _sub(f"{len(fam.open_legs)} open leg(s){growth}"), -1 if grew > 0 else None))
-        cells.append(("Capital at risk", r.money(fam.at_risk_now)
-                      + _sub(f"was {fmt(fam.at_risk_start)} at the start"),
-                      -1 if fam.at_risk_now > fam.at_risk_start else None))
-        strikes = " / ".join(price(s) for s in fam.strikes_now)
-        cells.append(("Strikes", f"{r.esc(price(fam.root.strike))} &rarr; {r.esc(strikes)}"
-                      + _sub("start &rarr; open now"), None))
-    if fam.assigned_legs:
-        cells.append(("Assigned", f"{fam.assigned_shares} shares"
-                      + _sub(f"{fam.assigned_legs} leg(s) &middot; {fmt(fam.assigned_cash)} at strike"),
-                      None))
-    cells.append(("Span", f"{fam.days} days"
-                  + _sub(f"since {fam.started} &middot; {len(fam.legs)} legs &middot; "
-                         f"{fam.rolls} roll(s) &middot; {fam.splits} split(s)"), None))
-    return cells
 
 
-def _position_cards(position, chain, carry, lots, conn=None) -> list:
-    """This leg alone: its terms, its cash, and where it stands."""
-    cells = [("Status", r.status_badge(position.status)
-              + _sub(f"opened {position.opened_on} &middot; expiry {position.expiry}"), None)]
-    if position.is_open:
-        dte = (position.expiry - date.today()).days
-        cells.append(("Days to expiry", f"{dte}d" + _sub(f"expires {position.expiry}"),
-                      -1 if dte <= 7 else None))
-    cells.append(("Credit received", r.money(open_cash(position))
-                  + _sub(f"{position.quantity} x {price(position.open_price)} x "
-                         f"{position.multiplier} less fee {fmt(position.open_fee)}"),
-                  open_cash(position)))
-    risk = capital_at_risk(position)
-    if position.direction is Direction.LONG:
-        why = "the debit paid"
-    elif position.right is Right.PUT:
-        why = f"{position.shares} shares at {fmt(position.strike)}"
-    else:
-        why = "shares behind the call" if risk is not None else "naked: no ceiling"
-    cells.append(("Capital at risk", r.money(risk) + _sub(why), None))
 
-    if position.is_open:
-        tgt = target(position, carry)
-        label = f"{int(tgt.pct * 100)}% target"
-        why = ("profit on the debit paid" if position.direction is Direction.LONG
-               else "of the chain's net credit")
-        cells.append((label, (r.esc(price(tgt.price)) if tgt.applicable
-                              else '<span class="dim">none: net debit</span>')
-                      + _sub(f"expected {fmt(tgt.expected_pl)} &middot; {why}"), tgt.expected_pl))
-    else:
-        cells.append(("Realized", r.money(realized_pl(position))
-                      + _sub(f"closed {position.closed_on} at "
-                             f"{price(position.close_price) if position.close_price is not None else '-'}"),
-                      realized_pl(position)))
 
-    lot_by_id = {l.id: l for l in lots}
-    if position.right is Right.CALL and position.direction is Direction.SHORT:
-        # Coverage is the ticker's: shares held against the shares every open
-        # call controls, delivered oldest lot first if assigned.
-        held = _shares_held(conn, position.underlying)
-        called = sum(p.shares for p in store.load_positions(conn, position.underlying)
-                     if p.is_open and p.right is Right.CALL and p.direction is Direction.SHORT)
-        if held <= 0:
-            cells.append(("Shares behind it", '<span class="neg">none - naked</span>', -1))
-        else:
-            short = max(called - held, 0)
-            text = (f'<a href="/shares/{r.esc(position.underlying)}">{held} held</a>'
-                    + _sub(f"{called} called across open calls"
-                           + (f" &middot; <span class='neg'>{short} uncovered</span>" if short else "")))
-            cells.append(("Shares behind it", text, -1 if short else None))
-    created = [l for l in lots if l.assigning_position_id == position.id
-               and position.right is Right.PUT]
-    if created:
-        cells.append(("Shares acquired", f'<a href="/shares/{r.esc(created[0].underlying)}">'
-                                         f"{r.esc(_lot_label(created[0]))}</a>", None))
-    return cells
+
+
+
+
+
+
+
+
+
+
 
 
 def _action_form(position, which: str, token: str, carry, back: str,
@@ -1492,11 +1433,10 @@ def risk_page(conn, query) -> tuple[int, str]:
     ]
     if risks and total > 0:
         top = risks[0]
-        cells.append(("Largest", f"{r.esc(top.underlying)} <small>{pct(top.exposure)}%</small>"))
+        cells.append(("Largest", f"{r.esc(top.underlying)} {pct(top.exposure)}%"))
     if naked:
-        cells.append(("Naked calls", f'<span class="neg">{naked}</span>'))
-    totals = '<div class="totals">' + "".join(
-        f"<div><span>{r.esc(k)}</span><b>{v}</b></div>" for k, v in cells) + "</div>"
+        cells.append(("Naked calls", f'<span class="neg">{naked}</span>', -1))
+    totals = _kv("Exposure", "", cells)
 
     conc_rows = []
     for t in risks:
@@ -1873,11 +1813,7 @@ def reports_page(conn, query) -> tuple[int, str]:
     puts = sum(1 for p in open_ones if p.right is Right.PUT)
     calls = sum(1 for p in open_ones if p.right is Right.CALL)
     held = sum(t.held for t in tickers if not t.error)
-    counts = '<div class="totals">' + "".join(
-        f"<div><span>{r.esc(k)}</span><b>{v}</b></div>" for k, v in (
-            ("Open puts", puts), ("Open calls", calls), ("Shares held", held),
-            ("Tickers with shares", sum(1 for t in tickers if t.held > 0)),
-        )) + "</div>"
+    counts = ""
 
     tabs = " ".join(
         f'<a href="/reports?by={g}" class="{"here" if by == g else ""}">{g.title()}</a>'
@@ -2078,7 +2014,7 @@ def data_page(conn, db_path: str, token: str, query) -> tuple[int, str]:
     cells = [("Errors", r.esc(errors), -1 if errors else None),
              ("Warnings", r.esc(warnings), None),
              ("Snapshots", r.esc(len(store.list_snapshots(db_path))), None)]
-    strip = _cards(cells)
+    strip = _kv("Journal", "", cells)
 
     if not issues:
         health_html = '<p class="callout ok">All clear: nothing in the journal disagrees with itself.</p>'
@@ -2535,7 +2471,7 @@ def shares_page(conn, token, query) -> tuple[int, str]:
         ("Tickers holding stock", r.esc(sum(1 for t in tickers if t.held > 0))),
     ]
     if blocked:
-        totals.append(("Blocked tickers", f'<span class="neg">{len(blocked)}</span>'))
+        totals.append(("Blocked tickers", f'<span class="neg">{len(blocked)}</span>', -1))
 
     warn = ""
     if blocked:
@@ -2546,7 +2482,7 @@ def shares_page(conn, token, query) -> tuple[int, str]:
 
     kind = (query.get("form") or [""])[0]
     body = f"""{warn}{hint}
-<div class="totals">{"".join(f"<div><span>{r.esc(k)}</span><b>{v}</b></div>" for k, v in totals)}</div>
+{_kv("All tickers", "", totals)}
 {_share_forms(conn, kind, "", token, "/shares", "/shares?")}
 {r.table(["Ticker", "Position", "Held at cost", "Adj. basis", "Min call",
           "Share P/L", "Option premium", "Wheel total", "Lots"], rows, cls="shares")}
@@ -2579,9 +2515,8 @@ def ticker_page(conn, underlying, token, query) -> tuple[int, str]:
     b = t.blended
     if b:
         facts += [("Adjusted basis", r.money(b.unit_price)),
-                  ("After covered calls", r.money(b.after_calls)),
                   ("Min call strike", r.money(b.min_call_strike))]
-    fact_html = "".join(f"<div><span>{r.esc(k)}</span><b>{v}</b></div>" for k, v in facts)
+    fact_html = _kv(name, f"{len(t.lots)} lot(s)", facts)
 
     warn = ""
     if t.error:
@@ -2657,7 +2592,7 @@ def ticker_page(conn, underlying, token, query) -> tuple[int, str]:
                                               f"/shares/{name}?")
 
     body = f"""{warn}
-<div class="totals wide">{fact_html}</div>
+{fact_html}
 <h2>Lots - {len(t.lots)}</h2>
 {r.table(["Acquired", "Source", "Qty", "Held", "Cost/sh", "Acq. premium",
           "Call premium", "Covered", "Share P/L", "Adj. basis", "After calls",

@@ -523,8 +523,8 @@ class TestPositionPage(WebTestCase):
         self.add_position(underlying="dec")
         position = [p for p in self.positions() if p.underlying == "DEC"][0]
         body = self.get(f"/position/{position.id}")
-        for label in ("break-even", "50% target", "Capital at risk",
-                      "Banked", "In hand", "To close at target", "Net at target"):
+        for label in (">Break-even<", "50% target", ">Capital at risk<", ">Realized P/L<",
+                      ">Open premium<", ">Cost to close<", ">P/L at target<"):
             with self.subTest(label=label):
                 self.assertIn(label, body)
 
@@ -728,12 +728,12 @@ class TestInlineActions(WebTestCase):
 
 class TestChainView(WebTestCase):
     def test_split_shows_both_halves_and_what_became_of_each(self):
-        self.add_position(underlying="fam")
-        parent = [p for p in self.positions() if p.underlying == "FAM"][0]
+        self.add_position(underlying="spl")
+        parent = [p for p in self.positions() if p.underlying == "SPL"][0]
         self.post(f"/position/{parent.id}/split", {"quantity": "4",
                                                     "on": "2026-02-01"})
         halves = sorted([p for p in self.positions()
-                         if p.underlying == "FAM" and p.is_open],
+                         if p.underlying == "SPL" and p.is_open],
                         key=lambda p: p.quantity)
         four, six = halves
         self.post(f"/position/{four.id}/assign",
@@ -749,7 +749,7 @@ class TestChainView(WebTestCase):
         self.assertIn("Chain legs - 4", body)
         self.assertIn("split into 4 + 6", body)
         self.assertIn('class="badge st-split"', body)
-        self.assertIn("all legs", body)
+        self.assertIn('<p class="cap">This branch</p>', body)   # the split gives the leg its own strip
         self.assertIn("2026-04-17", body)          # the other half's roll
         # Same columns as the positions page: one renderer.
         self.assertIn("<abbr>B/E</abbr>", body)
@@ -800,7 +800,7 @@ class TestPositionsPageLayout(WebTestCase):
         self.post(f"/position/{position.id}/split",
                   {"quantity": "4", "on": "2026-02-01"})
         body = self.get("/")
-        self.assertEqual(body.count('class="fam fam-'), 2)
+        self.assertEqual(body.count('class="camp camp-'), 2)
         self.assertEqual(body.count("1 of 2 open in this chain"), 2)
 
     def test_leg_count_expands_the_chain_in_place(self):
@@ -863,7 +863,7 @@ class TestPositionsOrderingAndAnchors(WebTestCase):
             self.post(f"/position/{half.id}/expire", {"on": "2026-03-20"})
         body = self.get("/?show=closed")
         self.assertNotIn("open in this chain", body)
-        self.assertNotIn('class="fam fam-', body)
+        self.assertNotIn('class="camp camp-', body)
 
     def test_open_rows_are_anchored_and_links_target_them(self):
         position = self._fresh("anc")
@@ -930,7 +930,7 @@ class TestChainExpansion(WebTestCase):
         self.assertIn(f'id="row-{six.id}"', page)                 # the open half is still there
         self.assertIn('class="chain-head"', page)                 # drawn as the chain, anchored on it
         self.assertIn(f'id="row-{four.id}"', page)                # the closed half shown inside it
-        # And once no family member is listed at all, nothing is held back.
+        # And once no campaign member is listed at all, nothing is held back.
         self.post(f"/position/{six.id}/close",
                   {"closed_on": "2026-02-06", "close_price": "1.00"})
         page = self.get(f"/?show=open&chain={four.id}")
@@ -957,7 +957,8 @@ class TestRowColumnsAndChainBlock(WebTestCase):
 
     def test_columns_in_the_requested_order(self):
         body = self.get("/")
-        headers = re.findall(r"<th(?: [^>]*)?>(?:<abbr>)?(.*?)(?:</abbr>)?</th>", body)
+        table = body[body.index('<table class="positions"'):]
+        headers = re.findall(r"<th(?: [^>]*)?>(?:<abbr>)?(.*?)(?:</abbr>)?</th>", table)
         self.assertEqual(headers, ["", "Contract", "DTE", "Status", "Open",
                                    "Close", "Credit", "Closing", "Realized",
                                    "Carry", "B/E", "At risk", "", "Legs"])
@@ -1064,7 +1065,7 @@ class TestPartialAndProjection(WebTestCase):
     def test_partial_returns_the_table_and_its_strip_only(self):
         self._fresh("prt")
         body = self.get("/?show=open&partial=table")
-        self.assertTrue(body.startswith('<div class="totals score">'), body[:60])
+        self.assertTrue(body.startswith('<div class="strip"><div class="facts wide">'), body[:60])
         self.assertIn('<table class="positions"', body)
         self.assertNotIn("<!doctype html>", body)
         self.assertNotIn("<header>", body)
@@ -1108,7 +1109,7 @@ class TestPartialAndProjection(WebTestCase):
     def test_table_partial_carries_the_strip_that_describes_it(self):
         self.add_position(underlying="tps")
         frag = self.get("/?show=open&ticker=TPS&partial=table")
-        self.assertTrue(frag.startswith('<div class="totals score">'), frag[:60])
+        self.assertTrue(frag.startswith('<div class="strip"><div class="facts wide">'), frag[:60])
         self.assertIn("the 1 position(s) in this table", frag)
         self.assertIn('<div class="filterbar">', frag)                 # the bar travels too
         self.assertIn("Ticker: TPS", frag)
@@ -1253,7 +1254,7 @@ class TestShares(WebTestCase):
         lot = self._lots("asn")[0]
         self.assertEqual(lot.assigning_position_id, put.id)
         body = self.get(f"/position/{put.id}")
-        self.assertIn("Shares acquired", body)
+        self.assertIn(" shares assigned", body)                # the caption names the assignment
 
 
 
@@ -1261,7 +1262,10 @@ class TestShares(WebTestCase):
 
     def test_dashboard_shows_true_total(self):
         body = self.get("/reports")
-        for label in ("Realized options", "Realized shares", "True total"):
+        # The same strip as everywhere else, for everything, and the split
+        # between options and shares in the chips under it.
+        for label in ('<p class="cap">Portfolio', '<p class="cap">Options</p>', '<p class="cap">Shares</p>',
+                      ">Realized P/L<", ">Capital at risk<", ">Puts / calls<", ">Wheel total<"):
             with self.subTest(label=label):
                 self.assertIn(label, body)
 
@@ -1453,8 +1457,7 @@ class TestDecisionSupport(WebTestCase):
         head = [q for q in self.positions() if q.underlying == "DRF" and q.is_open][0]
         page = self.get(f"/position/{head.id}")
         self.assertIn("35.00 &rarr; 34.00", page)
-        self.assertIn("10 &rarr; 12", page)
-        self.assertIn("x1.2", page)
+        self.assertIn('<span class="chip warn">10 &rarr; 12 contracts (x1.2)', page)   # grew: flagged
 
 
 class TestReportingAndViews(WebTestCase):
@@ -1562,7 +1565,7 @@ class TestPositionsPagePolish(WebTestCase):
     def test_new_position_form_is_inline_and_the_nav_tab_is_gone(self):
         page = self.get("/?show=open")
         self.assertIn('data-form-tab="new" data-tabs-for="new-box"', page)
-        self.assertLess(page.index('data-form-tab="new"'), page.index('class="totals score"'))
+        self.assertLess(page.index('data-form-tab="new"'), page.index('<div class="facts wide">'))
         self.assertIn('<div class="titlebar"><h1>Positions</h1>', page)
         self.assertIn('data-form="new" hidden', page)
         self.assertIn('action="/new"', page)
@@ -1669,12 +1672,12 @@ class TestPositionsPagePolish(WebTestCase):
         self.add_position(underlying="ttb", quantity="2", strike="20", right="CALL")
         page = self.get("/?show=open&q=ttb")
         self.assertIn("the 1 position(s) in this table", page)
-        self.assertIn("1 open leg(s) &middot; 2 contract(s)", page)
-        self.assertIn(">In hand<", page)
-        self.assertIn(">To close at target<", page)
-        self.assertIn("% return at target", self.get("/?show=open&q=tta"))
+        self.assertIn('<p class="cap">This table <small>the 1 position(s)', page)   # the strip says its scope
+        self.assertIn(">Open premium<", page)
+        self.assertIn(">Cost to close<", page)
+        self.assertEqual(page.count('<div class="facts wide">'), 1)   # one strip, nothing else to decode
         self.assertNotIn("Realized options", page)     # portfolio-wide lives in Reports
-        self.assertIn('class="good"', page)             # net credit is positive: green card
+        self.assertIn('class="pos"', page)              # net credit is positive: green figure
 
     def test_position_page_chain_rows_carry_the_button(self):
         self.add_position(underlying="pcb")
@@ -1685,14 +1688,15 @@ class TestPositionsPagePolish(WebTestCase):
         head = [q for q in self.positions() if q.underlying == "PCB" and q.is_open][0]
         page = self.get(f"/position/{head.id}")
         self.assertIn(f'href="/position/{head.id}?&act={head.id}&do=close#row-{head.id}"', page)
-        # Two strips at the top: the chain's story, then this leg's.
-        self.assertLess(page.index('class="totals score"'), page.index("<h2>This position</h2>"))
-        self.assertLess(page.index("<h2>This position</h2>"), page.index('<table class="positions'))
-        self.assertEqual(page.count(">Banked<"), 1)
-        self.assertIn("break-even", page)                   # one open chain: it has one
-        self.assertIn("1 roll(s)", page)
-        self.assertIn("less fee", page)                     # how the credit was made
-        self.assertIn("Days to expiry", page)
+        # The same one-line strip as the positions page, scoped to the campaign.
+        self.assertLess(page.index('<div class="facts wide">'), page.index('<table class="positions'))
+        self.assertEqual(page.count('<div class="facts wide">'), 1)   # no split: one strip
+        self.assertEqual(page.count(">Realized P/L<"), 1)
+        self.assertIn('<p class="cap">Campaign</p>', page)
+        self.assertIn('<span class="chip">2 leg(s) since ', page)
+        self.assertNotIn("This branch", page)
+        self.assertIn(">Break-even<", page)                 # one open chain: it has one
+        self.assertIn(">1 roll(s)<", page)                   # the chips say how the trade moved
         self.assertIn('<table class="positions chain" data-fixed>', page)
         self.assertNotIn("Hide the chain", page)
 
@@ -1703,7 +1707,7 @@ class TestPositionsPagePolish(WebTestCase):
 
 
 class TestCampaignStrip(WebTestCase):
-    def test_a_split_family_shows_the_campaign_then_the_branch(self):
+    def test_a_split_campaign_shows_the_leg_the_branch_and_the_campaign(self):
         self.add_position(underlying="cmp")
         parent = [p for p in self.positions() if p.underlying == "CMP"][0]
         self.post(f"/position/{parent.id}/split", {"quantity": "4", "on": "2026-02-01"})
@@ -1715,20 +1719,19 @@ class TestCampaignStrip(WebTestCase):
                                                 "new_price": "5.00", "close_fee": "0", "new_fee": "0"})
         head = [p for p in self.positions() if p.underlying == "CMP" and p.is_open][0]
         page = self.get(f"/position/{head.id}")
-        self.assertLess(page.index('class="totals score"'), page.index("<h2>This branch</h2>"))
-        self.assertLess(page.index("<h2>This branch</h2>"), page.index("<h2>This position</h2>"))
-        self.assertIn(">Banked<", page)
-        self.assertIn("this campaign &middot; 4 leg(s)", page)
-        self.assertIn("contracts 10 &rarr; 6", page)
-        self.assertIn("1 roll(s) &middot; 1 split(s)", page)
-        self.assertIn("assigned 400 shares", page)
+        self.assertLess(page.index('<p class="cap">Campaign</p>'), page.index('<p class="cap">This branch</p>'))
+        self.assertEqual(page.count(">Realized P/L<"), 2)      # the campaign, then this branch
+        self.assertIn("4 leg(s) since", page)
+        self.assertIn("10 &rarr; 6 contracts", page)             # this branch
+        self.assertIn(">1 split(s)<", page)
+        self.assertIn(">400 shares assigned<", page)
         # A plain chain has no campaign section: chain and branch are the same.
         self.add_position(underlying="pln")
         plain = [p for p in self.positions() if p.underlying == "PLN"][0]
         plain_page = self.get(f"/position/{plain.id}")
         self.assertNotIn("<h2>This branch</h2>", plain_page)    # one lineage: no branch section
-        self.assertIn(">Banked<", plain_page)                  # the same scorecard
-        self.assertIn("break-even", plain_page)
+        self.assertIn(">Realized P/L<", plain_page)            # the same rows
+        self.assertIn(">Break-even<", plain_page)
 
 
 class TestDataPage(WebTestCase):
@@ -1952,9 +1955,8 @@ class TestLongTargets(WebTestCase):
                           open_price="1.12", open_fee="0.65", strike="100")
         p = [q for q in self.positions() if q.underlying == "LNG2"][0]
         page = self.get(f"/position/{p.id}")
-        self.assertIn("25% target", page)
-        self.assertIn(">1.40<", page)
-        self.assertIn("expected 26.70", page)
+        self.assertIn(">P/L at target<", page)
+        self.assertIn("26.70", page)
         strip = self.get("/?show=open&ticker=LNG2")
         # Closing a long at target is a sale: the "obligation" is negative,
         # i.e. cash coming in (139.35 for the 1.40 target less the 0.65 fee).
@@ -2226,7 +2228,7 @@ class TestShareRepairs(WebTestCase):
         status, _, _ = self.post(f"/shares/lot/{lot.id}/delete", {})
         self.assertEqual(status, 303)
         call = [p for p in self.positions() if p.underlying == "USE"][0]
-        self.assertIn("none - naked", self.get(f"/position/{call.id}"))
+        self.assertIn("no shares behind it: naked", self.get(f"/position/{call.id}"))
 
     def test_coverage_is_the_tickers_shares_against_its_open_calls(self):
         self.post("/shares/buy", {"underlying": "cvt", "on": "2026-01-05", "quantity": "200",
@@ -2237,9 +2239,7 @@ class TestShareRepairs(WebTestCase):
                           opened_on="2026-02-02", expiry="2026-03-20")
         call = [p for p in self.positions() if p.underlying == "CVT"][0]
         page = self.get(f"/position/{call.id}")
-        self.assertIn("Shares behind it", page)
-        self.assertIn("300 held", page)
-        self.assertIn("300 called across open calls", page)
+        self.assertIn("300 shares held", page)
         ticker = self.get("/shares/CVT")
         self.assertIn("300 of 300 shares", ticker)              # open calls fact
         self.assertIn("200/200", ticker)                         # oldest lot first

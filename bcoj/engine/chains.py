@@ -216,10 +216,10 @@ class ChainIndex:
     def root(self, position: Position) -> Position:
         return self.lineage(position)[0]
 
-    def family(self, position: Position) -> tuple[tuple[Position, int], ...]:
+    def campaign(self, position: Position) -> tuple[tuple[Position, int], ...]:
         """Everything descended from this position's root, as (leg, depth).
 
-        A lineage shows one path -- ancestors of one leg. A family shows the
+        A lineage shows one path -- ancestors of one leg. A campaign shows the
         whole tree, which is what a split needs: both halves and whatever
         happened to each of them afterwards, not just the half you clicked on.
         Depth-first, so each half's descendants sit under it.

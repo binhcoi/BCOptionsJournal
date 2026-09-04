@@ -102,29 +102,67 @@ td:first-child a { text-decoration: none; }
 .dim { color: var(--dim); }
 .warn-text { color: #b45309; font-weight: 600; }
 
-.totals { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 1rem; }
+/* Cards: one size, one style, on every strip. Fixed width, never stretched
+   to fill the row, so two cards look like two cards and not two banners. */
+.totals { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 1rem; align-items: stretch; }
 .totals > div {
-  flex: 1 1 150px; background: var(--panel); border: 1px solid var(--line);
-  border-radius: 8px; padding: .55rem .7rem;
+  flex: 0 0 12.5rem; box-sizing: border-box; min-height: 4.6rem; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px; padding: .55rem .8rem;
 }
 .totals span { display: block; font-size: .72rem; text-transform: uppercase;
-  letter-spacing: .04em; color: var(--dim); }
-.totals b { font-variant-numeric: tabular-nums; font-size: 1.05rem; }
-.totals.wide > div { flex: 1 1 190px; }
-.totals small { display: block; font-size: .7rem; font-weight: 400; color: var(--dim); }
+  letter-spacing: .04em; color: var(--dim); margin-bottom: .15rem; }
+.totals b { font-variant-numeric: tabular-nums; font-size: 1.15rem; }
+.totals small { display: block; font-size: .72rem; font-weight: 400; color: var(--dim); }
+.totals b small { margin-top: .15rem; }
 .totals .pos { color: var(--pos); } .totals .neg { color: var(--neg); }
-/* The scorecard wears the same tinted cards as every other strip; only
-   the figure is larger, since it is the row read first. */
-.totals.score > div { flex: 1 1 160px; }
-.totals.score b { font-size: 1.4rem; }
-.chips.facts { margin: -.4rem 0 1rem; }
-.chips.facts .chip.pos { border-color: var(--pos); background: var(--pos-tint); color: var(--pos); }
-.chips.facts .chip.dim { color: var(--dim); border-style: dashed; }
-.chips.facts .chip { font-size: .78rem; padding: .1rem .6rem; }
-.chips.facts .chip.neg { border-color: var(--neg); background: var(--neg-tint); color: var(--neg); }
 .totals > div.good { background: var(--pos-tint); border-color: var(--pos); }
-.totals b small { font-weight: 400; margin-top: .15rem; }
 .totals > div.bad { background: var(--neg-tint); border-color: var(--neg); }
+
+/* The facts table: rows are figures with their usual trading names, columns
+   are scopes. One figure per line, numbers aligned, a tint where the sign
+   matters. The same table on every page. */
+.strip { margin: 0 0 1.2rem; overflow-x: auto; }
+table.facts { width: auto; min-width: 24rem; border-collapse: collapse; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+table.facts th, table.facts td { padding: .32rem .8rem; border-bottom: 1px solid var(--line);
+  white-space: nowrap; font-size: .95rem; text-align: right; }
+table.facts thead th { font-weight: 700; color: var(--ink); text-transform: none; letter-spacing: 0;
+  font-size: 1rem; background: var(--panel); vertical-align: bottom; }
+table.facts thead th small { display: block; font-weight: 400; font-size: .78rem; color: var(--dim); }
+table.facts tbody th { text-align: left; font-weight: 500; color: var(--dim); text-transform: none;
+  letter-spacing: 0; font-size: .9rem; }
+table.facts td { font-variant-numeric: tabular-nums; }
+table.facts td.bad { background: var(--neg-tint); }
+table.facts td.none { color: var(--dim); }
+table.facts td small { font-size: .78rem; color: var(--dim); font-weight: 400; }
+table.facts td .badge { vertical-align: middle; }
+table.facts tr:last-child th, table.facts tr:last-child td { border-bottom: 0; }
+/* One scope: a strip of equal cells, label over figure. */
+.facts.wide { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: .45rem .9rem .6rem; }
+.facts.wide .cap { margin: 0 0 .4rem; font-weight: 700; color: var(--ink); }
+.facts.wide .cap small { font-weight: 400; font-size: .8rem; color: var(--dim); margin-left: .4rem; }
+.facts.wide .cells { display: grid; grid-template-columns: repeat(var(--n, 8), minmax(0, 1fr)); }
+.facts.wide .cells > div { min-width: 0; padding: .1rem .7rem; border-left: 1px solid var(--line);
+  text-align: left; }
+.facts.wide .cells > div:first-child { border-left: 0; padding-left: 0; }
+.facts.wide .cells > div:last-child { padding-right: 0; }
+.facts.wide .cells > div > span { display: block; font-size: .78rem; color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.facts.wide .cells b { display: block; font-size: 1.1rem; font-weight: 500; white-space: nowrap;
+  font-variant-numeric: tabular-nums; }
+.facts.wide .cells b b { font-weight: 700; font-size: inherit; }
+.facts.wide .cells b.none { color: var(--dim); }
+.facts.wide .chips { margin: 1rem 0 0; padding-top: .8rem; border-top: 1px solid var(--line);
+  gap: .5rem; }
+.facts.wide .chip { font-size: .92rem; padding: .3rem .75rem; background: var(--bg); color: var(--ink); }
+.facts.wide .chip.warn { border-color: var(--neg); background: var(--neg-tint); color: var(--neg); }
+.facts.wide .chip a { color: inherit; text-decoration: underline; }
+
+/* A caption names what the strip covers; it rides inside the strip so it
+   travels with it on a swap. */
+.totals > p.strip-title { flex-basis: 100%; margin: 0 0 .1rem; font-size: .8rem; color: var(--dim); }
+.totals > p.strip-title b { font-size: .8rem; color: var(--ink); }
 .grow { flex: 1; }
 a.btn.new { padding: .45rem .9rem; font-size: inherit; font-weight: 600;
   color: var(--accent); border-color: var(--accent); background: var(--panel); }
@@ -416,13 +454,13 @@ ul.suggest li { padding: .4rem 0; border-bottom: 1px solid var(--line); }
 ul.suggest form.inline { margin-left: .8rem; }
 h3 { font-size: .95rem; margin: 1.2rem 0 .4rem; }
 
-/* Open positions that are branches of one family share a coloured rail. */
-tr.fam > td:first-child { border-left: 3px solid var(--line); }
-tr.fam-0 > td:first-child { border-left-color: var(--accent); }
-tr.fam-1 > td:first-child { border-left-color: var(--roll); }
-tr.fam-2 > td:first-child { border-left-color: var(--amber); }
-tr.fam-3 > td:first-child { border-left-color: var(--pos); }
-.fam-note { display: inline; font-size: .72rem; color: var(--dim); margin-left: .5rem;
+/* Open positions that are branches of one campaign share a coloured rail. */
+tr.camp > td:first-child { border-left: 3px solid var(--line); }
+tr.camp-0 > td:first-child { border-left-color: var(--accent); }
+tr.camp-1 > td:first-child { border-left-color: var(--roll); }
+tr.camp-2 > td:first-child { border-left-color: var(--amber); }
+tr.camp-3 > td:first-child { border-left-color: var(--pos); }
+.camp-note { display: inline; font-size: .72rem; color: var(--dim); margin-left: .5rem;
   cursor: help; }
 a.legs { text-decoration: none; font-weight: 600; padding: .05rem .45rem;
   border-radius: 999px; border: 1px solid var(--line);
@@ -531,7 +569,7 @@ legend {
 }
 fieldset p.hint { grid-column: 1 / -1; margin: 0; }
 
-/* The family tree: greyed rows are the other branch of a split; a struck
+/* The campaign tree: greyed rows are the other branch of a split; a struck
    credit belongs to a divided position and is now carried by its halves. */
 tr.branch td { color: var(--dim); }
 tr.branch a { color: var(--dim); }
@@ -676,7 +714,7 @@ JS = """
     };
     // What a swap needs of the current page: strip, filter bar and table.
     var snapshot = function () {
-      var t = document.querySelector('.totals'), b = document.querySelector('.filterbar'),
+      var t = document.querySelector('.strip'), b = document.querySelector('.filterbar'),
           c = current();
       return (t ? t.outerHTML : '') + (b ? b.outerHTML : '') + (c ? c.outerHTML : '');
     };
@@ -752,8 +790,8 @@ JS = """
         if (!fresh) { window.location.href = href; return; }
         if (!patchRows(cur, fresh)) cur.replaceWith(fresh);
         // The strip and the filter bar describe the table: they travel with it.
-        var freshTotals = holder.querySelector('.totals');
-        var curTotals = document.querySelector('.totals');
+        var freshTotals = holder.querySelector('.strip');
+        var curTotals = document.querySelector('.strip');
         if (freshTotals && curTotals) curTotals.replaceWith(freshTotals);
         var freshBar = holder.querySelector('.filterbar');
         var curBar = document.querySelector('.filterbar');

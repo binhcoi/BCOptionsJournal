@@ -528,7 +528,7 @@ class TestSplitLinking(unittest.TestCase):
         self.assertEqual(index.carry(result.created[0]), D("-400.00"))
         self.assertEqual(index.carry(result.created[1]), D("-600.00"))
 
-    def test_family_shows_both_halves_under_the_tombstone(self):
+    def test_campaign_shows_both_halves_under_the_tombstone(self):
         prior, parent, result = self._rolled_then_split()
         a, b = result.created
         rolled = actions.roll(
@@ -539,8 +539,8 @@ class TestSplitLinking(unittest.TestCase):
         everything = [prior] + result.positions[:1] + [a] + rolled.positions
         index = ChainIndex(everything)
 
-        family = index.family(a)
-        ids = [(leg.id, depth) for leg, depth in family]
+        campaign = index.campaign(a)
+        ids = [(leg.id, depth) for leg, depth in campaign]
         # Rolls stay flat; the split's halves indent one level under the
         # tombstone, smaller first. Depth-first, so b's own roll (b2) sits
         # under b rather than after both halves.
