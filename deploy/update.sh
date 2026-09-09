@@ -16,7 +16,7 @@ current=$($PIP show bcoj 2>/dev/null | sed -n 's/^Version: //p')
 [ "$current" = "$VERSION" ] && { echo "already on $VERSION"; exit 0; }
 
 systemctl stop bcoj
-mkdir -p /srv/bcoj/backups
+install -d -o bcoj -g bcoj /srv/bcoj/backups
 sudo -u bcoj python3 - <<PY
 import sqlite3, datetime
 src = sqlite3.connect("/srv/bcoj/journal.db")
