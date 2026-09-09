@@ -20,7 +20,7 @@ in [docs/legacy-format.md](docs/legacy-format.md).
 | Migrations | Versioned runner over `PRAGMA user_version` | Each migration in its own transaction |
 | Frontend | stdlib `http.server`, hand-written HTML, CSS and script | One user on loopback needs no framework. Script swaps expand, open and switch in place, prefetched on hover; server-rendered paths remain and are what tests drive |
 | Priorities | Integrity first, then snappiness | Set 2026-09-03. Refuse impossible states at entry; every write audited and undoable; no full reload for expand, open, switch |
-| Deployment | Docker image with one volume, or bare in an LXC | See docs/deploy.md |
+| Deployment | A wheel and a GHCR image per release; an LXC installs the wheel by script | Pure Python, one artifact for every platform. See docs/deploy.md |
 | Market data | None. Open positions show a computed profit target | Works air-gapped |
 | Data in | Manual entry; a one-off importer for the legacy sheet | Import is a migration; corrections happen in the app |
 | Auth | One password, always; fixed default at first login; signed session cookie; HTTP Basic for scripts | A forwarded port is not a boundary. `BCOJ_PASSWORD` at start resets it |
@@ -250,7 +250,7 @@ computed columns, journal.json, journal.db through the backup API.
 | M8 | Themes, 1.1.0 | Planned, 2 to 4 hours. Palettes move under a `data-theme` attribute set by a setting on the Options page: system, light, dark first; each further palette about half an hour |
 | M9 | Snapshot by API, 1.2.0 | Planned, 1 to 2 hours. A read-only token, hashed in `settings`, shown once on the Options page; `/api/snapshot` takes a snapshot and streams it; a one-line cron for another machine in docs/deploy.md |
 
-Versions: 1.0.0 at M7; the minor version rises with each milestone after. Tag each in git.
+Versions: 1.0.0 at M7; the minor version rises with each milestone after. Bumping `__version__` on main is the release; the workflow tags, builds and publishes.
 The engine came before any UI so the reconciliation could prove it. 359 tests.
 
 ---
@@ -326,3 +326,4 @@ multi-account, multi-currency. Tax lots, wash sales, 1256. Corporate actions
 | A password always, the default fixed and forced to change | A forwarded port is not a boundary; a random default would need a console to read |
 | Changing the password logs every browser out | The session secret rotates with it |
 | Options holds what is about the app, Data what is about the records | Password, snapshots, export, version on one page; health on the other |
+| The version has one home, `bcoj.__version__`; a new one on main is a release | pyproject reads it; the workflow tags from it; footer, wheel and image can never disagree |

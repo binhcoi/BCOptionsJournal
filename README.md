@@ -18,6 +18,9 @@ python3 -m bcoj.web --db journal.db        # http://127.0.0.1:8000/
 
 First login: password `bcoj`. The app then makes you set your own.
 
+Releases carry a wheel, a Docker image and install scripts for an LXC; see
+[docs/deploy.md](docs/deploy.md).
+
 Import a legacy export:
 
 ```bash

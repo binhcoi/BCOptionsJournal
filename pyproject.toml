@@ -1,6 +1,6 @@
 [project]
 name = "bcoj"
-version = "1.0.0"
+dynamic = ["version"]
 description = "BC Options Trade Journal - a local options journal with correct P/L across rolls, assignments, covered calls and shares"
 requires-python = ">=3.10"
 
@@ -19,3 +19,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["bcoj*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "bcoj.__version__"}

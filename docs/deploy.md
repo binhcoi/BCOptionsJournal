@@ -2,27 +2,53 @@
 
 The journal is one SQLite file. Everything here is about that file.
 
-## Bare (LXC, VM, laptop)
+## From source (laptop, dev box)
 
 ```bash
 python3 -m unittest discover -s tests -q
-python3 -m bcoj.web --db /srv/bcoj/journal.db     # http://127.0.0.1:8000/
+python3 -m bcoj.web --db journal.db     # http://127.0.0.1:8000/
 ```
 
 Python 3.10 or newer, standard library only. Loopback by default; reach it by
-forwarding the port (`ssh -L 8000:127.0.0.1:8000 host`) or put it behind a
-proxy as below.
+forwarding the port (`ssh -L 8000:127.0.0.1:8000 host`).
+
+## LXC from a release
+
+Each release on GitHub carries the wheel, `bcoj.service`, and three scripts.
+Debian 12 or Ubuntu 24.04 template, unprivileged, 1 vCPU, 512 MB, 4 GB disk.
+The app peaks at 29 MB resident; the journal grows about 150 KB a year.
+
+```bash
+curl -fsSLO https://github.com/binhcoi/BCOptionsJournal/releases/latest/download/install.sh
+sh install.sh                # or: sh install.sh 1.0.0
+```
+
+That installs Python and a venv under `/opt/bcoj`, the wheel, a `bcoj`
+service user, the journal at `/srv/bcoj/journal.db`, and the systemd unit,
+bound to all interfaces for the proxy below. First login: `bcoj`.
+
+| Script | Does |
+|---|---|
+| `install.sh [version]` | First install. Idempotent |
+| `update.sh [version]` | Snapshot to `/srv/bcoj/backups/`, install the wheel, restart. Same command moves down a version; restore the snapshot if the schema moved |
+| `import.sh export.csv [estimates.json] [--force]` | Stop, reconcile, import, start. Refuses an unclean diff without `--force` |
+
+The journal lives inside the container. A Proxmox rollback restores it too and
+loses every trade entered since, so snapshot from the Options page before an
+upgrade, and copy `/srv/bcoj/backups/` off the node nightly.
+
+## Releases
+
+Bump `__version__` in `bcoj/__init__.py`, commit, push to main. The workflow
+runs the tests on 3.10 and 3.12, tags `v<version>`, builds the wheel, creates
+the GitHub release with the wheel and the deploy scripts, and pushes
+`ghcr.io/binhcoi/bcoj:<version>` and `:latest`. A version already tagged only
+runs the tests. Pull requests and pushes to other branches run the tests only.
 
 ## Behind a reverse proxy
 
 The app must bind an address the proxy can reach; `127.0.0.1` gives the proxy
-a 502. In the LXC:
-
-```
-ExecStart=/usr/bin/python3 -m bcoj.web --db /srv/bcoj/journal.db --host 0.0.0.0
-```
-
-Firewall port 8000 to the proxy node only. In Nginx Proxy Manager: scheme
+a 502, hence `--host 0.0.0.0` in the unit above. Firewall port 8000 to the proxy node only. In Nginx Proxy Manager: scheme
 `http`, the container's address, port 8000, an SSL certificate with Force SSL.
 No websockets. The proxy's `X-Forwarded-Proto: https` header, which NPM sends,
 makes the session cookie `Secure`.
@@ -80,10 +106,11 @@ WantedBy=multi-user.target
 ## Docker
 
 ```bash
-docker compose -f docker/compose.yml up -d     # tests run during the build
+docker compose -f docker/compose.yml up -d     # builds locally; tests run during the build
+docker run -d -p 127.0.0.1:8000:8000 -v bcoj:/data ghcr.io/binhcoi/bcoj:latest   # or the published image
 ```
 
-Journal on the `./docker/data` volume; port published to loopback only.
+Journal on the `/data` volume.
 
 ## Backup
 
@@ -106,9 +133,3 @@ With the server stopped:
 ```bash
 cp /srv/bcoj/backups/journal-YYYYMMDD-HHMMSS.db /srv/bcoj/journal.db
 ```
-
-## Upgrade
-
-Pull, run the tests, restart. Migrations run on start, each in its own
-transaction. Snapshot first. The app refuses to open a journal, or restore a
-snapshot, written by a newer version than itself.

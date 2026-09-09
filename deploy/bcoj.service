@@ -1,0 +1,12 @@
+[Unit]
+Description=BC Options Journal
+After=network.target
+
+[Service]
+User=bcoj
+ExecStart=/opt/bcoj/venv/bin/bcoj serve --db /srv/bcoj/journal.db --host 0.0.0.0
+Restart=on-failure
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
