@@ -9,7 +9,9 @@ Two protections that a localhost app genuinely needs:
 
 * **CSRF tokens.** "Localhost" is not a security boundary -- any page in the
   browser can POST to it. Every form carries a per-process token.
-* **Loopback binding**, with an optional password. Not a service.
+* **A password**, always. The default is fixed and must be changed at first
+  login; the hash lives in the journal's settings. A session is a signed
+  cookie. Scripts may send the password as HTTP Basic instead.
 """
 
 import gzip
@@ -19,9 +21,10 @@ import secrets
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from .. import __version__
 from ..db import store
 from ..engine.actions import ActionError
-from . import routes
+from . import auth, routes
 from . import render as r
 from .static import STATIC
 
@@ -34,17 +37,22 @@ class App:
     def __init__(self, db_path: str):
         self.db_path = db_path
         self.csrf = secrets.token_urlsafe(32)
-        self.password = os.environ.get("BCOJ_PASSWORD") or None
         self._routes = [
             ("GET", r"^/$", self._positions),
+            ("GET", r"^/login$", self._login_form),
+            ("POST", r"^/login$", self._login),
+            ("POST", r"^/logout$", self._logout),
+            ("GET", r"^/options$", self._options),
+            ("POST", r"^/options/password$", self._password),
+            ("POST", r"^/options/snapshot$", self._snapshot),
+            ("POST", r"^/options/restore$", self._restore),
+            ("GET", r"^/snapshot/([0-9A-Za-z_.-]+)$", self._snapshot_file),
             ("GET", r"^/new$", self._new_form),
             ("POST", r"^/new$", self._new_submit),
             ("GET", r"^/expiring$", self._expiring),
             ("GET", r"^/risk$", self._risk),
             ("GET", r"^/reports$", self._reports),
             ("GET", r"^/data$", self._data),
-            ("POST", r"^/data/snapshot$", self._snapshot),
-            ("POST", r"^/data/restore$", self._restore),
             ("POST", r"^/data/flag/(\d+)/resolve$", self._resolve_flag),
             ("GET", r"^/export/(positions\.csv|shares\.csv|journal\.json|journal\.db)$", self._export),
             ("POST", r"^/views/save$", self._save_view),
@@ -164,7 +172,25 @@ class App:
         return routes.reports_page(conn, query)
 
     def _data(self, conn, query, form, args):
-        return routes.data_page(conn, self.db_path, self.csrf, query)
+        return routes.data_page(conn, self.csrf, query)
+
+    def _login_form(self, conn, query, form, args):
+        return routes.login_page(conn, self.csrf, query)
+
+    def _login(self, conn, query, form, args):
+        return routes.do_login(conn, self.csrf, form)
+
+    def _logout(self, conn, query, form, args):
+        routes.do_logout()
+
+    def _options(self, conn, query, form, args):
+        return routes.options_page(conn, self.db_path, self.csrf, query)
+
+    def _password(self, conn, query, form, args):
+        routes.do_change_password(conn, form)
+
+    def _snapshot_file(self, conn, query, form, args):
+        return routes.snapshot_file(self.db_path, args[0])
 
     def _snapshot(self, conn, query, form, args):
         routes.do_snapshot(conn, self.db_path, form)
@@ -290,9 +316,6 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
 
-        if not self._authorized():
-            return
-
         if path.startswith("/static/"):
             return self._serve_static(path)
 
@@ -316,6 +339,8 @@ class Handler(BaseHTTPRequestHandler):
 
         conn = self.app.connect()
         try:
+            if not self._authorized(conn, method, path):
+                return
             result = handler(conn, query, form, args)
             status, body = result[0], result[1]
             # A download says its own type and file name; a page does not.
@@ -333,6 +358,11 @@ class Handler(BaseHTTPRequestHandler):
                 )
             self.send_response(303)
             self.send_header("Location", location)
+            https = self.headers.get("X-Forwarded-Proto", "").lower() == "https"
+            for name, value in redirect.headers:
+                if name == "Set-Cookie" and https:
+                    value += "; Secure"
+                self.send_header(name, value)
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
@@ -361,26 +391,45 @@ class Handler(BaseHTTPRequestHandler):
             body = body.replace("<main>\n", f"<main>\n{_flash(flash)}", 1)
         self._send(status, body)
 
-    def _authorized(self) -> bool:
-        """Optional single password, so a bound port is not wide open."""
-        if not self.app.password:
-            return True
-        import base64
+    OPEN_PATHS = ("/login",)
+    SETUP_PATHS = ("/options", "/options/password", "/logout")
 
-        header = self.headers.get("Authorization", "")
-        if header.startswith("Basic "):
-            try:
-                decoded = base64.b64decode(header[6:]).decode()
-                _, _, supplied = decoded.partition(":")
-                if secrets.compare_digest(supplied, self.app.password):
-                    return True
-            except Exception:  # noqa: BLE001 - malformed header is a no
-                pass
-        self.send_response(401)
-        self.send_header("WWW-Authenticate", 'Basic realm="bcoj"')
-        self.send_header("Content-Length", "0")
-        self.end_headers()
-        return False
+    def _authorized(self, conn, method: str, path: str) -> bool:
+        """A session cookie, or the password as HTTP Basic for scripts.
+        Without either, a GET goes to the login page and a POST is refused.
+        Until the default password has been changed, only Options is open."""
+        if path in self.OPEN_PATHS:
+            return True
+        token = auth.token_from_cookie(self.headers.get("Cookie", ""))
+        ok = auth.token_valid(conn, token)
+        if not ok:
+            header = self.headers.get("Authorization", "")
+            if header.startswith("Basic "):
+                import base64
+                try:
+                    _, _, supplied = base64.b64decode(header[6:]).decode().partition(":")
+                    ok = auth.check_password(conn, supplied)
+                except Exception:  # noqa: BLE001 - a malformed header is a no
+                    ok = False
+        if not ok:
+            if method == "GET":
+                where = "/login?" + urllib.parse.urlencode({"next": self.path})
+                self.send_response(303)
+                self.send_header("Location", where)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            else:
+                self._send(403, r.page("Refused", "<p>Not logged in.</p>"
+                                       '<p><a href="/login">Log in</a></p>', bare=True))
+            return False
+        if auth.password_is_default(conn) and path not in self.SETUP_PATHS:
+            self.send_response(303)
+            self.send_header("Location", "/options?flash=" + urllib.parse.quote(
+                "!Set a password before anything else. The default is public."))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return False
+        return True
 
     def _read_form(self):
         try:
@@ -453,13 +502,21 @@ def serve(db_path: str, host: str = "127.0.0.1", port: int = 8000) -> None:
     app.connect().close()
 
     httpd = Server((host, port), Handler)
-    print(f"{r.APP_NAME}")
+    print(f"{r.APP_NAME} {__version__}")
     print(f"  journal : {db_path}")
     print(f"  address : http://{host}:{port}/")
-    if not app.password:
-        print("  auth    : none (loopback only; set BCOJ_PASSWORD to require one)")
-    else:
-        print("  auth    : password required")
+    reset = os.environ.get("BCOJ_PASSWORD")
+    conn = app.connect()
+    try:
+        if reset:
+            auth.set_password(conn, reset)
+            print("  auth    : password reset from BCOJ_PASSWORD")
+        elif auth.password_is_default(conn):
+            print(f"  auth    : default password '{auth.DEFAULT_PASSWORD}'; change it at first login")
+        else:
+            print("  auth    : password set")
+    finally:
+        conn.close()
     print("  stop    : ctrl-c")
     try:
         httpd.serve_forever()

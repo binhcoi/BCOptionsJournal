@@ -1,6 +1,6 @@
 [project]
 name = "bcoj"
-version = "0.1.0"
+version = "1.0.0"
 description = "BC Options Trade Journal - a local options journal with correct P/L across rolls, assignments, covered calls and shares"
 requires-python = ">=3.10"
 

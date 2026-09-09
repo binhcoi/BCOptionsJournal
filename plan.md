@@ -23,7 +23,7 @@ in [docs/legacy-format.md](docs/legacy-format.md).
 | Deployment | Docker image with one volume, or bare in an LXC | See docs/deploy.md |
 | Market data | None. Open positions show a computed profit target | Works air-gapped |
 | Data in | Manual entry; a one-off importer for the legacy sheet | Import is a migration; corrections happen in the app |
-| Auth | Loopback bind; optional password via `BCOJ_PASSWORD` | A personal app, not a service |
+| Auth | One password, always; fixed default at first login; signed session cookie; HTTP Basic for scripts | A forwarded port is not a boundary. `BCOJ_PASSWORD` at start resets it |
 | Money | `Decimal` everywhere, stored as `TEXT` | `float` and `REAL` corrupt accounting silently |
 
 ---
@@ -186,7 +186,7 @@ engine's acceptance test.
 
 The Data page is permanent: every record that disagrees with another or with
 the calendar, each linking to where it is fixed. Import flags can be dismissed
-once seen. Reconstructed lots live in config outside version control (see
+once seen. Snapshots, restore and export live on the Options page. Reconstructed lots live in config outside version control (see
 `bcoj/importer/estimates.py`); without it a ticker in deficit stays blocked,
 which is visible where a guess is not.
 
@@ -246,15 +246,12 @@ computed columns, journal.json, journal.db through the backup API.
 | ~~M4~~ | Roll preview, break-even, obligation calendar, concentration | Done. Preview runs the real roll on a copy; Risk page; strike drift and size growth on every chain |
 | ~~M5~~ | Reports, filters, saved views, notes and tags, export | Done. Realized by period and ticker, how short legs ended; filter bar every link keeps; CSV, JSON, SQLite export |
 | ~~M6~~ | Data health, snapshots and restore, deploy notes | Done. Data page with linked fixes and dismissable import flags; snapshots via backup API; restore snapshots first; docs/deploy.md |
-| M7 | Login page, options page, versioning | Planned, about a day. Salted PBKDF2 hash in `settings`; a first-run default password that must be changed; a login page with a signed cookie, logout, redirect back; an Options page holding the password change. App version constant shown in the footer and on the Data page beside the schema version; git tag per release; refuse a journal whose `user_version` is newer than the code |
-| M8 | Themes | Planned, 2 to 4 hours. Palettes move under a `data-theme` attribute set by a setting on the Options page: system, light, dark first; each further palette about half an hour |
-| M9 | Snapshot by API | Planned, 1 to 2 hours. A read-only token, hashed in `settings`, shown once on the Options page; `/api/snapshot` takes a snapshot and streams it; a one-line cron for another machine in docs/deploy.md |
-| M10 | Split a closed leg | Candidate, 2 to 3 hours. The importer flags a roll whose child has fewer contracts than its parent; the money is right, the shape is not, and split refuses a closed leg. Allow it, with close fields pro-rata and the child's roll link repointed. Build if the fresh import shows more than a couple |
+| ~~M7~~ | Login page, options page, versioning | Done. Login page; `bcoj` at first login, then a forced change; PBKDF2 hash and a session secret in `settings`, rotated on change so every browser logs out; HTTP Basic kept for scripts; `BCOJ_PASSWORD` resets. Options page: password, snapshots (take, download, restore), export, version and schema. Data page is health only. Version in the footer; a newer journal or snapshot is refused |
+| M8 | Themes, 1.1.0 | Planned, 2 to 4 hours. Palettes move under a `data-theme` attribute set by a setting on the Options page: system, light, dark first; each further palette about half an hour |
+| M9 | Snapshot by API, 1.2.0 | Planned, 1 to 2 hours. A read-only token, hashed in `settings`, shown once on the Options page; `/api/snapshot` takes a snapshot and streams it; a one-line cron for another machine in docs/deploy.md |
 
-Before M7, a fix: the roll preview still uses the old `.totals` boxes. Rebuild
-it as the `_facts` strip every other page uses, keeping fetch-as-you-type.
-
-The engine came before any UI so the reconciliation could prove it. 353 tests.
+Versions: 1.0.0 at M7; the minor version rises with each milestone after. Tag each in git.
+The engine came before any UI so the reconciliation could prove it. 359 tests.
 
 ---
 
@@ -326,3 +323,6 @@ multi-account, multi-currency. Tax lots, wash sales, 1256. Corporate actions
 | Shares are written before positions in a transaction | A buy-write's call points at a lot created in the same action |
 | Visual: the page's own position is tagged; actions colour-coded (blue close, purple roll, green keep, amber stock, grey split); open and closed legs look different; a chain's open legs share a rail | |
 | Put risk is not shown beside capital at risk | Identical for a short put |
+| A password always, the default fixed and forced to change | A forwarded port is not a boundary; a random default would need a console to read |
+| Changing the password logs every browser out | The session secret rotates with it |
+| Options holds what is about the app, Data what is about the records | Password, snapshots, export, version on one page; health on the other |

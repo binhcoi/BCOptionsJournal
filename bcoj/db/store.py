@@ -954,9 +954,11 @@ def restore(conn, db_path: str, name: str) -> str:
     snapshotted first, and that name is returned so the step can be undone."""
     if name not in {s["name"] for s in list_snapshots(db_path)}:
         raise ValueError("no such snapshot")
-    kept = snapshot(conn, db_path, "before-restore")
     source = sqlite3.connect(str(snapshots_dir(db_path) / name))
     try:
+        if schema.current_version(source) > schema.SCHEMA_VERSION:
+            raise ValueError("that snapshot was written by a newer version of the app")
+        kept = snapshot(conn, db_path, "before-restore")
         source.backup(conn)
     finally:
         source.close()

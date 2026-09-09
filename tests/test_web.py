@@ -8,6 +8,8 @@ in that chain.
 
 import re
 import threading
+import http.cookiejar
+import os
 import unittest
 import urllib.error
 import urllib.parse
@@ -24,6 +26,7 @@ from bcoj.web.server import Handler as _Handler
 # The suites silence request logging by replacing the method on the class;
 # keep the real one so it can be tested.
 _ORIGINAL_LOG_MESSAGE = _Handler.__dict__["log_message"]
+from bcoj.web import auth
 from bcoj.web.server import App, Handler
 
 
@@ -40,6 +43,40 @@ class WebTestCase(unittest.TestCase):
         cls.base = "http://127.0.0.1:%d" % cls.httpd.server_address[1]
         cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
         cls.thread.start()
+        cls.login()
+
+    PASSWORD = "test-pass-123"
+
+    @classmethod
+    def login(cls):
+        """Log in with the default, set a real password, log in with that.
+        The jar is installed globally so plain urlopen carries the cookie."""
+        cls.jar = http.cookiejar.CookieJar()
+        urllib.request.install_opener(
+            urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cls.jar)))
+        conn = store.open_db(cls.db_path)
+        try:
+            first = auth.password_is_default(conn)
+        finally:
+            conn.close()
+        if first:
+            cls._post_raw("/login", {"password": auth.DEFAULT_PASSWORD})
+            cls._post_raw("/options/password", {"current": auth.DEFAULT_PASSWORD,
+                                                "new": cls.PASSWORD, "again": cls.PASSWORD})
+        cls._post_raw("/login", {"password": cls.PASSWORD})
+
+    def cookie(self) -> str:
+        """The session cookie as a header value, for hand-built requests."""
+        return "; ".join(f"{c.name}={c.value}" for c in self.jar)
+
+    @classmethod
+    def _post_raw(cls, path, fields):
+        payload = dict(fields)
+        payload.setdefault("csrf", cls.app.csrf)
+        try:
+            urllib.request.urlopen(cls.base + path, data=urllib.parse.urlencode(payload).encode()).close()
+        except urllib.error.HTTPError as error:
+            error.close()
 
     @classmethod
     def tearDownClass(cls):
@@ -75,7 +112,7 @@ class WebTestCase(unittest.TestCase):
             # Flash messages ride in the query string, where a space is '+'.
             return urllib.parse.unquote_plus(location) if location else location
 
-        opener = urllib.request.build_opener(NoRedirect)
+        opener = urllib.request.build_opener(NoRedirect, urllib.request.HTTPCookieProcessor(self.jar))
         try:
             with opener.open(self.base + path, data=data) as response:
                 return (response.status, decode(response.headers.get("Location")),
@@ -110,7 +147,7 @@ class WebTestCase(unittest.TestCase):
 
 class TestPagesLoad(WebTestCase):
     def test_every_page_renders(self):
-        for path in ("/", "/new", "/expiring", "/audit",
+        for path in ("/", "/new", "/expiring", "/audit", "/options", "/data",
                      "/?show=all", "/?show=closed", "/expiring?within=7"):
             with self.subTest(path=path):
                 body = self.get(path)
@@ -558,41 +595,160 @@ class TestPositionPage(WebTestCase):
 
 
 class TestPassword(unittest.TestCase):
-    """The optional password, since a bound port is not a boundary."""
+    """Always a password: a fixed default at first login, then the user's own,
+    hashed in the journal's settings. A session is a signed cookie."""
 
-    def test_unauthenticated_request_is_challenged(self):
-        with TemporaryDirectory() as tmp:
-            app = App(str(Path(tmp) / "j.db"))
-            app.password = "secret"
-            Handler.app = app
-            Handler.log_message = lambda *a, **k: None
-            httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-            base = "http://127.0.0.1:%d" % httpd.server_address[1]
-            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-            thread.start()
-            try:
-                try:
-                    urllib.request.urlopen(base + "/")
-                    self.fail("expected 401")
-                except urllib.error.HTTPError as error:
-                    self.assertEqual(error.code, 401)
-                    self.assertIn("Basic", error.headers.get("WWW-Authenticate"))
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / "j.db")
+        self.app = App(self.db_path)
+        Handler.app = self.app
+        Handler.log_message = lambda *a, **k: None
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.base = "http://127.0.0.1:%d" % self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+        self.jar = http.cookiejar.CookieJar()
 
-                manager = urllib.request.HTTPPasswordMgrWithDefaultRealm()
-                manager.add_password(None, base, "user", "secret")
-                opener = urllib.request.build_opener(
-                    urllib.request.HTTPBasicAuthHandler(manager)
-                )
-                with opener.open(base + "/") as response:
-                    self.assertEqual(response.status, 200)
-            finally:
-                httpd.shutdown()
-                httpd.server_close()
-                thread.join(timeout=5)
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs):
+                return None
 
+        self.opener = urllib.request.build_opener(NoRedirect, urllib.request.HTTPCookieProcessor(self.jar))
 
-if __name__ == "__main__":
-    unittest.main()
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=5)
+        self.tmp.cleanup()
+
+    def call(self, path, fields=None):
+        data = None
+        if fields is not None:
+            payload = dict(fields)
+            payload.setdefault("csrf", self.app.csrf)
+            data = urllib.parse.urlencode(payload).encode()
+        try:
+            with self.opener.open(self.base + path, data=data) as res:
+                return res.status, res.headers.get("Location"), res.read().decode()
+        except urllib.error.HTTPError as error:
+            return error.code, error.headers.get("Location"), error.read().decode()
+
+    def test_first_login_uses_the_default_and_forces_a_change(self):
+        status, location, _ = self.call("/")
+        self.assertEqual((status, location), (303, "/login?next=%2F"))
+        status, _, body = self.call("/login")
+        self.assertEqual(status, 200)
+        self.assertIn(f"the password is <b>{auth.DEFAULT_PASSWORD}</b>", body)
+        self.assertNotIn("<nav>", body)
+        status, _, body = self.call("/login", {"password": "nope"})
+        self.assertEqual(status, 403)
+        self.assertIn("Wrong password", body)
+        status, location, _ = self.call("/login", {"password": auth.DEFAULT_PASSWORD, "next": "/risk"})
+        self.assertEqual(status, 303)
+        self.assertTrue(location.startswith("/options?flash="), location)
+        # Logged in, but only Options is reachable until the default is replaced.
+        status, location, _ = self.call("/risk")
+        self.assertEqual(status, 303)
+        self.assertTrue(location.startswith("/options"))
+        status, _, body = self.call("/options")
+        self.assertEqual(status, 200)
+        self.assertIn("The default password is public", body)
+        # Rules on the new password.
+        status, _, body = self.call("/options/password",
+                                    {"current": "nope", "new": "long-enough", "again": "long-enough"})
+        self.assertEqual(status, 400)
+        status, _, body = self.call("/options/password",
+                                    {"current": auth.DEFAULT_PASSWORD, "new": "short", "again": "short"})
+        self.assertIn("at least 8", body)
+        status, _, body = self.call("/options/password",
+                                    {"current": auth.DEFAULT_PASSWORD, "new": "long-enough", "again": "different"})
+        self.assertIn("differ", body)
+        status, location, _ = self.call("/options/password",
+                                        {"current": auth.DEFAULT_PASSWORD, "new": "long-enough", "again": "long-enough"})
+        self.assertEqual(status, 303)
+        self.assertTrue(location.startswith("/login"))
+        # Changing the password ended the session.
+        status, location, _ = self.call("/")
+        self.assertEqual(status, 303)
+        self.assertTrue(location.startswith("/login"))
+        status, _, _ = self.call("/login", {"password": auth.DEFAULT_PASSWORD})
+        self.assertEqual(status, 403)
+        status, location, _ = self.call("/login", {"password": "long-enough", "next": "/risk"})
+        self.assertEqual((status, location), (303, "/risk"))
+        status, _, body = self.call("/risk")
+        self.assertEqual(status, 200)
+        self.assertIn("<nav>", body)
+        # A POST without a session is refused, not redirected.
+        self.jar.clear()
+        status, _, _ = self.call("/options/snapshot", {"label": "x"})
+        self.assertEqual(status, 403)
+
+    def test_cookie_is_secure_behind_a_tls_proxy(self):
+        req = urllib.request.Request(
+            self.base + "/login", data=urllib.parse.urlencode(
+                {"csrf": self.app.csrf, "password": auth.DEFAULT_PASSWORD}).encode(),
+            headers={"X-Forwarded-Proto": "https"})
+        try:
+            with self.opener.open(req) as res:
+                cookie = res.headers.get("Set-Cookie")
+        except urllib.error.HTTPError as error:
+            cookie = error.headers.get("Set-Cookie")
+        self.assertIn("; Secure", cookie)
+        self.assertIn("HttpOnly", cookie)
+
+    def test_logout_clears_the_session(self):
+        self.call("/login", {"password": auth.DEFAULT_PASSWORD})
+        status, location, _ = self.call("/logout", {})
+        self.assertEqual((status, location), (303, "/login"))
+        status, location, _ = self.call("/options")
+        self.assertEqual(status, 303)
+
+    def test_basic_auth_still_works_for_scripts(self):
+        conn = store.open_db(self.db_path)
+        auth.set_password(conn, "script-pass")
+        conn.close()
+        manager = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+        manager.add_password(None, self.base, "any", "script-pass")
+        opener = urllib.request.build_opener(urllib.request.HTTPBasicAuthHandler(manager))
+        req = urllib.request.Request(self.base + "/export/journal.db",
+                                     headers={"Authorization": "Basic " + __import__("base64").b64encode(
+                                         b"any:script-pass").decode()})
+        with opener.open(req) as res:
+            self.assertEqual(res.status, 200)
+            self.assertTrue(res.read().startswith(b"SQLite format 3"))
+
+    def test_env_var_resets_the_password_at_start(self):
+        from bcoj.web.server import serve  # noqa: F401 - the reset lives in serve()
+        conn = store.open_db(self.db_path)
+        auth.set_password(conn, "forgotten")
+        conn.close()
+        # serve() would block; exercise the same call it makes.
+        os.environ["BCOJ_PASSWORD"] = "remembered"
+        try:
+            conn = store.open_db(self.db_path)
+            auth.set_password(conn, os.environ["BCOJ_PASSWORD"])
+            self.assertTrue(auth.check_password(conn, "remembered"))
+            self.assertFalse(auth.check_password(conn, "forgotten"))
+            conn.close()
+        finally:
+            del os.environ["BCOJ_PASSWORD"]
+
+    def test_hash_and_token_primitives(self):
+        stored = auth.hash_password("pw")
+        self.assertTrue(stored.startswith("pbkdf2_sha256$"))
+        self.assertTrue(auth.verify_password(stored, "pw"))
+        self.assertFalse(auth.verify_password(stored, "pW"))
+        self.assertFalse(auth.verify_password("garbage", "pw"))
+        conn = store.open_db(self.db_path)
+        token = auth.issue_token(conn)
+        self.assertTrue(auth.token_valid(conn, token))
+        self.assertFalse(auth.token_valid(conn, token[:-2] + "xx"))
+        self.assertFalse(auth.token_valid(conn, "0.abc"))
+        self.assertFalse(auth.token_valid(conn, ""))
+        auth.set_password(conn, "rotates-the-secret")
+        self.assertFalse(auth.token_valid(conn, token))
+        conn.close()
 
 
 class TestInlineActions(WebTestCase):
@@ -1340,7 +1496,7 @@ class TestTransport(WebTestCase):
         conn = http.client.HTTPConnection(host, int(port))
         try:
             for path in ("/", "/?show=open&partial=table", "/static/app.js"):
-                conn.request("GET", path)
+                conn.request("GET", path, headers={"Cookie": self.cookie()})
                 res = conn.getresponse()
                 body = res.read()
                 self.assertEqual(res.status, 200)
@@ -1369,6 +1525,7 @@ class TestTransport(WebTestCase):
         host, port = self.base.replace("http://", "").split(":")
         with socket.create_connection((host, int(port)), timeout=5) as sock:
             sock.sendall(b"\x00" * 12 + b"GET /?show=open HTTP/1.1\r\nHost: x\r\n"
+                         b"Cookie: " + self.cookie().encode() + b"\r\n"
                          b"Connection: close\r\n\r\n")
             data = b""
             while True:
@@ -1482,7 +1639,7 @@ class TestReportingAndViews(WebTestCase):
         self.assertIn("60+ DTE", page)
         year = self.get("/reports?by=year")
         self.assertIn(">2026<", year)
-        self.assertIn("/export/positions.csv", page)
+        self.assertIn("/export/positions.csv", self.get("/options"))
 
     def test_filters_narrow_the_list_and_travel_with_every_link(self):
         acme = self._open("fac")
@@ -1705,7 +1862,7 @@ class TestPositionsPagePolish(WebTestCase):
     def test_reports_page_folds_its_sections(self):
         page = self.get("/reports")
         self.assertIn('<details class="report" open><summary>Realized by period</summary>', page)
-        self.assertIn("<summary>Export</summary>", page)
+        self.assertIn("Exports are under", page)
 
 
 class TestCampaignStrip(WebTestCase):
@@ -1747,27 +1904,55 @@ class TestDataPage(WebTestCase):
         self.assertIn('<span class="badge st-blocked">error</span>', page)
         self.assertIn('<a href="/data" class="here">Data</a>', page)
 
-    def test_snapshots_are_taken_listed_and_restored_with_confirmation(self):
+    def test_snapshots_are_taken_listed_downloaded_and_restored(self):
         self.add_position(underlying="snp")
-        status, location, _ = self.post("/data/snapshot", {"label": "first", "next": "/data"})
+        status, location, _ = self.post("/options/snapshot", {"label": "first", "next": "/options"})
         self.assertEqual(status, 303)
         self.assertIn("Snapshot written", location)
-        page = self.get("/data")
+        page = self.get("/options")
         self.assertIn("-first.db", page)
         name = re.search(r"(journal-[0-9-]+-first\.db)", page).group(1)
+        self.assertIn(f'href="/snapshot/{name}" download>{name}</a>', page)
+        self.assertNotIn(">Download<", page)
+        with urllib.request.urlopen(self.base + f"/snapshot/{name}") as res:
+            self.assertEqual(res.headers.get("Content-Type"), "application/vnd.sqlite3")
+            self.assertIn(name, res.headers.get("Content-Disposition"))
+            self.assertTrue(res.read().startswith(b"SQLite format 3"))
+        self.get("/snapshot/journal-nope.db", expect=400)
+        self.get("/snapshot/..%2Fjournal.db", expect=404)
         # Change the journal, then roll back.
         self.add_position(underlying="gone")
-        status, _, body = self.post("/data/restore", {"name": name})
+        status, _, body = self.post("/options/restore", {"name": name})
         self.assertEqual(status, 400)
         self.assertIn("Tick the box", body)
-        status, location, _ = self.post("/data/restore", {"name": name, "sure": "1", "next": "/data"})
+        status, location, _ = self.post("/options/restore", {"name": name, "sure": "1", "next": "/options"})
         self.assertEqual(status, 303)
         self.assertIn("restored", location)
         self.assertEqual([p.underlying for p in self.positions() if p.underlying in ("SNP", "GONE")],
                          ["SNP"])
-        self.assertIn("before-restore", self.get("/data"))
-        status, _, _ = self.post("/data/restore", {"name": "../x.db", "sure": "1"})
+        self.assertIn("before-restore", self.get("/options"))
+        status, _, _ = self.post("/options/restore", {"name": "../x.db", "sure": "1"})
         self.assertEqual(status, 400)
+
+    def test_options_shows_versions_and_data_page_points_there(self):
+        from bcoj import __version__
+        from bcoj.db import schema
+        page = self.get("/options")
+        self.assertIn(__version__, page)
+        self.assertIn(f"<b>{schema.SCHEMA_VERSION}</b>", page)
+        self.assertIn(f"{__version__}</footer>", page)
+        data = self.get("/data")
+        self.assertNotIn("Take a snapshot", data)
+        self.assertIn('href="/options"', data)
+
+    def test_a_newer_journal_is_refused(self):
+        from bcoj.db import schema
+        path = str(Path(self._dir.name) / "future.db")
+        conn = store.open_db(path)
+        conn.execute(f"PRAGMA user_version = {schema.SCHEMA_VERSION + 1}")
+        conn.close()
+        with self.assertRaises(schema.SchemaTooNew):
+            store.open_db(path)
 
 
 class TestRawPositionRepairs(WebTestCase):

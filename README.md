@@ -16,6 +16,8 @@ python3 -m unittest discover -s tests -q
 python3 -m bcoj.web --db journal.db        # http://127.0.0.1:8000/
 ```
 
+First login: password `bcoj`. The app then makes you set your own.
+
 Import a legacy export:
 
 ```bash

@@ -16,7 +16,8 @@ from dataclasses import asdict
 from datetime import date, timedelta
 from decimal import Decimal
 
-from ..db import store
+from .. import __version__
+from ..db import store, schema
 from ..domain.enums import Direction, Right, Status
 from ..domain.money import ZERO, fmt, parse_money, price, q2
 from ..domain.types import Position
@@ -29,13 +30,15 @@ from ..engine.shares import InsufficientSharesError, match as match_lots
 from ..engine.pnl import close_cash, open_cash, realized_pl
 from ..engine.risk import break_even, capital_at_risk, credit_to_recover
 from ..engine.targets import target
+from . import auth
 from . import render as r
 
 
 class Redirect(Exception):
-    def __init__(self, location: str, flash: str = ""):
+    def __init__(self, location: str, flash: str = "", headers=()):
         self.location = location
         self.flash = flash
+        self.headers = tuple(headers)
 
 
 class BadRequest(Exception):
@@ -1870,15 +1873,7 @@ neither a hit nor a miss on its own; what the chain finally does is.</p>
 <details class="report"><summary>How short legs ended, by days to expiry when opened</summary>
 {r.table(outcome_head, outcome_rows(by_dte_outcomes))}
 </details>
-<details class="report"><summary>Export</summary>
-<p><a href="/export/positions.csv">positions.csv</a> &middot;
-<a href="/export/shares.csv">shares.csv</a> &middot;
-<a href="/export/journal.json">journal.json</a> &middot;
-<a href="/export/journal.db">journal.db</a> (full SQLite backup)</p>
-<p class="hint">The CSV files carry the computed columns too: realized, carry,
-break-even, capital at risk. The .db file is the whole journal; copy it
-somewhere safe.</p>
-</details>"""
+<p class="hint">Exports are under <a href="/options">Options</a>.</p>"""
     return 200, r.page("Reports", body, nav_here="reports")
 
 
@@ -1997,16 +1992,14 @@ HEALTH_TITLES = {
 }
 
 
-def data_page(conn, db_path: str, token: str, query) -> tuple[int, str]:
+def data_page(conn, token: str, query) -> tuple[int, str]:
     issues = _health_issues(conn)
     flags = {f["id"]: f for f in (dict(x) for x in store.open_flags(conn))}
     errors = sum(1 for i in issues if i.severity == health.ERROR)
     warnings = len(issues) - errors
 
-    cells = [("Errors", r.esc(errors), -1 if errors else None),
-             ("Warnings", r.esc(warnings), None),
-             ("Snapshots", r.esc(len(store.list_snapshots(db_path))), None)]
-    strip = _kv("Journal", "", cells)
+    strip = _kv("Journal", "", [("Errors", r.esc(errors), -1 if errors else None),
+                                ("Warnings", r.esc(warnings), None)])
 
     if not issues:
         health_html = '<p class="callout ok">All clear: nothing in the journal disagrees with itself.</p>'
@@ -2031,27 +2024,111 @@ def data_page(conn, db_path: str, token: str, query) -> tuple[int, str]:
                          who, r.esc(i.detail), fix])
         health_html = r.table(["", "What", "Kind", "Record", "Detail", ""], rows, cls="health")
 
+    body = f"""{strip}
+<h2>Health</h2>
+<p class="hint">Records that disagree with each other or with the calendar. Each
+row leads to the page where it can be fixed; nothing here is changed for you.
+Snapshots and exports are under <a href="/options">Options</a>.</p>
+{health_html}"""
+    return 200, r.page("Data", body, nav_here="data")
+
+
+# ---------------------------------------------------------------------------
+# login, options
+
+
+def login_page(conn, token: str, query, problem: str = "") -> tuple[int, str]:
+    nxt = (query.get("next") or ["/"])[0]
+    if not nxt.startswith("/") or nxt.startswith("//"):
+        nxt = "/"
+    hint = ""
+    if auth.password_is_default(conn):
+        hint = (f'<p class="callout">First login: the password is <b>{auth.DEFAULT_PASSWORD}</b>. '
+                "You will be asked to change it.</p>")
+    error = f'<p class="callout">{r.esc(problem)}</p>' if problem else ""
+    body = hint + error + r.form(
+        "/login",
+        r.hidden("next", nxt)
+        + r.field("Password", "password", kind="password", required=True, autofocus=True),
+        token, submit="Log in", cls="login")
+    return (200 if not problem else 403), r.page("Log in", body, bare=True)
+
+
+def do_login(conn, token: str, form):
+    if not auth.check_password(conn, _one(form, "password")):
+        return login_page(conn, token, {"next": [_one(form, "next", "/")]}, "Wrong password.")
+    cookie = auth.cookie_header(auth.issue_token(conn))
+    where = _next(form, "/")
+    if auth.password_is_default(conn):
+        raise Redirect("/options", "!Set a password before anything else. The default is public.",
+                       headers=[("Set-Cookie", cookie)])
+    raise Redirect(where, headers=[("Set-Cookie", cookie)])
+
+
+def do_logout() -> None:
+    raise Redirect("/login", headers=[("Set-Cookie", auth.clear_cookie_header())])
+
+
+def do_change_password(conn, form) -> None:
+    current, new, again = _one(form, "current"), _one(form, "new"), _one(form, "again")
+    if not auth.check_password(conn, current):
+        raise BadRequest("The current password is wrong")
+    if len(new) < 8:
+        raise BadRequest("The new password needs at least 8 characters")
+    if new == auth.DEFAULT_PASSWORD:
+        raise BadRequest("That is the default password; choose another")
+    if new != again:
+        raise BadRequest("The two copies of the new password differ")
+    auth.set_password(conn, new)
+    # The secret rotated with the password, so this session is over too.
+    raise Redirect("/login", "Password changed. Log in again.",
+                   headers=[("Set-Cookie", auth.clear_cookie_header())])
+
+
+def options_page(conn, db_path: str, token: str, query) -> tuple[int, str]:
+    must_change = auth.password_is_default(conn)
+    cells = [("Version", r.esc(__version__), None),
+             ("Schema", r.esc(schema.current_version(conn)), None),
+             ("Snapshots", r.esc(len(store.list_snapshots(db_path))), None)]
+    strip = _kv("This journal", r.esc(db_path), cells)
+
+    pw_hint = ('<p class="callout">The default password is public. Set your own now.</p>'
+               if must_change else "")
+    password = r.form(
+        "/options/password",
+        r.field("Current password", "current", kind="password", required=True,
+                autofocus=must_change)
+        + r.field("New password", "new", kind="password", required=True,
+                  attrs=' minlength="8" autocomplete="new-password"')
+        + r.field("New password again", "again", kind="password", required=True,
+                  attrs=' minlength="8" autocomplete="new-password"'),
+        token, submit="Change password", cls="stack")
+    logout = r.form("/logout", "", token, submit="Log out", cls="inline")
+
     snaps = store.list_snapshots(db_path)
     snap_rows = []
     for s in snaps:
         restore_form = r.form(
-            "/data/restore",
-            r.hidden("name", s["name"]) + r.hidden("next", "/data")
+            "/options/restore",
+            r.hidden("name", s["name"]) + r.hidden("next", "/options")
             + '<label class="check"><input type="checkbox" name="sure" value="1"> '
               "replace the journal with this snapshot</label>",
             token, submit="Restore", cls="inline restore")
-        snap_rows.append([r.esc(s["at"]), r.esc(s["name"]), f"{s['bytes'] // 1024} KB", restore_form])
-    take = r.form("/data/snapshot",
-                  r.hidden("next", "/data")
+        link = f'<a href="/snapshot/{r.esc(s["name"])}" download>{r.esc(s["name"])}</a>'
+        snap_rows.append([r.esc(s["at"]), link, f"{s['bytes'] // 1024} KB", restore_form])
+    take = r.form("/options/snapshot",
+                  r.hidden("next", "/options")
                   + r.field("Label", "label", "", attrs=' placeholder="optional, e.g. before-cleanup"'),
                   token, submit="Take a snapshot now", cls="inline save-view")
     folder = store.snapshots_dir(db_path)
 
     body = f"""{strip}
-<h2>Health</h2>
-<p class="hint">Records that disagree with each other or with the calendar. Each
-row leads to the page where it can be fixed; nothing here is changed for you.</p>
-{health_html}
+<h2>Password</h2>
+{pw_hint}
+{password}
+<p class="hint">Forgotten? Start the server once with <code>BCOJ_PASSWORD=new-password</code>
+to reset it.</p>
+{logout}
 <h2>Snapshots</h2>
 <p class="hint">A snapshot is a complete copy of the journal, taken through
 SQLite's backup API so it is consistent even mid-write. They live in
@@ -2063,13 +2140,21 @@ after snapshotting what it replaces, so a restore can itself be undone.</p>
 <p><a href="/export/positions.csv">positions.csv</a> &middot;
 <a href="/export/shares.csv">shares.csv</a> &middot;
 <a href="/export/journal.json">journal.json</a> &middot;
-<a href="/export/journal.db">journal.db</a> (download the whole journal)</p>"""
-    return 200, r.page("Data", body, nav_here="data")
+<a href="/export/journal.db">journal.db</a> (the whole journal, consistent copy)</p>"""
+    return 200, r.page("Options", body, nav_here="options")
+
+
+def snapshot_file(db_path: str, name: str):
+    """A snapshot by name, only ever one that the listing knows."""
+    if name not in {s["name"] for s in store.list_snapshots(db_path)}:
+        raise BadRequest("no such snapshot")
+    with open(store.snapshots_dir(db_path) / name, "rb") as f:
+        return 200, f.read(), "application/vnd.sqlite3", name
 
 
 def do_snapshot(conn, db_path: str, form) -> None:
     name = store.snapshot(conn, db_path, _one(form, "label"))
-    raise Redirect(_next(form, "/data"), f"Snapshot written: {name}")
+    raise Redirect(_next(form, "/options"), f"Snapshot written: {name}")
 
 
 def do_restore(conn, db_path: str, form) -> None:
@@ -2079,7 +2164,7 @@ def do_restore(conn, db_path: str, form) -> None:
         kept = store.restore(conn, db_path, _one(form, "name"))
     except ValueError as exc:
         raise BadRequest(str(exc)) from None
-    raise Redirect(_next(form, "/data"),
+    raise Redirect(_next(form, "/options"),
                    f"Journal restored from {_one(form, 'name')}; the journal as it was is kept as {kept}")
 
 

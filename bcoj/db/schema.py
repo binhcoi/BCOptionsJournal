@@ -16,6 +16,10 @@ import sqlite3
 
 SCHEMA_VERSION = 4
 
+
+class SchemaTooNew(Exception):
+    """The file was written by a newer version of the app."""
+
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
         """
@@ -206,6 +210,11 @@ def migrate(conn: sqlite3.Connection) -> int:
     needed for table rebuilds, which have to toggle a pragma.
     """
     version = current_version(conn)
+    if version > SCHEMA_VERSION:
+        raise SchemaTooNew(
+            f"this journal is schema version {version}; this code knows up to "
+            f"{SCHEMA_VERSION}. Upgrade the app before opening it."
+        )
     for target in sorted(MIGRATIONS):
         if target <= version:
             continue

@@ -9,9 +9,34 @@ python3 -m unittest discover -s tests -q
 python3 -m bcoj.web --db /srv/bcoj/journal.db     # http://127.0.0.1:8000/
 ```
 
-Python 3.10 or newer, standard library only. Reach it from another machine by
-forwarding the port (`ssh -L 8000:127.0.0.1:8000 host`), not by binding a
-public address. If you must bind wider, set `BCOJ_PASSWORD`.
+Python 3.10 or newer, standard library only. Loopback by default; reach it by
+forwarding the port (`ssh -L 8000:127.0.0.1:8000 host`) or put it behind a
+proxy as below.
+
+## Behind a reverse proxy
+
+The app must bind an address the proxy can reach; `127.0.0.1` gives the proxy
+a 502. In the LXC:
+
+```
+ExecStart=/usr/bin/python3 -m bcoj.web --db /srv/bcoj/journal.db --host 0.0.0.0
+```
+
+Firewall port 8000 to the proxy node only. In Nginx Proxy Manager: scheme
+`http`, the container's address, port 8000, an SSL certificate with Force SSL.
+No websockets. The proxy's `X-Forwarded-Proto: https` header, which NPM sends,
+makes the session cookie `Secure`.
+
+## Password
+
+Always required. First login is `bcoj`; the app then forces a change and
+stores the hash in the journal. Change it again under Options. Forgotten:
+start once with `BCOJ_PASSWORD=new-password`, which resets it. Scripts may
+send the password as HTTP Basic instead of logging in:
+
+```bash
+curl -u x:PASSWORD -o journal.db http://127.0.0.1:8000/export/journal.db
+```
 
 ### LXC sizing
 
@@ -64,15 +89,15 @@ Journal on the `./docker/data` volume; port published to loopback only.
 
 All three give a complete, consistent copy:
 
-1. Data page, **Take a snapshot now**. Written to `backups/` beside the journal through SQLite's backup API. Optional label.
-2. Data page, **Export**, `journal.db`. The same copy, downloaded.
+1. Options page, **Take a snapshot now**. Written to `backups/` beside the journal through SQLite's backup API. Optional label. Each snapshot has a **Download** link.
+2. Options page, **Export**, `journal.db`. The same copy, downloaded.
 3. Copy the file with the server stopped. Never while it runs: a plain copy can catch a write half way.
 
 Keep snapshots on another disk or machine. The app never deletes them.
 
 ## Restore
 
-Data page, **Restore** on any snapshot, behind a confirmation. The current
+Options page, **Restore** on any snapshot, behind a confirmation. The current
 journal is snapshotted first as `before-restore`, then replaced and share
 allocations rebuilt. To undo, restore `before-restore`.
 
@@ -85,4 +110,5 @@ cp /srv/bcoj/backups/journal-YYYYMMDD-HHMMSS.db /srv/bcoj/journal.db
 ## Upgrade
 
 Pull, run the tests, restart. Migrations run on start, each in its own
-transaction. Snapshot first.
+transaction. Snapshot first. The app refuses to open a journal, or restore a
+snapshot, written by a newer version than itself.

@@ -8,6 +8,7 @@ in functions rather than concatenating strings ad hoc.
 from datetime import date
 from html import escape
 
+from .. import __version__
 from ..domain.money import fmt
 from .static import VERSION
 
@@ -30,11 +31,21 @@ def num(value, dash: str = "-") -> str:
     return esc(dash) if value is None else esc(value)
 
 
-def page(title: str, body: str, flash: str = "", nav_here: str = "", toolbar: str = "") -> str:
+def page(title: str, body: str, flash: str = "", nav_here: str = "", toolbar: str = "",
+         bare: bool = False) -> str:
     def tab(href: str, label: str, key: str) -> str:
         cls = ' class="here"' if key == nav_here else ""
         return f'<a href="{href}"{cls}>{esc(label)}</a>'
 
+    nav = "" if bare else f"""<nav>
+    {tab("/", "Positions", "positions")}
+    {tab("/shares", "Shares", "shares")}
+    {tab("/risk", "Risk", "risk")}
+    {tab("/reports", "Reports", "reports")}
+    {tab("/data", "Data", "data")}
+    {tab("/audit", "History", "audit")}
+    {tab("/options", "Options", "options")}
+  </nav>"""
     banner = ""
     if flash:
         level = "warn" if flash.startswith("!") else "ok"
@@ -49,20 +60,14 @@ def page(title: str, body: str, flash: str = "", nav_here: str = "", toolbar: st
 </head><body>
 <header>
   <strong>{esc(APP_NAME)}</strong>
-  <nav>
-    {tab("/", "Positions", "positions")}
-    {tab("/shares", "Shares", "shares")}
-    {tab("/risk", "Risk", "risk")}
-    {tab("/reports", "Reports", "reports")}
-    {tab("/data", "Data", "data")}
-    {tab("/audit", "History", "audit")}
-  </nav>
+  {nav}
 </header>
 <main>
 {banner}
 <div class="titlebar"><h1>{esc(title)}</h1>{toolbar}</div>
 {body}
 </main>
+<footer>{esc(APP_NAME)} {esc(__version__)}</footer>
 <script src="/static/app.js?v={VERSION["app.js"]}"></script>
 </body></html>"""
 

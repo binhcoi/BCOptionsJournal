@@ -5,7 +5,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: bcoj:0.1.0
+    image: bcoj
     volumes:
       # The journal. Back it up by copying this one file.
       - ./data:/data
@@ -13,7 +13,7 @@ services:
       - ../data:/import:ro
     environment:
       BCOJ_DB: /data/journal.db
-      # BCOJ_PASSWORD: set to require a password
+      # BCOJ_PASSWORD: set once to reset a forgotten password
     # Published to loopback only; a personal app is not a service.
     ports:
       - "127.0.0.1:8000:8000"

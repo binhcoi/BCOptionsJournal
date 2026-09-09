@@ -51,6 +51,10 @@ nav a, .tabs a {
 nav a:hover, .tabs a:hover { background: var(--bg); color: var(--ink); }
 nav a.here, .tabs a.here { background: var(--accent); color: #fff; }
 main { max-width: 1180px; margin: 0 auto; padding: 1.2rem; }
+footer { max-width: 1180px; margin: 0 auto; padding: 0 1.2rem 1.2rem; font-size: .78rem; color: var(--dim); }
+form.login, form.stack { display: grid; gap: .6rem; max-width: 22rem; justify-items: start; }
+form.login label, form.stack label { width: 100%; }
+form.login { margin-top: 1rem; }
 h1 { font-size: 1.35rem; margin: .2rem 0 1rem; }
 h2 { font-size: 1.05rem; margin: 1.8rem 0 .6rem; }
 a { color: var(--accent); }
@@ -712,7 +716,9 @@ JS = """
       var base = href.split('#')[0];
       var url = base + (base.indexOf('?') >= 0 ? '&' : '?') + 'partial=' + partial;
       pending[key] = fetch(url, { credentials: 'same-origin' })
-        .then(function (res) { if (!res.ok) throw new Error(res.status); return res.text(); })
+        .then(function (res) {
+          if (res.redirected && /\/login/.test(res.url)) { window.location.href = res.url; }
+          if (!res.ok) throw new Error(res.status); return res.text(); })
         .then(function (html) {
           if (partial === 'table') remember(href, html);
           delete pending[key]; return html;
@@ -1017,7 +1023,9 @@ JS = """
       params.delete('csrf'); params.delete('next');
       fetch(box.getAttribute('data-preview') + '?' + params.toString(),
             { credentials: 'same-origin' })
-        .then(function (res) { return res.ok ? res.text() : ''; })
+        .then(function (res) {
+          if (res.redirected && /\/login/.test(res.url)) { window.location.href = res.url; return ''; }
+          return res.ok ? res.text() : ''; })
         .then(function (html) { if (html) box.innerHTML = html; })
         .catch(function () {});
     }, 120);
