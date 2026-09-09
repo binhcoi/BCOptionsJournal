@@ -167,13 +167,15 @@ details.report { margin: 1.2rem 0; }
 details.raw > summary { font-size: .95rem; color: var(--dim); }
 details.raw form.compact { margin-bottom: .6rem; }
 .raw-actions { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; margin-top: .8rem; }
+.raw-actions form.inline { display: inline-flex; align-items: center; gap: .5rem; }
+.raw-actions form.inline .actions { display: inline-flex; }
+.raw-actions label.check { flex-direction: row; align-items: center; gap: .3rem; font-size: .8rem;
+  color: var(--dim); white-space: nowrap; }
+.raw-actions button { padding: .35rem .8rem; line-height: 1.2; }
 form.inline.reopen button { background: var(--panel); color: var(--accent);
   border: 1px solid var(--accent); border-radius: 6px; padding: .35rem .8rem; font-weight: 600;
   text-decoration: none; }
 form.inline.reopen button:hover { background: var(--accent-tint); }
-form.convert { display: inline-flex; align-items: center; gap: .5rem; }
-form.convert label.check { flex-direction: row; align-items: center; gap: .3rem; font-size: .8rem;
-  color: var(--dim); }
 form.inline.convert button { background: var(--panel); color: var(--amber);
   border: 1px solid var(--amber); border-radius: 6px; padding: .35rem .8rem; font-weight: 600;
   text-decoration: none; }

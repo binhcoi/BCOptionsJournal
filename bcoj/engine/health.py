@@ -9,9 +9,12 @@ not any more (an option past its expiry with no outcome recorded).
 
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 
 from ..domain.enums import Status
 from ..domain.types import Position
+
+DEFAULT_FEE_RATE = Decimal("0.65")
 
 ERROR = "error"
 WARNING = "warning"
@@ -37,8 +40,32 @@ class Issue:
     href: str             # where to go to fix it
 
 
+def fee_unusual(p: Position, fee_rate: Decimal = DEFAULT_FEE_RATE) -> bool:
+    """A fee present but far off the per-contract rate. Zero is normal
+    (expiries, assignments). The same rule the importer and the entry
+    validator apply, so the three agree on what is odd."""
+    expected = fee_rate * p.quantity
+    return any(fee > 0 and (fee < expected / 2 or fee > expected * Decimal("1.5"))
+               for fee in (p.open_fee, p.close_fee))
+
+
+def _import_flag_still_true(flag, by_id, fee_rate) -> bool | None:
+    """Re-check an import flag against the record as it now stands. None
+    means the kind has no live re-check and the flag stays until dismissed."""
+    p = by_id.get(flag["entity_id"])
+    if p is None:
+        return None
+    if flag["kind"] == "fee_unusual":
+        return fee_unusual(p, fee_rate)
+    if flag["kind"] == "quantity_drop_on_roll":
+        parent = by_id.get(p.rolled_from_id) if p.rolled_from_id else None
+        return parent is not None and p.quantity < parent.quantity
+    return None
+
+
 def check(positions, lots, disposals, *, blocked: dict | None = None,
-          import_flags=(), today: date | None = None) -> list[Issue]:
+          import_flags=(), today: date | None = None,
+          fee_rate: Decimal = DEFAULT_FEE_RATE) -> list[Issue]:
     """Every issue found, errors first. ``blocked`` maps a ticker to the
     reason its share matching failed."""
     today = today or date.today()
@@ -163,6 +190,8 @@ def check(positions, lots, disposals, *, blocked: dict | None = None,
         superseded_by = LIVE_FOR_IMPORT.get(f["kind"])
         if superseded_by and (superseded_by, f["entity_id"]) not in live:
             continue        # the data has been fixed; see cleared_flags()
+        if _import_flag_still_true(f, by_id, fee_rate) is False:
+            continue        # likewise, re-checked against the record itself
         issues.append(Issue(f"import:{f['kind']}", WARNING, f["entity_type"], f["entity_id"],
                             f["detail"] or f["kind"],
                             f"/position/{f['entity_id']}#raw" if f["entity_type"] == "position"
@@ -173,10 +202,9 @@ def check(positions, lots, disposals, *, blocked: dict | None = None,
 
 
 def cleared_flags(import_flags, issues) -> list:
-    """Import flags whose live check no longer fires: fixed, and safe to resolve."""
-    live = {(i.kind, i.entity_id) for i in issues}
-    return [f for f in import_flags
-            if LIVE_FOR_IMPORT.get(f["kind"]) and (LIVE_FOR_IMPORT[f["kind"]], f["entity_id"]) not in live]
+    """Import flags that ``check`` left out: fixed in the data, safe to resolve."""
+    shown = {(i.kind, i.entity_id) for i in issues}
+    return [f for f in import_flags if ("import:" + f["kind"], f["entity_id"]) not in shown]
 
 
 def summary(issues) -> dict[str, int]:

@@ -1971,7 +1971,8 @@ def _health_issues(conn) -> list:
     tickers = wheels.by_ticker(index, positions, lots, disposals, rule)
     blocked = {t.underlying: t.error for t in tickers if t.error}
     flags = [dict(f) for f in store.open_flags(conn)]
-    issues = health.check(positions, lots, disposals, blocked=blocked, import_flags=flags)
+    issues = health.check(positions, lots, disposals, blocked=blocked, import_flags=flags,
+                          fee_rate=_fee_rate(conn))
     # An import flag whose live check no longer fires was fixed: close it.
     for f in health.cleared_flags(flags, issues):
         store.resolve_flag(conn, f["id"], "fixed in the data")

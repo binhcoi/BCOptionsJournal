@@ -941,6 +941,33 @@ class TestHealth(unittest.TestCase):
         # d (missing predecessor), the lot's gone assignment, the sale's missing lot.
         self.assertEqual(self.health.summary(issues)["dangling_link"], 3)
 
+    def test_import_flags_recheck_against_the_record_as_it_stands(self):
+        odd = closed(id="odd", quantity=10, open_fee=D("6.50"), close_fee=D("0.09"))
+        fixed = closed(id="fixed", quantity=10, open_fee=D("6.50"), close_fee=D("6.50"))
+        parent = closed(id="par", quantity=15, status=Status.ROLLED)
+        shrunk = position(id="shr", quantity=13, rolled_from_id="par")
+        grown = position(id="grw", quantity=15, rolled_from_id="par")
+        flags = [{"kind": "fee_unusual", "entity_type": "position", "entity_id": i, "detail": ""}
+                 for i in ("odd", "fixed")]
+        flags += [{"kind": "quantity_drop_on_roll", "entity_type": "position", "entity_id": i,
+                   "detail": ""} for i in ("shr", "grw")]
+        flags.append({"kind": "share_row", "entity_type": "position", "entity_id": "odd", "detail": ""})
+        issues = self.health.check([odd, fixed, parent, shrunk, grown], [], [],
+                                   import_flags=flags, today=self.today)
+        shown = {(i.kind, i.entity_id) for i in issues if i.kind.startswith("import:")}
+        self.assertIn(("import:fee_unusual", "odd"), shown)
+        self.assertNotIn(("import:fee_unusual", "fixed"), shown)
+        self.assertIn(("import:quantity_drop_on_roll", "shr"), shown)
+        self.assertNotIn(("import:quantity_drop_on_roll", "grw"), shown)
+        self.assertIn(("import:share_row", "odd"), shown)       # no re-check: stays until dismissed
+        self.assertEqual({f["entity_id"] for f in self.health.cleared_flags(flags, issues)},
+                         {"fixed", "grw"})
+        # The rate is a setting; at 0.01 a contract, 0.09 on 10 is not odd.
+        cheap = closed(id="odd", quantity=10, open_fee=D("0.10"), close_fee=D("0.09"))
+        issues = self.health.check([cheap], [], [], import_flags=flags[:1], today=self.today,
+                                   fee_rate=D("0.01"))
+        self.assertEqual([i for i in issues if i.kind.startswith("import:")], [])
+
 
 class TestScorecard(unittest.TestCase):
     """Over the split campaign of TestCampaign: banked 593.50, 3,000 in hand,
