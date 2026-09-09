@@ -1387,7 +1387,7 @@ class TestTransport(WebTestCase):
 
 
 class TestDecisionSupport(WebTestCase):
-    """M4: the roll panel, the risk page, and strike drift on a chain."""
+    """The roll panel, the risk page, and strike drift on a chain."""
 
     def _open(self, ticker, **kw):
         self.add_position(underlying=ticker, **kw)
@@ -1461,7 +1461,7 @@ class TestDecisionSupport(WebTestCase):
 
 
 class TestReportingAndViews(WebTestCase):
-    """M5: reports, filters, saved views, notes and tags, exports."""
+    """Reports, filters, saved views, notes and tags, exports."""
 
     def _open(self, ticker, **kw):
         self.add_position(underlying=ticker, **kw)

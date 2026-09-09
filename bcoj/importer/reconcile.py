@@ -1,6 +1,6 @@
 """Reconciliation: recompute every figure and diff it against the sheet.
 
-This is M1's acceptance test. Five years of hand-maintained P/L is a better
+This is the engine's acceptance test. Five years of hand-maintained P/L is a better
 oracle than any fixture, so the engine is not trusted until it agrees with it
 row by row -- or until each disagreement is explained.
 """

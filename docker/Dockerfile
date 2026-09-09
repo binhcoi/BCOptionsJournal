@@ -1,5 +1,4 @@
-# M1 has no third-party dependencies, so this image installs nothing.
-# M2 will add: pip install --no-cache-dir ".[web]"
+# No third-party dependencies; nothing to install.
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -7,10 +6,9 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml ./
 COPY bcoj ./bcoj
 COPY tests ./tests
-COPY docs ./docs
 
 # The journal lives on a volume so the container stays disposable.
 ENV BCOJ_DB=/data/journal.db
