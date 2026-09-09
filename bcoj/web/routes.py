@@ -1303,15 +1303,16 @@ def _roll_preview_placeholder() -> str:
 
 
 def _roll_preview_html(pv) -> str:
-    """The decision panel: before and after, from the engine's own roll."""
+    """The decision strip: the chain after the roll, each figure with how it
+    moved, from the engine's own roll run on a copy."""
     def was(before, after, better) -> str:
-        """The change, coloured by whether it is good news. ``better`` says
-        which direction is good for this figure; None means neither."""
-        if before is None:
+        """The change under the figure, coloured by whether it is good news.
+        ``better`` says which direction is good; None means neither."""
+        if before is None or after is None:
             return ""
         delta = q2(after - before)
         if delta == 0:
-            return f"<small>unchanged from {fmt(before)}</small>"
+            return "<small>unchanged</small>"
         cls = "dim" if better is None else ("pos" if (delta > 0) == better else "neg")
         arrow = "&uarr;" if delta > 0 else "&darr;"
         return (f'<small class="{cls}">{arrow} {fmt(abs(delta))} '
@@ -1320,57 +1321,50 @@ def _roll_preview_html(pv) -> str:
     def signed(value) -> str:
         return r.money(value, dash="0.00")
 
-    roll_cls = "pos" if pv.is_credit else "neg"
     roll_word = "credit" if pv.is_credit else "debit"
     tgt = pv.target_after
-    target_cell = (f'<span class="pos">{r.esc(price(tgt.price))}</span> <small>expected '
-                   f"{fmt(tgt.expected_pl)}</small>" if tgt.applicable
-                   else '<span class="neg">none: net debit</span>')
+    target = (f'<span class="pos">{r.esc(price(tgt.price))}</span>'
+              f"<small>expected {fmt(tgt.expected_pl)}</small>" if tgt.applicable
+              else '<span class="neg">none: net debit</span>')
     # For a short put a lower break-even is better; for a short call, higher.
-    be_better_up = pv.new_leg.right is Right.CALL
+    be_up_good = pv.new_leg.right is Right.CALL
     be_after = pv.break_even_after.price if pv.break_even_after else None
     be_before = pv.break_even_before.price if pv.break_even_before else None
     be_cls = "dim"
     if be_after is not None and be_before is not None and be_after != be_before:
-        be_cls = "pos" if (be_after > be_before) == be_better_up else "neg"
+        be_cls = "pos" if (be_after > be_before) == be_up_good else "neg"
+    risk_cls = ("neg" if pv.at_risk_before is not None and pv.at_risk_after is not None
+                and pv.at_risk_after > pv.at_risk_before else "dim")
     cells = [
-        ("This roll", f'<span class="{roll_cls}">{roll_word} {fmt(abs(pv.this_roll))}</span>'),
-        ("Closing this leg books", signed(pv.closing_realized)),
-        ("Chain carry after", signed(pv.carry_after) + was(pv.carry_before, pv.carry_after, True)),
+        (f"Roll {roll_word}", f'<span class="{"pos" if pv.is_credit else "neg"}">'
+                              f"{fmt(abs(pv.this_roll))}</span>"),
+        ("Closing books", signed(pv.closing_realized)),
+        ("Carry after", signed(pv.carry_after) + was(pv.carry_before, pv.carry_after, True)),
         ("Net credit after", signed(pv.net_credit_after)
                              + was(pv.net_credit_before, pv.net_credit_after, True)),
         ("Break-even after", (f'<span class="{be_cls}">{fmt(be_after)}</span>' if be_after is not None
-                              else '<span class="dim">-</span>')
-                             + (was(be_before, be_after, be_better_up)
-                                if be_after is not None and be_before is not None else "")),
-        ("Capital at risk after", (f'<span class="{"neg" if pv.at_risk_before is not None and pv.at_risk_after is not None and pv.at_risk_after > pv.at_risk_before else "dim"}">'
-                                   f"{fmt(pv.at_risk_after) if pv.at_risk_after is not None else '-'}</span>"
-                                   + (was(pv.at_risk_before, pv.at_risk_after, False)
-                                      if pv.at_risk_before is not None and pv.at_risk_after is not None else ""))),
-        ("Target on the new leg", target_cell),
-        ("Credit still to recover", (f'<span class="neg">{fmt(pv.to_recover_after)}</span>'
-                                     if pv.underwater_after else '<span class="pos">0.00</span>')),
+                              else '<span class="dim">-</span>') + was(be_before, be_after, be_up_good)),
+        ("At risk after", (f'<span class="{risk_cls}">{fmt(pv.at_risk_after)}</span>'
+                           if pv.at_risk_after is not None else '<span class="dim">-</span>')
+                          + was(pv.at_risk_before, pv.at_risk_after, False)),
+        ("Target", target),
+        ("To recover", f'<span class="neg">{fmt(pv.to_recover_after)}</span>' if pv.underwater_after
+                       else '<span class="pos">0.00</span>'),
         ("New leg", f"{pv.dte_after} DTE"),
     ]
-    flags = []
+    chips = []
     if pv.grows:
         old, new = pv.closing_leg.quantity, pv.new_leg.quantity
-        flags.append(f"<b>Size grows {old} &rarr; {new} contracts (x{new / old:.2f}).</b> "
-                     "This is how a position quietly grows several-fold, one roll "
-                     "at a time.")
+        chips.append((f"<b>Size grows {old} &rarr; {new}</b> contracts (x{new / old:.2f})", "warn"))
     if pv.strike_change:
-        flags.append(f"Strike {r.esc(price(pv.closing_leg.strike))} &rarr; "
+        chips.append(f"Strike {r.esc(price(pv.closing_leg.strike))} &rarr; "
                      f"{r.esc(price(pv.new_leg.strike))} "
                      f"({'down' if pv.strike_change < 0 else 'up'} "
-                     f"{r.esc(price(abs(pv.strike_change)))}).")
+                     f"{r.esc(price(abs(pv.strike_change)))})")
     if pv.underwater_after:
-        flags.append(f"The chain stays under water by <b>{fmt(pv.to_recover_after)}</b> "
-                     "after this roll: that much credit is still owed before it "
-                     "nets positive.")
-    flag_html = "".join(f'<p class="callout">{f}</p>' for f in flags)
-    return ('<div class="totals">' + "".join(
-        f"<div><span>{r.esc(k)}</span><b>{v}</b></div>" for k, v in cells
-    ) + "</div>" + flag_html)
+        chips.append((f"Still under water by <b>{fmt(pv.to_recover_after)}</b>: that much "
+                      "credit is owed before the chain nets positive", "warn"))
+    return _kv("After this roll", "the chain as the engine would record it", cells, _chips(chips))
 
 
 def roll_preview_fragment(conn, position_id, query) -> tuple[int, str]:

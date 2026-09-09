@@ -1408,7 +1408,8 @@ class TestDecisionSupport(WebTestCase):
         frag = self.get(f"/position/{p.id}/roll-preview?close_price=4.00&close_fee=6.50"
                         "&new_expiry=2026-03-20&new_strike=34&new_price=5.00"
                         "&new_fee=7.80&new_quantity=12&on=2026-02-06")
-        self.assertIn("credit 1,985.70", frag)
+        self.assertIn("Roll credit", frag)
+        self.assertIn("1,985.70", frag)
         self.assertIn('<span class="pos">29.85</span>', frag)   # break-even fell: good
         self.assertIn("was 32.01", frag)
         self.assertIn("40,800.00", frag)       # capital at risk after
@@ -1427,7 +1428,8 @@ class TestDecisionSupport(WebTestCase):
         frag = self.get(f"/position/{p.id}/roll-preview?close_price=8.00&close_fee=6.50"
                         "&new_expiry=2026-03-20&new_strike=34&new_price=3.00"
                         "&new_fee=7.80&new_quantity=12&on=2026-02-06")
-        self.assertIn("debit 4,414.30", frag)
+        self.assertIn("Roll debit", frag)
+        self.assertIn("4,414.30", frag)
         self.assertIn("under water by <b>1,420.80</b>", frag)
         self.assertIn("none: net debit", frag)
 

@@ -102,21 +102,6 @@ td:first-child a { text-decoration: none; }
 .dim { color: var(--dim); }
 .warn-text { color: #b45309; font-weight: 600; }
 
-/* Cards: one size, one style, on every strip. Fixed width, never stretched
-   to fill the row, so two cards look like two cards and not two banners. */
-.totals { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 1rem; align-items: stretch; }
-.totals > div {
-  flex: 0 0 12.5rem; box-sizing: border-box; min-height: 4.6rem; background: var(--panel);
-  border: 1px solid var(--line); border-radius: 8px; padding: .55rem .8rem;
-}
-.totals span { display: block; font-size: .72rem; text-transform: uppercase;
-  letter-spacing: .04em; color: var(--dim); margin-bottom: .15rem; }
-.totals b { font-variant-numeric: tabular-nums; font-size: 1.15rem; }
-.totals small { display: block; font-size: .72rem; font-weight: 400; color: var(--dim); }
-.totals b small { margin-top: .15rem; }
-.totals .pos { color: var(--pos); } .totals .neg { color: var(--neg); }
-.totals > div.good { background: var(--pos-tint); border-color: var(--pos); }
-.totals > div.bad { background: var(--neg-tint); border-color: var(--neg); }
 
 /* The facts table: rows are figures with their usual trading names, columns
    are scopes. One figure per line, numbers aligned, a tint where the sign
@@ -153,16 +138,17 @@ table.facts tr:last-child th, table.facts tr:last-child td { border-bottom: 0; }
   font-variant-numeric: tabular-nums; }
 .facts.wide .cells b b { font-weight: 700; font-size: inherit; }
 .facts.wide .cells b.none { color: var(--dim); }
+.facts.wide .cells b small { display: block; font-size: .75rem; font-weight: 400;
+  color: var(--dim); white-space: normal; line-height: 1.3; margin-top: .1rem; }
+.facts.wide .cells b small .dim { display: block; }
+.facts.wide .cells b small.pos { color: var(--pos); }
+.facts.wide .cells b small.neg { color: var(--neg); }
 .facts.wide .chips { margin: 1rem 0 0; padding-top: .8rem; border-top: 1px solid var(--line);
   gap: .5rem; }
 .facts.wide .chip { font-size: .92rem; padding: .3rem .75rem; background: var(--bg); color: var(--ink); }
 .facts.wide .chip.warn { border-color: var(--neg); background: var(--neg-tint); color: var(--neg); }
 .facts.wide .chip a { color: inherit; text-decoration: underline; }
 
-/* A caption names what the strip covers; it rides inside the strip so it
-   travels with it on a swap. */
-.totals > p.strip-title { flex-basis: 100%; margin: 0 0 .1rem; font-size: .8rem; color: var(--dim); }
-.totals > p.strip-title b { font-size: .8rem; color: var(--ink); }
 .grow { flex: 1; }
 a.btn.new { padding: .45rem .9rem; font-size: inherit; font-weight: 600;
   color: var(--accent); border-color: var(--accent); background: var(--panel); }
@@ -190,8 +176,7 @@ form.inline.convert button { background: var(--panel); color: var(--amber);
 details.report summary { cursor: pointer; font-weight: 600; font-size: 1.15rem; margin: 0 0 .5rem; }
 details.report summary:hover { color: var(--accent); }
 .preview { grid-column: 1 / -1; }
-.preview .totals { margin: .4rem 0 0; }
-.preview .callout { margin: .5rem 0 0; }
+.preview .strip { margin: .4rem 0 0; }
 .share { display: inline-flex; align-items: center; gap: .4rem; min-width: 9rem;
   font-variant-numeric: tabular-nums; }
 .bar { display: inline-block; height: .55rem; min-width: 2px; max-width: 6rem;
@@ -558,10 +543,6 @@ a.btn.cancel:hover { background: var(--bg); color: var(--ink); }
 .leg-tag.assign { color: var(--amber);  background: var(--amber-tint); }
 .leg-tag.split  { color: var(--dim);    background: var(--bg); border: 1px dashed var(--line); }
 .leg-tag.shares { color: var(--ink);    background: var(--bg); border: 1px solid var(--line); }
-.preview .totals b .pos { color: var(--pos); }
-.preview .totals b .neg { color: var(--neg); }
-.preview .totals small.pos { color: var(--pos); }
-.preview .totals small.neg { color: var(--neg); }
 fieldset.grid { margin: 0; min-width: 0; }
 legend {
   font-size: .78rem; text-transform: uppercase; letter-spacing: .04em;
