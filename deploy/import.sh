@@ -1,7 +1,7 @@
 #!/bin/sh
 # Import the legacy export into the live journal. Run as root.
 #   sh import.sh export.csv [estimates.json] [--force]
-# Reconciles first and stops if the diff is not clean; --force imports anyway.
+# Import reconciles first and refuses an unclean diff; --force imports anyway.
 set -eu
 CSV=${1:?usage: import.sh export.csv [estimates.json] [--force]}
 BCOJ=/opt/bcoj/venv/bin/bcoj
@@ -20,5 +20,4 @@ env=""; flag=""
 
 systemctl stop bcoj
 trap 'systemctl start bcoj; rm -rf "$work"' EXIT
-sudo -u bcoj env $env $BCOJ reconcile "$work/export.csv"
 sudo -u bcoj env $env $BCOJ import "$work/export.csv" --db "$DB" $flag $FORCE
