@@ -53,6 +53,11 @@ a 502, hence `--host 0.0.0.0` in the unit above. Firewall port 8000 to the proxy
 No websockets. The proxy's `X-Forwarded-Proto: https` header, which NPM sends,
 makes the session cookie `Secure`.
 
+## Options
+
+Theme (system, light, dark, paper, slate), password, snapshots and exports
+live on the Options page.
+
 ## Password
 
 Always required. First login is `bcoj`; the app then forces a change and

@@ -979,18 +979,21 @@ def recent_underlyings(conn, limit: int = 40) -> list[str]:
     ]
 
 
-def audit_entries(conn, limit: int = 200, entity_id: str | None = None):
+def audit_entries(conn, limit: int = 200, entity_id: str | None = None,
+                  since: str = "", until: str = ""):
+    """Newest first. ``since`` and ``until`` are ISO dates, inclusive; stamps
+    are UTC, so a day boundary is a UTC one."""
+    where, args = [], []
     if entity_id:
-        return list(
-            conn.execute(
-                "SELECT * FROM audit_log WHERE entity_id = ?"
-                " ORDER BY id DESC LIMIT ?",
-                (entity_id, limit),
-            )
-        )
-    return list(
-        conn.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,))
-    )
+        where.append("entity_id = ?"); args.append(entity_id)
+    if since:
+        where.append("at >= ?"); args.append(since)
+    if until:
+        where.append("at < ?"); args.append(until + "T99")   # anything dated that day
+    sql = "SELECT * FROM audit_log"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    return list(conn.execute(sql + " ORDER BY id DESC LIMIT ?", (*args, limit)))
 
 
 def revert_audit_entry(conn, entry_id: int) -> str:

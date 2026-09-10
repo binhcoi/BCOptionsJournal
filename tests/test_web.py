@@ -171,6 +171,60 @@ class TestPagesLoad(WebTestCase):
             self.assertEqual(response.headers.get("Referrer-Policy"), "no-referrer")
 
 
+class TestScriptSubmits(WebTestCase):
+    """A form posted by the script is answered with JSON, not a redirect, so
+    the page can stay put, show the flash and refresh in place."""
+
+    def fetch_post(self, path, fields):
+        payload = dict(fields)
+        payload.setdefault("csrf", self.app.csrf)
+        req = urllib.request.Request(self.base + path, data=urllib.parse.urlencode(payload).encode(),
+                                     headers={"X-Requested-With": "fetch"})
+        try:
+            with urllib.request.urlopen(req) as res:
+                return res.status, res.headers.get("Content-Type"), res.read().decode()
+        except urllib.error.HTTPError as error:
+            return error.code, error.headers.get("Content-Type"), error.read().decode()
+
+    def test_a_new_position_answers_with_json_and_the_flash(self):
+        import json
+        status, ctype, body = self.fetch_post("/new", {
+            "underlying": "scr", "opened_on": "2026-01-05", "expiry": "2026-03-20", "right": "PUT",
+            "direction": "SHORT", "strike": "35", "quantity": "10", "open_price": "3.00",
+            "open_fee": "6.50", "next": "/?show=open"})
+        self.assertEqual((status, ctype), (200, "application/json"))
+        data = json.loads(body)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["location"], "/?show=open")
+        self.assertIn("Added SCR 35.00P", data["flash"])
+        self.assertTrue(any(p.underlying == "SCR" for p in self.positions()))
+
+    def test_a_refusal_answers_with_json_and_the_reason(self):
+        import json
+        status, ctype, body = self.fetch_post("/shares/sell", {"underlying": "none", "on": "2026-01-05",
+                                                              "quantity": "1", "price": "1"})
+        self.assertEqual((status, ctype), (400, "application/json"))
+        data = json.loads(body)
+        self.assertFalse(data["ok"])
+        self.assertTrue(data["error"])
+
+    def test_validation_problems_come_back_as_the_form(self):
+        status, ctype, body = self.fetch_post("/new", {
+            "underlying": "bad", "opened_on": "2026-01-05", "expiry": "2025-01-01", "right": "PUT",
+            "direction": "SHORT", "strike": "35", "quantity": "10", "open_price": "3.00"})
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", ctype)
+        self.assertIn('<ul class="problems">', body)
+
+    def test_the_script_submits_panel_forms_in_place(self):
+        js = self.get("/static/app.js")
+        self.assertIn("'X-Requested-With': 'fetch'", js)
+        self.assertIn("form.reset()", js)                      # entry forms stay open, blank
+        self.assertIn("window.bcojRefreshTable", js)           # the table refreshes, cache dropped
+        page = self.get("/")
+        self.assertIn('data-form="new"', page)
+
+
 class TestCsrf(WebTestCase):
     def test_post_without_a_token_is_refused(self):
         data = urllib.parse.urlencode({"underlying": "ACME"}).encode()
@@ -431,7 +485,22 @@ class TestAuditAndUndo(WebTestCase):
     def test_changes_are_logged(self):
         self.add_position(underlying="aud")
         body = self.get("/audit")
-        self.assertIn("entered by hand", body)
+        self.assertIn("<b>Recorded</b>", body)
+        self.assertIn("AUD 35.00P 2026-03-20 &times;10", body)
+        self.assertIn("sold at 3.00, fee 6.50", body)                # the prices ride along
+        # A date range narrows the list; the stamps are UTC days.
+        today = date.today().isoformat()
+        self.assertIn("AUD 35.00P", self.get(f"/audit?since={today}&until={today}"))
+        self.assertNotIn("AUD 35.00P", self.get("/audit?since=2000-01-01&until=2000-01-02"))
+        self.assertIn("Nothing recorded in that range", self.get("/audit?until=2000-01-02"))
+        self.get("/audit?since=yesterday", expect=400)
+        # The same period shortcuts as the positions page fill the range.
+        page = self.get("/audit?period=3m")
+        self.assertIn("AUD 35.00P", page)
+        self.assertIn('href="/audit?period=3m" class="flt here"', page)
+        self.assertIn(f'value="{(date.today() - timedelta(days=91)).isoformat()}"', page)
+        self.assertIn(">This month<", page)
+        self.get("/audit?period=never", expect=400)
 
     def test_undo_restores_the_previous_values(self):
         position = self._position("und")
@@ -487,6 +556,10 @@ class TestAuditAndUndo(WebTestCase):
         self.post(f"/position/{parent.id}/split", {"quantity": "4", "on": "2026-02-01"})
         page = self.get("/audit")
         self.assertIn("(3 records)", page)
+        self.assertIn("<b>Split 10 into 4 and 6</b>", page)          # the action, in trade terms
+        self.assertIn('<time datetime="', page)                        # stamps: local via script
+        self.assertNotIn("When (UTC)", page)
+        self.assertIn("GRP 35.00P 2026-03-20 &times;4", page)           # the records it touched, named
         conn = store.open_db(self.db_path)
         try:
             entry = [e for e in store.audit_entries(conn) if "split" in e["action"]][-1]
@@ -1939,11 +2012,27 @@ class TestDataPage(WebTestCase):
         from bcoj.db import schema
         page = self.get("/options")
         self.assertIn(__version__, page)
-        self.assertIn(f"<b>{schema.SCHEMA_VERSION}</b>", page)
+        self.assertIn(f"<dt>Schema</dt><dd>{schema.SCHEMA_VERSION}</dd>", page)
         self.assertIn(f"{__version__}</footer>", page)
         data = self.get("/data")
         self.assertNotIn("Take a snapshot", data)
         self.assertIn('href="/options"', data)
+
+    def test_theme_is_a_setting_stamped_on_every_page(self):
+        from bcoj.web.static import THEMES
+        css = self.get("/static/app.css")
+        for name in THEMES[1:]:
+            self.assertIn(f":root[data-theme={name}]", css)
+        self.assertIn("color-scheme: dark", css)
+        self.assertNotIn('data-theme=', self.get("/options"))            # system: nothing stamped
+        status, location, _ = self.post("/options/theme", {"theme": "slate"})
+        self.assertEqual(status, 303)
+        for path in ("/options", "/", "/login"):
+            self.assertIn('<html lang="en" data-theme="slate">', self.get(path))
+        status, _, _ = self.post("/options/theme", {"theme": "neon"})
+        self.assertEqual(status, 400)
+        self.post("/options/theme", {"theme": "system"})
+        self.assertNotIn('data-theme=', self.get("/"))
 
     def test_a_newer_journal_is_refused(self):
         from bcoj.db import schema

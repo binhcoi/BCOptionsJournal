@@ -32,6 +32,7 @@ from ..engine.risk import break_even, capital_at_risk, credit_to_recover
 from ..engine.targets import target
 from . import auth
 from . import render as r
+from .static import THEMES
 
 
 class Redirect(Exception):
@@ -2086,12 +2087,31 @@ def do_change_password(conn, form) -> None:
                    headers=[("Set-Cookie", auth.clear_cookie_header())])
 
 
+def do_set_theme(conn, form) -> None:
+    theme = _one(form, "theme", "system")
+    if theme not in THEMES:
+        raise BadRequest("No such theme")
+    store.set_setting(conn, "theme", theme)
+    raise Redirect("/options", f"Theme: {theme}")
+
+
 def options_page(conn, db_path: str, token: str, query) -> tuple[int, str]:
+    """One panel of settings: what each row is about on the left, the control
+    on the right. Every row has the same shape."""
     must_change = auth.password_is_default(conn)
-    cells = [("Version", r.esc(__version__), None),
-             ("Schema", r.esc(schema.current_version(conn)), None),
-             ("Snapshots", r.esc(len(store.list_snapshots(db_path))), None)]
-    strip = _kv("This journal", r.esc(db_path), cells)
+
+    def row(title: str, hint: str, body: str, anchor: str = "") -> str:
+        idattr = f' id="{anchor}"' if anchor else ""
+        return (f'<section class="opt"{idattr}><div class="opt-head"><h2>{r.esc(title)}</h2>'
+                f'<p class="hint">{hint}</p></div><div class="opt-body">{body}</div></section>')
+
+    theme = r.form("/options/theme",
+                   '<select name="theme" id="f_theme" aria-label="Theme">'
+                   + "".join(f'<option value="{n}"{" selected" if n == store.get_setting(conn, "theme", "system") else ""}>'
+                             f'{"System (follow the device)" if n == "system" else n.capitalize()}</option>'
+                             for n in THEMES)
+                   + "</select>",
+                   token, submit="Save", cls="row theme")
 
     pw_hint = ('<p class="callout">The default password is public. Set your own now.</p>'
                if must_change else "")
@@ -2104,7 +2124,7 @@ def options_page(conn, db_path: str, token: str, query) -> tuple[int, str]:
         + r.field("New password again", "again", kind="password", required=True,
                   attrs=' minlength="8" autocomplete="new-password"'),
         token, submit="Change password", cls="stack")
-    logout = r.form("/logout", "", token, submit="Log out", cls="inline")
+    logout = r.form("/logout", "", token, submit="Log out", cls="row plain")
 
     snaps = store.list_snapshots(db_path)
     snap_rows = []
@@ -2113,35 +2133,37 @@ def options_page(conn, db_path: str, token: str, query) -> tuple[int, str]:
             "/options/restore",
             r.hidden("name", s["name"]) + r.hidden("next", "/options")
             + '<label class="check"><input type="checkbox" name="sure" value="1"> '
-              "replace the journal with this snapshot</label>",
+              "replace the journal with this</label>",
             token, submit="Restore", cls="inline restore")
         link = f'<a href="/snapshot/{r.esc(s["name"])}" download>{r.esc(s["name"])}</a>'
         snap_rows.append([r.esc(s["at"]), link, f"{s['bytes'] // 1024} KB", restore_form])
     take = r.form("/options/snapshot",
                   r.hidden("next", "/options")
-                  + r.field("Label", "label", "", attrs=' placeholder="optional, e.g. before-cleanup"'),
-                  token, submit="Take a snapshot now", cls="inline save-view")
-    folder = store.snapshots_dir(db_path)
+                  + '<input type="text" name="label" aria-label="Label" placeholder="label, optional">',
+                  token, submit="Take a snapshot", cls="row")
+    listing = (r.table(["Taken", "File", "Size", ""], snap_rows, cls="snapshots") if snaps
+               else '<p class="hint">None yet.</p>')
 
-    body = f"""{strip}
-<h2>Password</h2>
-{pw_hint}
-{password}
-<p class="hint">Forgotten? Start the server once with <code>BCOJ_PASSWORD=new-password</code>
-to reset it.</p>
-{logout}
-<h2>Snapshots</h2>
-<p class="hint">A snapshot is a complete copy of the journal, taken through
-SQLite's backup API so it is consistent even mid-write. They live in
-<code>{r.esc(folder)}</code>. Restoring replaces the journal with a snapshot
-after snapshotting what it replaces, so a restore can itself be undone.</p>
-{take}
-{r.table(["Taken", "File", "Size", ""], snap_rows)}
-<h2>Export</h2>
-<p><a href="/export/positions.csv">positions.csv</a> &middot;
-<a href="/export/shares.csv">shares.csv</a> &middot;
-<a href="/export/journal.json">journal.json</a> &middot;
-<a href="/export/journal.db">journal.db</a> (the whole journal, consistent copy)</p>"""
+    about = (f'<dl class="kv"><dt>Version</dt><dd>{r.esc(__version__)}</dd>'
+             f'<dt>Schema</dt><dd>{r.esc(schema.current_version(conn))}</dd>'
+             f'<dt>Journal</dt><dd><code>{r.esc(db_path)}</code></dd>'
+             f'<dt>Snapshots</dt><dd><code>{r.esc(store.snapshots_dir(db_path))}</code></dd></dl>')
+
+    body = '<div class="options">' + "".join([
+        row("Theme", "System follows the device; the others hold.", theme),
+        row("Password", "At least 8 characters. Changing it logs every browser out. Forgotten: start "
+                        "the server once with <code>BCOJ_PASSWORD=new-password</code>.",
+            pw_hint + password + logout, anchor="password"),
+        row("Snapshots", "A complete, consistent copy of the journal. Click a name to download. "
+                         "Restoring snapshots the current journal first, so it can be undone.",
+            take + listing),
+        row("Export", "The engine's answers alongside the entered values.",
+            '<p class="links"><a href="/export/positions.csv">positions.csv</a>'
+            '<a href="/export/shares.csv">shares.csv</a>'
+            '<a href="/export/journal.json">journal.json</a>'
+            '<a href="/export/journal.db">journal.db</a></p>'),
+        row("About", "", about),
+    ]) + "</div>"
     return 200, r.page("Options", body, nav_here="options")
 
 
@@ -2304,7 +2326,21 @@ def expiring_redirect(query) -> None:
 
 def audit_page(conn, token, query) -> tuple[int, str]:
     entity = (query.get("entity") or [None])[0]
-    entries = store.audit_entries(conn, limit=300, entity_id=entity)
+    since = (query.get("since") or [""])[0].strip()
+    until = (query.get("until") or [""])[0].strip()
+    period = (query.get("period") or [""])[0].strip()
+    for value in (since, until):
+        if value:
+            _date({"d": [value]}, "d", label="Date")      # refuse anything but a date
+    window = _period_window(period) if period else None
+    if period and window is None:
+        raise BadRequest("No such period")
+    if window:
+        # A period is the same shortcut the positions page offers; it fills
+        # the range rather than adding a second kind of filter.
+        since = window[0].isoformat()
+        until = (window[1] - timedelta(days=1)).isoformat() if window[1] else ""
+    entries = store.audit_entries(conn, limit=300, entity_id=entity, since=since, until=until)
 
     # One row per action: the entries of a group are shown together and
     # undone together, because that is the only undo that leaves the journal
@@ -2325,10 +2361,6 @@ def audit_page(conn, token, query) -> tuple[int, str]:
         else:
             groups.append([e])
 
-    def who(e) -> str:
-        return (f'<a href="/position/{r.esc(e["entity_id"])}">{r.esc(e["entity_id"][:8])}</a>'
-                if e["entity_type"] == "position" else r.esc(e["entity_id"][:8]))
-
     rows = []
     for group in groups:
         first = group[-1]          # oldest entry of the action: its note names it
@@ -2340,35 +2372,151 @@ def audit_page(conn, token, query) -> tuple[int, str]:
                 undo = r.form(f"/audit/{first['id']}/redo", "", token, submit="Redo", cls="inline")
             else:
                 undo = r.form(f"/audit/{first['id']}/revert", "", token, submit="Undo", cls="inline")
-        kinds = sorted({e["entity_type"].replace("_", " ") for e in group})
-        what = _describe_action(conn, first)
-        if len(group) > 1:
-            what += f' <span class="dim">({len(group)} records)</span>'
+        what = _describe_group(conn, group)
         if state == "undone":
-            when = (store.action_state_at(conn, group) or "")[11:16]
-            what = f'<s class="dim">{what}</s> <small class="neg">undone at {r.esc(when)}</small>'
-        rows.append([
-            r.esc(first["at"].replace("T", " ")),
-            r.esc(", ".join(kinds)),
-            "<br>".join(who(e) for e in group[::-1]),
-            what,
-            undo,
-        ])
+            at = store.action_state_at(conn, group) or ""
+            what = (f'<s class="dim">{what}</s> <small class="neg">undone at '
+                    f'{_local_time(at, short=True)}</small>')
+        rows.append([_local_time(first["at"]), what, undo])
 
     scope = (f' for <a href="/position/{r.esc(entity)}">{r.esc(entity[:8])}</a>'
              if entity else "")
+    def audit_href(**params) -> str:
+        keep = {"entity": entity} if entity else {}
+        keep.update({k: v for k, v in params.items() if v})
+        return "/audit" + ("?" + urllib.parse.urlencode(keep) if keep else "")
+
+    shortcuts = list(PERIOD_SEGMENTS) + [("tm", "This month"), ("tq", "This quarter")]
+    seg = '<nav class="seg">' + "".join(
+        f'<a href="{audit_href(period=code)}" class="flt{" here" if code == period or (not code and not (period or since or until)) else ""}">{label}</a>'
+        for code, label in shortcuts) + "</nav>"
+    filters = (seg + f'<form method="get" action="/audit" class="filters">'
+               + (r.hidden("entity", entity) if entity else "")
+               + r.field("From", "since", since, kind="date")
+               + r.field("To", "until", until, kind="date")
+               + '<button type="submit">Apply</button>'
+               + (f' <a class="btn cancel" href="{audit_href()}">Clear</a>' if since or until else "")
+               + "</form>")
+    empty = ('<p class="hint">Nothing recorded in that range.</p>' if not rows and (since or until)
+             else "")
     body = f"""<p class="hint">Every change is recorded{scope}. Undo takes back the whole
-action a row belongs to -- a split is three records -- or nothing, and is itself
+action a row belongs to, a split is three records, or nothing, and is itself
 recorded. An undone action stays in the list, struck through, with Redo to
 put it back. An action that a later one depends on cannot be undone until that
 later one is.</p>
-{r.table(["When (UTC)", "Kind", "Entity", "What", ""], rows, cls="audit")}"""
+<div class="filterbar">{filters}</div>
+{empty}{r.table(["When", "What", ""], rows, cls="audit") if rows else ""}"""
     return 200, r.page("History", body, nav_here="audit")
 
 
+def _local_time(stamp: str, short: bool = False) -> str:
+    """A UTC stamp the script shows in the reader's own time zone. Without
+    script it reads as UTC, and says so."""
+    if not stamp:
+        return ""
+    shown = stamp[11:16] if short else stamp[:16].replace("T", " ")
+    return f'<time datetime="{r.esc(stamp)}" title="UTC">{r.esc(shown)}{"" if short else " UTC"}</time>'
+
+
+_VERBS = {"entered by hand": "Recorded", "entered by hand, already over": "Recorded, already over",
+          "create": "Recorded", "update": "Changed", "delete": "Removed"}
+# Fields worth naming when they change, in reading order.
+_CHANGE_FIELDS = (("status", "status"), ("close_price", "close"), ("close_fee", "close fee"),
+                  ("closed_on", "closed on"), ("quantity", "contracts"), ("strike", "strike"),
+                  ("expiry", "expiry"), ("open_price", "open"), ("open_fee", "fee"),
+                  ("opened_on", "opened"), ("cost_per_share", "cost"),
+                  ("proceeds_per_share", "proceeds"), ("acquired_on", "acquired"),
+                  ("disposed_on", "sold on"), ("notes", "notes"))
+
+
+def _entity_words(e) -> str:
+    """The record an audit entry is about, as a trader would say it, linked
+    to where it lives. From the entry's own snapshot, so a removed record
+    still has a name."""
+    data = {}
+    for blob in (e["after"], e["before"]):
+        if blob:
+            try:
+                data = json.loads(blob)
+            except ValueError:
+                data = {}
+            if data:
+                break
+    kind, eid = e["entity_type"], e["entity_id"]
+    under = r.esc(data.get("underlying", ""))
+    if kind == "position":
+        if data:
+            right = (data.get("option_right") or "?")[:1]
+            words = (f'{under} {r.esc(price(data.get("strike")))}{right} {r.esc(data.get("expiry", ""))}'
+                     f' &times;{r.esc(data.get("quantity", ""))}')
+            side = "sold" if data.get("direction") == "SHORT" else "bought"
+            tail = f' <span class="dim">{side} at {r.esc(_words(data.get("open_price")))}'
+            if data.get("open_fee") not in (None, "", "0", "0.00"):
+                tail += f', fee {r.esc(_words(data.get("open_fee")))}'
+            tail += "</span>"
+        else:
+            words, tail = eid[:8], ""
+        return f'<a href="/position/{r.esc(eid)}">{words}</a>{tail}'
+    if kind == "share_lot" and data:
+        words = f'{r.esc(data.get("quantity", ""))} {under} shares at {r.esc(price(data.get("cost_per_share")))}'
+    elif kind == "share_disposal" and data:
+        words = f'{r.esc(data.get("quantity", ""))} {under} shares sold at {r.esc(price(data.get("proceeds_per_share")))}'
+    else:
+        return r.esc(f"{kind.replace('_', ' ')} {eid[:8]}")
+    return f'<a href="/shares/{under}">{words}</a>' if under else words
+
+
+def _changes(e, said: str = "") -> str:
+    """For an update, the fields that moved: 'close 0.50, closed on ...'.
+    A status the verb already says ("Closed") is not repeated."""
+    if not (e["before"] and e["after"]):
+        return ""
+    try:
+        before, after = json.loads(e["before"]), json.loads(e["after"])
+    except ValueError:
+        return ""
+    parts = []
+    for key, label in _CHANGE_FIELDS:
+        if key in after and before.get(key) != after.get(key):
+            old, new = before.get(key), after.get(key)
+            if key == "status" and new:
+                if str(new).lower() not in said.lower():
+                    parts.append(r.esc(str(new).lower()))
+            elif old in (None, "") or key in ("closed_on", "close_price", "close_fee"):
+                parts.append(f"{label} {r.esc(_words(new))}")
+            else:
+                parts.append(f"{label} {r.esc(_words(old))} &rarr; {r.esc(_words(new))}")
+    return ", ".join(parts)
+
+
+def _words(value) -> str:
+    if value is None or value == "":
+        return "none"
+    try:
+        return price(Decimal(str(value))) if "." in str(value) else str(value)
+    except (ValueError, ArithmeticError):
+        return str(value)
+
+
+def _describe_group(conn, group) -> str:
+    """One action in words: what was done, to which record(s), and what
+    moved. The note the action was recorded with names it."""
+    first = group[-1]
+    verb, _, note = first["action"].partition(": ")
+    label = _VERBS.get(note) or (note[:1].upper() + note[1:] if note else _VERBS.get(verb, verb))
+    lines = [_entity_words(e) for e in group[::-1]]
+    detail = _changes(first, label) if verb == "update" and len(group) == 1 else ""
+    out = f"<b>{r.esc(label)}</b> " + ("<br>".join(lines) if len(lines) > 1 else lines[0])
+    if len(group) > 1:
+        out += f' <span class="dim">({len(group)} records)</span>'
+    if detail:
+        out += f' <span class="dim">{detail}</span>'
+    return out
+
+
 def _describe_action(conn, entry) -> str:
-    """An audit entry in words a reader knows: the action's own note, and for
-    an undo or redo, the note of the action it undid or redid."""
+    """An audit entry in words: the action's own note, and for an undo or
+    redo, the note of the action it undid or redid. Used by flashes."""
     verb, _, note = entry["action"].partition(": ")
     if verb in ("revert", "redo") and "#" in note:
         try:

@@ -15,6 +15,7 @@ Two protections that a localhost app genuinely needs:
 """
 
 import gzip
+import json
 import os
 import re
 import secrets
@@ -44,6 +45,7 @@ class App:
             ("POST", r"^/logout$", self._logout),
             ("GET", r"^/options$", self._options),
             ("POST", r"^/options/password$", self._password),
+            ("POST", r"^/options/theme$", self._theme),
             ("POST", r"^/options/snapshot$", self._snapshot),
             ("POST", r"^/options/restore$", self._restore),
             ("GET", r"^/snapshot/([0-9A-Za-z_.-]+)$", self._snapshot_file),
@@ -188,6 +190,9 @@ class App:
 
     def _password(self, conn, query, form, args):
         routes.do_change_password(conn, form)
+
+    def _theme(self, conn, query, form, args):
+        routes.do_set_theme(conn, form)
 
     def _snapshot_file(self, conn, query, form, args):
         return routes.snapshot_file(self.db_path, args[0])
@@ -338,9 +343,11 @@ class Handler(BaseHTTPRequestHandler):
                 )
 
         conn = self.app.connect()
+        theme = "system"
         try:
             if not self._authorized(conn, method, path):
                 return
+            theme = store.get_setting(conn, "theme", "system")
             result = handler(conn, query, form, args)
             status, body = result[0], result[1]
             # A download says its own type and file name; a page does not.
@@ -351,6 +358,12 @@ class Handler(BaseHTTPRequestHandler):
                                    [("Content-Disposition", f'attachment; filename="{filename}"')])
         except routes.Redirect as redirect:
             location = redirect.location
+            if self._from_script():
+                # The script keeps the page: it shows the flash and refreshes
+                # what changed. Cookies still travel with the answer.
+                payload = json.dumps({"ok": True, "location": location,
+                                      "flash": redirect.flash}).encode()
+                return self._write(200, payload, "application/json", list(redirect.headers))
             if redirect.flash:
                 joiner = "&" if "?" in location else "?"
                 location += joiner + urllib.parse.urlencode(
@@ -369,6 +382,9 @@ class Handler(BaseHTTPRequestHandler):
         except (routes.BadRequest, ActionError) as bad:
             # A refused action is the user's mistake, not the server's: say
             # what was wrong and offer the way back, without a stack trace.
+            if self._from_script():
+                return self._write(400, json.dumps({"ok": False, "error": str(bad)}).encode(),
+                                   "application/json")
             return self._send(
                 400,
                 r.page("Cannot do that", f"<p>{r.esc(bad)}</p>"
@@ -389,6 +405,8 @@ class Handler(BaseHTTPRequestHandler):
         flash = (query.get("flash") or [""])[0]
         if flash and body:
             body = body.replace("<main>\n", f"<main>\n{_flash(flash)}", 1)
+        if body and theme != "system":
+            body = body.replace('<html lang="en">', f'<html lang="en" data-theme="{theme}">', 1)
         self._send(status, body)
 
     OPEN_PATHS = ("/login",)
@@ -430,6 +448,9 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return False
         return True
+
+    def _from_script(self) -> bool:
+        return self.headers.get("X-Requested-With", "") == "fetch"
 
     def _read_form(self):
         try:

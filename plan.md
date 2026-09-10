@@ -247,7 +247,7 @@ computed columns, journal.json, journal.db through the backup API.
 | ~~M5~~ | Reports, filters, saved views, notes and tags, export | Done. Realized by period and ticker, how short legs ended; filter bar every link keeps; CSV, JSON, SQLite export |
 | ~~M6~~ | Data health, snapshots and restore, deploy notes | Done. Data page with linked fixes and dismissable import flags; snapshots via backup API; restore snapshots first; docs/deploy.md |
 | ~~M7~~ | Login page, options page, versioning | Done. Login page; `bcoj` at first login, then a forced change; PBKDF2 hash and a session secret in `settings`, rotated on change so every browser logs out; HTTP Basic kept for scripts; `BCOJ_PASSWORD` resets. Options page: password, snapshots (take, download, restore), export, version and schema. Data page is health only. Version in the footer; a newer journal or snapshot is refused |
-| M8 | Themes, 1.1.0 | Planned, 2 to 4 hours. Palettes move under a `data-theme` attribute set by a setting on the Options page: system, light, dark first; each further palette about half an hour |
+| ~~M8~~ | Themes, 1.1.0 | Done. Five: system, light, dark, paper, slate. One token table generates every palette, `color-scheme` included; the setting is stamped as `data-theme` on `<html>` by the server, so a page never flashes the wrong theme. Also: forms in a panel submit in place; the server answers a script's POST with JSON, the page shows the flash and refreshes the table or its main content, and the entry forms stay open for the next trade |
 | M9 | Snapshot by API, 1.2.0 | Planned, 1 to 2 hours. A read-only token, hashed in `settings`, shown once on the Options page; `/api/snapshot` takes a snapshot and streams it; a one-line cron for another machine in docs/deploy.md |
 
 Versions: 1.0.0 at M7; the minor version rises with each milestone after. Bumping `__version__` on main is the release; the workflow tags, builds and publishes.
@@ -327,3 +327,5 @@ multi-account, multi-currency. Tax lots, wash sales, 1256. Corporate actions
 | Changing the password logs every browser out | The session secret rotates with it |
 | Options holds what is about the app, Data what is about the records | Password, snapshots, export, version on one page; health on the other |
 | The version has one home, `bcoj.__version__`; a new one on main is a release | pyproject reads it; the workflow tags from it; footer, wheel and image can never disagree |
+| A form in a panel submits in place and stays open | Entering several trades in one sitting is the common case. The script posts with `X-Requested-With: fetch`; the server answers JSON instead of a redirect; without script the same form posts and redirects |
+| A palette is a row in one table, and every palette defines every token | A theme can never inherit a colour from another; the browser's own controls follow `color-scheme` |

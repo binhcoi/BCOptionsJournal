@@ -9,29 +9,74 @@ disabled -- plain POSTs and redirects -- because the core job is recording
 trades, and that should never depend on a script.
 """
 
-CSS = """
-:root {
-  --bg: #fbfbfa; --panel: #fff; --ink: #1a1a1a; --dim: #6b7280;
-  --line: #e3e3e0; --pos: #067647; --neg: #b42318; --accent: #1e4fd8;
-  --warn-bg: #fffbeb; --warn-line: #f5d76e; --ok-bg: #ecfdf3;
-  --neg-tint: #fdeceb; --pos-tint: #e7f6ee;
-  --accent-tint: #e8eefc; --roll: #6d28d9; --roll-tint: #efe9fb;
-  --closed: #be185d; --closed-tint: #fce7f3;
-  --amber: #b45309; --amber-tint: #fdf1de;
-  --chain-bg: #f3f3f1; --current-tint: #fff7d6;
+THEMES = ("system", "light", "dark", "paper", "slate")
+
+# One row per token, one column per palette. Every palette defines every
+# token, so no colour can fall through to another theme's value.
+_LIGHT = {
+    "bg": "#fbfbfa", "panel": "#fff", "ink": "#1a1a1a", "dim": "#6b7280",
+    "line": "#e3e3e0", "pos": "#067647", "neg": "#b42318", "accent": "#1e4fd8",
+    "on-accent": "#fff",
+    "warn-bg": "#fffbeb", "warn-line": "#f5d76e", "ok-bg": "#ecfdf3",
+    "neg-tint": "#fdeceb", "pos-tint": "#e7f6ee",
+    "accent-tint": "#e8eefc", "roll": "#6d28d9", "roll-tint": "#efe9fb",
+    "closed": "#be185d", "closed-tint": "#fce7f3",
+    "amber": "#b45309", "amber-tint": "#fdf1de",
+    "chain-bg": "#f3f3f1", "current-tint": "#fff7d6",
+    "scheme": "light",
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #16171a; --panel: #1e2024; --ink: #e8e8e6; --dim: #9aa0a8;
-    --line: #2e3138; --pos: #4ade80; --neg: #f87171; --accent: #7aa2ff;
-    --warn-bg: #2a2312; --warn-line: #6b5a1f; --ok-bg: #12261a;
-    --neg-tint: #3a1d1d; --pos-tint: #14301f;
-    --accent-tint: #1c2540; --roll: #b79cff; --roll-tint: #2a2140;
-    --closed: #f472b6; --closed-tint: #3b1a2b;
-    --amber: #fbbf24; --amber-tint: #3a2e12;
-    --chain-bg: #1a1c21; --current-tint: #2e2a14;
-  }
+_DARK = {
+    "bg": "#16171a", "panel": "#1e2024", "ink": "#e8e8e6", "dim": "#9aa0a8",
+    "line": "#2e3138", "pos": "#4ade80", "neg": "#f87171", "accent": "#7aa2ff",
+    "on-accent": "#0f1115",
+    "warn-bg": "#2a2312", "warn-line": "#6b5a1f", "ok-bg": "#12261a",
+    "neg-tint": "#3a1d1d", "pos-tint": "#14301f",
+    "accent-tint": "#1c2540", "roll": "#b79cff", "roll-tint": "#2a2140",
+    "closed": "#f472b6", "closed-tint": "#3b1a2b",
+    "amber": "#fbbf24", "amber-tint": "#3a2e12",
+    "chain-bg": "#1a1c21", "current-tint": "#2e2a14",
+    "scheme": "dark",
 }
+# Warm paper: cream ground, brown-black ink, a rust accent.
+_PAPER = dict(_LIGHT, **{
+    "bg": "#f5f0e6", "panel": "#fffcf5", "ink": "#2b2520", "dim": "#7a6f63",
+    "line": "#e4dac8", "accent": "#9a4b12", "accent-tint": "#f6e6d8",
+    "pos": "#2f6b3a", "neg": "#a3311f", "warn-bg": "#fbf3d9", "warn-line": "#e2c76a",
+    "ok-bg": "#eaf2e3", "neg-tint": "#f7e4df", "pos-tint": "#e6efe0",
+    "roll": "#6b3fa0", "roll-tint": "#ece3f5", "closed": "#a8326b", "closed-tint": "#f7e1eb",
+    "amber": "#a2620c", "amber-tint": "#f7ead3",
+    "chain-bg": "#efe8da", "current-tint": "#fbefc9",
+})
+# Slate: blue-grey dark, cooler than the plain dark theme.
+_SLATE = dict(_DARK, **{
+    "bg": "#0f172a", "panel": "#1e293b", "ink": "#e2e8f0", "dim": "#94a3b8",
+    "line": "#334155", "accent": "#60a5fa", "accent-tint": "#1e3a5f",
+    "pos": "#34d399", "neg": "#fb7185", "warn-bg": "#2a2a1a", "warn-line": "#7a6a2a",
+    "ok-bg": "#0f2e25", "neg-tint": "#3f1d2b", "pos-tint": "#123529",
+    "roll": "#c4b5fd", "roll-tint": "#2e2a4f", "closed": "#f9a8d4", "closed-tint": "#3f2238",
+    "amber": "#fcd34d", "amber-tint": "#3a3218",
+    "chain-bg": "#162033", "current-tint": "#33301a",
+})
+PALETTES = {"light": _LIGHT, "dark": _DARK, "paper": _PAPER, "slate": _SLATE}
+
+
+def _tokens(palette: dict) -> str:
+    return "".join(f" --{k}: {v};" for k, v in palette.items() if k != "scheme") + \
+        f" color-scheme: {palette['scheme']};"
+
+
+def _palette_css() -> str:
+    """Light is the ground. Without a data-theme, or with "system", the
+    browser's preference picks dark. A named theme wins in both directions."""
+    return (
+        f":root {{{_tokens(_LIGHT)} }}\n"
+        f"@media (prefers-color-scheme: dark) {{\n"
+        f"  :root:not([data-theme]), :root[data-theme=system] {{{_tokens(_DARK)} }}\n}}\n"
+        + "".join(f":root[data-theme={name}] {{{_tokens(pal)} }}\n" for name, pal in PALETTES.items())
+    )
+
+
+CSS = _palette_css() + """
 * { box-sizing: border-box; }
 body {
   margin: 0; background: var(--bg); color: var(--ink);
@@ -49,10 +94,37 @@ nav a, .tabs a {
   color: var(--dim);
 }
 nav a:hover, .tabs a:hover { background: var(--bg); color: var(--ink); }
-nav a.here, .tabs a.here { background: var(--accent); color: #fff; }
+nav a.here, .tabs a.here { background: var(--accent); color: var(--on-accent); }
 main { max-width: 1180px; margin: 0 auto; padding: 1.2rem; }
 footer { max-width: 1180px; margin: 0 auto; padding: 0 1.2rem 1.2rem; font-size: .78rem; color: var(--dim); }
 form.login, form.stack { display: grid; gap: .6rem; max-width: 22rem; justify-items: start; }
+/* Options: one panel, one row per setting. What it is on the left, the
+   control on the right; every row the same shape. */
+.options { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+.options .opt { display: grid; grid-template-columns: 15rem minmax(0, 1fr); gap: 1.5rem;
+  padding: 1.1rem 1.2rem; border-top: 1px solid var(--line); }
+.options .opt:first-child { border-top: 0; }
+.options .opt h2 { margin: 0 0 .3rem; font-size: 1rem; }
+.options .opt-head .hint { margin: 0; font-size: .82rem; }
+.options .opt-body { min-width: 0; }
+.options .opt-body > * + * { margin-top: .8rem; }
+.options .opt-body .callout { margin: 0 0 .8rem; }
+.options table.snapshots { margin: 0; }
+.options table.snapshots td { vertical-align: middle; }
+.options form.stack { max-width: 22rem; }
+.options .links a { margin-right: 1.2rem; }
+.options dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: .3rem 1.2rem; margin: 0;
+  font-size: .92rem; }
+.options dl.kv dt { color: var(--dim); }
+.options dl.kv dd { margin: 0; overflow-wrap: anywhere; }
+/* A one-line form: control, then its button, on one baseline. */
+form.row { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+form.row .actions { display: contents; }
+form.row input[type=text] { width: 16rem; }
+form.row.plain button { background: none; color: var(--accent); border: 1px solid var(--line);
+  border-radius: 6px; padding: .35rem .8rem; font-weight: 600; }
+form.row.plain button:hover { background: var(--accent-tint); filter: none; }
+@media (max-width: 760px) { .options .opt { grid-template-columns: 1fr; gap: .6rem; } }
 form.login label, form.stack label { width: 100%; }
 form.login { margin-top: 1rem; }
 h1 { font-size: 1.35rem; margin: .2rem 0 1rem; }
@@ -77,6 +149,18 @@ tbody tr:last-child td { border-bottom: 0; }
 tbody tr:hover { background: var(--bg); }
 td:last-child, th:last-child { text-align: left; }
 .wrap { overflow-x: auto; }
+/* History: when, what, undo. Words wrap; the time and the button do not. */
+table.audit th, table.audit td { text-align: left; vertical-align: top; }
+table.audit td:first-child { white-space: nowrap; color: var(--dim); width: 10rem;
+  font-variant-numeric: tabular-nums; }
+table.audit td:nth-child(2) { white-space: normal; line-height: 1.6; }
+table.audit td:nth-child(2) a { text-decoration: none; }
+table.audit td:nth-child(2) a:hover { text-decoration: underline; }
+table.audit td:last-child { width: 0; white-space: nowrap; text-align: right; }
+table.audit s.dim a { color: inherit; }
+table.audit td:nth-child(2) s.dim .dim { color: inherit; }
+.filterbar form.filters button { padding: .35rem .8rem; }
+.filterbar .seg + form.filters { margin-top: .6rem; }
 
 /* A contract is five facts, not one string. Laid out as an inline grid with
    fixed tracks so expiry, strike and type align down the table whatever the
@@ -104,7 +188,7 @@ td:first-child a { text-decoration: none; }
 .pos { color: var(--pos); }
 .neg { color: var(--neg); }
 .dim { color: var(--dim); }
-.warn-text { color: #b45309; font-weight: 600; }
+.warn-text { color: var(--amber); font-weight: 600; }
 
 
 /* The facts table: rows are figures with their usual trading names, columns
@@ -156,7 +240,7 @@ table.facts tr:last-child th, table.facts tr:last-child td { border-bottom: 0; }
 .grow { flex: 1; }
 a.btn.new { padding: .45rem .9rem; font-size: inherit; font-weight: 600;
   color: var(--accent); border-color: var(--accent); background: var(--panel); }
-a.btn.new:hover, a.btn.new.here { background: var(--accent); color: #fff; }
+a.btn.new:hover, a.btn.new.here { background: var(--accent); color: var(--on-accent); }
 table[data-fixed] tr[data-chain] { cursor: default; }
 table[data-fixed] tr.chain-head td { padding-top: .3rem; padding-bottom: .3rem; }
 .tabs.quick { margin: 0 0 .4rem; }
@@ -205,7 +289,7 @@ input:focus, select:focus { outline: 2px solid var(--accent);
 small { color: var(--dim); font-size: .74rem; }
 .actions { grid-column: 1 / -1; display: flex; gap: .5rem; }
 button {
-  background: var(--accent); color: #fff; border-color: transparent;
+  background: var(--accent); color: var(--on-accent); border-color: transparent;
   font-weight: 600; cursor: pointer; padding: .5rem 1.1rem;
 }
 button:hover { filter: brightness(1.08); }
@@ -230,7 +314,7 @@ a.btn {
   display: inline-block; padding: .15rem .5rem; border-radius: 5px;
   border: 1px solid var(--line); text-decoration: none; font-size: .85rem;
 }
-a.btn:hover { background: var(--accent); color: #fff; }
+a.btn:hover { background: var(--accent); color: var(--on-accent); }
 
 .flash, .callout {
   padding: .6rem .8rem; border-radius: 8px; margin: 0 0 1rem;
@@ -295,7 +379,7 @@ form.restore label.check { flex-direction: row; align-items: center; gap: .3rem;
 /* Real buttons where a click has consequences: restore is red on white
    text, a snapshot is the accent, whatever the inline-form default says. */
 form.restore button, form.save-view button {
-  background: var(--accent); color: #fff; border: 1px solid transparent; border-radius: 6px;
+  background: var(--accent); color: var(--on-accent); border: 1px solid transparent; border-radius: 6px;
   padding: .35rem .8rem; font-weight: 600; text-decoration: none;
 }
 form.restore button { background: var(--neg); }
@@ -319,7 +403,7 @@ details.save form.save-view { margin-left: .3rem; }
   font-weight: 600; border-right: 1px solid var(--line); }
 .seg a:last-child { border-right: 0; }
 .seg a:hover { background: var(--bg); color: var(--ink); }
-.seg a.here { background: var(--accent); color: #fff; }
+.seg a.here { background: var(--accent); color: var(--on-accent); }
 form.filters { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin: 0; }
 form.filters label { width: auto; flex-direction: row; align-items: center; gap: .35rem; }
 form.filters label > span { font-size: .8rem; }
@@ -345,9 +429,9 @@ form.filters button { padding: .35rem .9rem; }
   display: inline-flex; align-items: center; flex: 0 0 6.5rem; box-sizing: border-box; }
 .chips.views .chip.view { color: var(--accent); }
 .chips.views .chip.view:hover { background: var(--panel); }
-.chips.views .chip.view.here { background: var(--accent); color: #fff; }
+.chips.views .chip.view.here { background: var(--accent); color: var(--on-accent); }
 .chips.views .chip.view.saved { display: inline-flex; align-items: center; gap: .2rem; }
-.chips.views .chip.view.saved.here a { color: #fff; }
+.chips.views .chip.view.saved.here a { color: var(--on-accent); }
 .chips.views details.save { padding: .2rem .9rem; }
 /* The line's label is also the toggle for the rest of the views. */
 .chips.views a.views-label { color: var(--ink); text-decoration: none; white-space: nowrap; }
@@ -362,8 +446,8 @@ details.more > summary { white-space: nowrap; }
 form.filters .seg { margin-left: .2rem; }
 .chip.view { text-decoration: none; }
 a.chip.view { padding: .1rem .7rem; }
-.chip.view.here { background: var(--accent); color: #fff; border-color: var(--accent); }
-.chip.view.here a { color: #fff; }
+.chip.view.here { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.chip.view.here a { color: var(--on-accent); }
 .chip.view.saved { background: var(--panel); }
 details.more { position: relative; }
 details.more > summary { cursor: pointer; list-style: none; padding: .35rem .75rem;
@@ -410,11 +494,11 @@ textarea:focus { outline: 2px solid var(--accent); }
 .tabs a.tab-expire:hover { background: var(--pos-tint);    color: var(--pos); }
 .tabs a.tab-assign:hover { background: var(--amber-tint);  color: var(--amber); }
 .tabs a.tab-split:hover  { background: var(--bg);          color: var(--ink); }
-.tabs a.tab-close.here,  .tabs a.tab-close.here:hover  { background: var(--closed); color: #fff; }
-.tabs a.tab-roll.here,   .tabs a.tab-roll.here:hover   { background: var(--roll);   color: #fff; }
-.tabs a.tab-expire.here, .tabs a.tab-expire.here:hover { background: var(--pos);    color: #fff; }
-.tabs a.tab-assign.here, .tabs a.tab-assign.here:hover { background: var(--amber);  color: #fff; }
-.tabs a.tab-split.here,  .tabs a.tab-split.here:hover  { background: var(--dim);    color: #fff; }
+.tabs a.tab-close.here,  .tabs a.tab-close.here:hover  { background: var(--closed); color: var(--on-accent); }
+.tabs a.tab-roll.here,   .tabs a.tab-roll.here:hover   { background: var(--roll);   color: var(--on-accent); }
+.tabs a.tab-expire.here, .tabs a.tab-expire.here:hover { background: var(--pos);    color: var(--on-accent); }
+.tabs a.tab-assign.here, .tabs a.tab-assign.here:hover { background: var(--amber);  color: var(--on-accent); }
+.tabs a.tab-split.here,  .tabs a.tab-split.here:hover  { background: var(--dim);    color: var(--on-accent); }
 .form-box .actions button { min-width: 11rem; }
 .form-box:not(#new-box) > [data-form] { min-height: 17.5rem; }
 .form-box:not(#new-box) > [data-form] > form { min-height: 100%; }
@@ -457,7 +541,7 @@ a.legs { text-decoration: none; font-weight: 600; padding: .05rem .45rem;
   border-radius: 999px; border: 1px solid var(--line);
   display: inline-block; min-width: 1.9em; text-align: center; }
 a.legs.here { font-size: .7em; padding: .2rem .45rem; }
-a.legs:hover, a.legs.here { background: var(--accent); color: #fff; border-color: transparent; }
+a.legs:hover, a.legs.here { background: var(--accent); color: var(--on-accent); border-color: transparent; }
 
 /* Legs revealed by expanding a chain, in the same row format as the list.
    A header row marks where the block begins; every row in it shares a tint
@@ -570,8 +654,13 @@ JS = """
 (function () {
   'use strict';
 
+  // Enhancements bound to particular elements. Run at load, and again after a
+  // page swaps its main content, when those elements are new.
+  var enhancers = [];
+
   // Fee tracks the contract count, until it is edited by hand. Typing a fee
   // must never be undone by changing the quantity afterwards.
+  enhancers.push(function () {
   var grid = document.querySelector('[data-fee-rate]');
   if (grid) {
     var rate = parseFloat(grid.getAttribute('data-fee-rate'));
@@ -588,6 +677,7 @@ JS = """
         });
       });
   }
+  });
 
   // A link to a folded section opens it: the Fix links on the Data page
   // land on the raw-data section of a position.
@@ -637,6 +727,7 @@ JS = """
 
   // The entry form's closing fields matter only for a trade already over,
   // its share fields only for a buy-write.
+  enhancers.push(function () {
   [['f_outcome', '.when-over', 'OPEN'], ['f_with_shares', '.when-shares', 'NONE']]
     .forEach(function (spec) {
       var control = document.getElementById(spec[0]);
@@ -645,6 +736,7 @@ JS = """
       var reflect = function () { if (span) span.classList.toggle('off', control.value === spec[2]); };
       control.addEventListener('change', reflect); reflect();
     });
+  });
 
   // "+7" in a date box means seven days from today. Faster than a picker for
   // the weekly cadence most of these trades follow.
@@ -711,8 +803,8 @@ JS = """
       var m = new RegExp('[?&]' + name + '=([^&#]*)').exec(href);
       return m ? decodeURIComponent(m[1]) : null;
     };
-    var get = function (href, partial) {
-      if (partial === 'table' && cache[canon(href)]) return Promise.resolve(cache[canon(href)]);
+    var get = function (href, partial, fresh) {
+      if (!fresh && partial === 'table' && cache[canon(href)]) return Promise.resolve(cache[canon(href)]);
       var key = partial + ' ' + href;
       if (pending[key]) return pending[key];
       var base = href.split('#')[0];
@@ -767,17 +859,17 @@ JS = """
     // Two quick clicks are two requests; whichever answers last must not
     // overwrite the one asked for last. Only the newest request may render.
     var seq = 0;
-    var full = function (href, push) {
+    var full = function (href, push, fresh, stay) {
       var cur = current();
-      if (cur && !cache[canon(here())]) remember(here(), snapshot());
+      if (!fresh && cur && !cache[canon(here())]) remember(here(), snapshot());
       var mine = ++seq;
-      return get(href, 'table').then(function (html) {
+      return get(href, 'table', fresh).then(function (html) {
         if (mine !== seq) return;
         var holder = document.createElement('div');
         holder.innerHTML = html;
-        var fresh = holder.querySelector('table.positions');
-        if (!fresh) { window.location.href = href; return; }
-        if (!patchRows(cur, fresh)) cur.replaceWith(fresh);
+        var table = holder.querySelector('table.positions');
+        if (!table) { if (!stay) window.location.href = href; return; }
+        if (!patchRows(cur, table)) cur.replaceWith(table);
         // The strip and the filter bar describe the table: they travel with it.
         var freshTotals = holder.querySelector('.strip');
         var curTotals = document.querySelector('.strip');
@@ -809,7 +901,13 @@ JS = """
           }
         }
         settle(href, push);
-      }).catch(function () { window.location.href = href; });
+      }).catch(function () { if (!stay) window.location.href = href; });
+    };
+
+    // After a write the journal changed under every cached view.
+    window.bcojRefreshTable = function (href) {
+      cache = {}; order = []; held = 0;
+      return full(href || here(), false, true, true);
     };
 
     // Drop any open form and return its row's button to "open my form".
@@ -1033,6 +1131,7 @@ JS = """
     }, 120);
   });
 
+  enhancers.push(function () {
   var lotSelect = document.getElementById('f_lot_id');
   var lotData = document.getElementById('lot-remaining');
   var qtyInput = lotSelect && lotSelect.form
@@ -1052,8 +1151,154 @@ JS = """
     };
     lotSelect.addEventListener('change', cap); cap();
   }
+  });
+
+  // A form in a panel submits in place. The server answers a script's POST
+  // with JSON instead of a redirect; the page then shows the flash and
+  // refreshes what changed, and the form stays where it was so the next
+  // entry is one keystroke away. Without script the same forms post and
+  // redirect as they always did.
+  if (window.fetch) {
+    var showFlash = function (text) {
+      var main = document.querySelector('main');
+      if (!main || !text) return;
+      var old = main.querySelector(':scope > .flash');
+      if (old) old.remove();
+      var div = document.createElement('div');
+      div.className = 'flash ' + (text.charAt(0) === '!' ? 'warn' : 'ok');
+      div.textContent = text.replace(/^!/, '');
+      main.insertBefore(div, main.firstChild);
+      clearTimeout(showFlash.timer);
+      showFlash.timer = setTimeout(function () { if (div.parentNode) div.remove(); }, 6000);
+    };
+    var showProblems = function (form, html) {
+      var holder = document.createElement('div');
+      holder.innerHTML = html;
+      var fresh = holder.querySelector('ul.problems');
+      var old = form.querySelector('ul.problems');
+      if (old) old.remove();
+      if (fresh) form.insertBefore(fresh, form.firstChild);
+      return !!fresh;
+    };
+    var openPanelKey = function () {
+      var p = document.querySelector('.form-box > [data-form]:not([hidden])');
+      return p ? p.getAttribute('data-form') : null;
+    };
+    // Bring the page in line with the journal. The positions table has its
+    // own in-place machinery; any other page swaps its main content and
+    // re-opens the panel that was in use.
+    var refreshPage = function () {
+      var url = window.location.pathname + window.location.search;
+      if (window.bcojRefreshTable) {
+        // The address may name a form ("/new", "&do=close") rather than the
+        // table: refresh from the page that owns the table.
+        var p = new URLSearchParams(window.location.search);
+        p.delete('act'); p.delete('do'); p.delete('form'); p.delete('kind');
+        var path = window.location.pathname === '/new' ? '/' : window.location.pathname;
+        var clean = path + (p.toString() ? '?' + p.toString() : '');
+        if (clean !== url) history.replaceState({ bcoj: clean }, '', clean);
+        return window.bcojRefreshTable(clean);
+      }
+      var key = openPanelKey();
+      return fetch(url, { credentials: 'same-origin' }).then(function (res) {
+        if (res.redirected && /\/login/.test(res.url)) { window.location.href = res.url; return; }
+        return res.text();
+      }).then(function (html) {
+        if (!html) return;
+        var doc = new DOMParser().parseFromString(html, 'text/html');
+        var fresh = doc.querySelector('main'), cur = document.querySelector('main');
+        if (!fresh || !cur) { window.location.reload(); return; }
+        var flash = cur.querySelector(':scope > .flash');
+        cur.replaceWith(fresh);
+        if (flash) fresh.insertBefore(flash, fresh.firstChild);
+        if (key) {
+          fresh.querySelectorAll('.form-box > [data-form]').forEach(function (p) {
+            p.hidden = p.getAttribute('data-form') !== key;
+          });
+          fresh.querySelectorAll('a[data-form-tab]').forEach(function (t) {
+            t.classList.toggle('here', t.getAttribute('data-form-tab') === key);
+          });
+        }
+        if (window.bcojEnhance) window.bcojEnhance();
+      });
+    };
+    document.addEventListener('submit', function (event) {
+      var form = event.target;
+      if (!form.closest('[data-form]') || (form.method || '').toLowerCase() !== 'post') return;
+      if (form.matches('form.filters, form.pick')) return;
+      event.preventDefault();
+      var button = form.querySelector('button[type=submit]');
+      if (button) button.disabled = true;
+      var body = new URLSearchParams(new FormData(form));
+      fetch(form.getAttribute('action'), {
+        method: 'POST', body: body, credentials: 'same-origin',
+        headers: { 'X-Requested-With': 'fetch' }
+      }).then(function (res) {
+        if (res.status === 403) { window.location.href = '/login'; return null; }
+        var json = (res.headers.get('Content-Type') || '').indexOf('json') >= 0;
+        return (json ? res.json() : res.text()).then(function (data) { return { res: res, data: data }; });
+      }).then(function (got) {
+        if (!got) return;
+        if (button) button.disabled = false;
+        var data = got.data;
+        if (typeof data === 'string') {
+          // A page came back: validation problems to show, or a refusal.
+          if (showProblems(form, data)) return;
+          var doc = new DOMParser().parseFromString(data, 'text/html');
+          var msg = doc.querySelector('main p');
+          showFlash('!' + (msg ? msg.textContent : 'That did not work.'));
+          return;
+        }
+        if (!data.ok) { showFlash('!' + data.error); return; }
+        var old = form.querySelector('ul.problems');
+        if (old) old.remove();
+        showFlash(data.flash);
+        var keep = form.closest('#new-box, .share-form');
+        if (keep) {
+          // Entry forms stay open for the next one, blank but for the defaults.
+          form.reset();
+          var first = form.querySelector('input[name=underlying], [autofocus]');
+          if (first) { first.focus(); if (first.select) first.select(); }
+        }
+        refreshPage();
+      }).catch(function () {
+        if (button) button.disabled = false;
+        showFlash('!The server could not be reached. Reload and check whether it went in.');
+      });
+    });
+  }
+
+  // Stamps are stored in UTC; show them in the reader's own clock. Today
+  // and yesterday by name, anything older by date.
+  enhancers.push(function () {
+    var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+    var today = new Date(); today.setHours(0, 0, 0, 0);
+    document.querySelectorAll('time[datetime]').forEach(function (el) {
+      if (el.hasAttribute('data-local')) return;
+      var when = new Date(el.getAttribute('datetime'));
+      if (isNaN(when)) return;
+      var hm = pad(when.getHours()) + ':' + pad(when.getMinutes());
+      var day = new Date(when); day.setHours(0, 0, 0, 0);
+      var days = Math.round((today - day) / 86400000);
+      var full = /UTC$/.test(el.textContent);
+      var date = when.getFullYear() + '-' + pad(when.getMonth() + 1) + '-' + pad(when.getDate());
+      el.title = el.getAttribute('datetime').replace('T', ' ').replace(/\+00:00$/, ' UTC');
+      el.textContent = !full ? hm : (days === 0 ? 'Today ' : days === 1 ? 'Yesterday ' : date + ' ') + hm;
+      el.setAttribute('data-local', '1');
+    });
+  });
+
+  // The theme select shows its choice at once, then saves it.
+  document.addEventListener('change', function (event) {
+    var pick = event.target;
+    if (!pick.matches || !pick.matches('select[name=theme]')) return;
+    document.documentElement.setAttribute('data-theme', pick.value);
+    if (pick.form && pick.form.requestSubmit) pick.form.requestSubmit();
+    else if (pick.form) pick.form.submit();
+  });
 
   // Uppercase tickers as they are typed, without moving the cursor.
+  enhancers.push(function () {
   document.querySelectorAll('input[name=underlying]').forEach(function (ticker) {
     ticker.addEventListener('input', function () {
       var at = ticker.selectionStart;
@@ -1061,6 +1306,10 @@ JS = """
       ticker.setSelectionRange(at, at);
     });
   });
+  });
+
+  window.bcojEnhance = function () { enhancers.forEach(function (f) { f(); }); };
+  window.bcojEnhance();
 })();
 """
 
