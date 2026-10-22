@@ -40,18 +40,27 @@ before the ticker's wheel total.
 
 ### Themes
 
-The views above show slate for positions and rolls, and paper for shares.
-Dark provides another option for the same workflows. The System setting
-follows the device's light or dark preference.
+Nine palettes, shown with the same synthetic trades. Select a preview to see
+the full-size screenshot. The System setting follows the device's light or
+dark preference.
 
-<details>
-<summary>Compare slate, dark, and paper</summary>
-
-| Slate | Dark | Paper |
-| --- | --- | --- |
-| [![Slate theme](docs/screenshots/positions.png)](docs/screenshots/positions.png) | [![Dark theme](docs/screenshots/positions-dark.png)](docs/screenshots/positions-dark.png) | [![Paper theme](docs/screenshots/positions-paper.png)](docs/screenshots/positions-paper.png) |
-
-</details>
+<table>
+  <tr>
+    <td align="center" width="33%"><strong>Slate</strong><br><a href="docs/screenshots/positions.png"><img src="docs/screenshots/positions.png" alt="Positions in slate" width="280"></a></td>
+    <td align="center" width="33%"><strong>Forest</strong><br><a href="docs/screenshots/positions-forest.png"><img src="docs/screenshots/positions-forest.png" alt="Positions in forest" width="280"></a></td>
+    <td align="center" width="33%"><strong>Espresso</strong><br><a href="docs/screenshots/positions-espresso.png"><img src="docs/screenshots/positions-espresso.png" alt="Positions in espresso" width="280"></a></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>Graphite</strong><br><a href="docs/screenshots/positions-graphite.png"><img src="docs/screenshots/positions-graphite.png" alt="Positions in graphite" width="280"></a></td>
+    <td align="center"><strong>Plum</strong><br><a href="docs/screenshots/positions-plum.png"><img src="docs/screenshots/positions-plum.png" alt="Positions in plum" width="280"></a></td>
+    <td align="center"><strong>Dark</strong><br><a href="docs/screenshots/positions-dark.png"><img src="docs/screenshots/positions-dark.png" alt="Positions in dark" width="280"></a></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>Paper</strong><br><a href="docs/screenshots/positions-paper.png"><img src="docs/screenshots/positions-paper.png" alt="Positions in paper" width="280"></a></td>
+    <td align="center"><strong>High contrast</strong><br><a href="docs/screenshots/positions-high-contrast.png"><img src="docs/screenshots/positions-high-contrast.png" alt="Positions in high contrast" width="280"></a></td>
+    <td align="center"><strong>Light</strong><br><a href="docs/screenshots/positions-light.png"><img src="docs/screenshots/positions-light.png" alt="Positions in light" width="280"></a></td>
+  </tr>
+</table>
 
 ## Run locally
 

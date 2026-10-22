@@ -2104,7 +2104,7 @@ def options_page(conn, db_path: str, token: str, query) -> tuple[int, str]:
     theme = r.form("/options/theme",
                    '<select name="theme" id="f_theme" aria-label="Theme">'
                    + "".join(f'<option value="{n}"{" selected" if n == store.get_setting(conn, "theme", "system") else ""}>'
-                             f'{"System (follow the device)" if n == "system" else n.capitalize()}</option>'
+                             f'{"System (follow the device)" if n == "system" else n.replace("-", " ").capitalize()}</option>'
                              for n in THEMES)
                    + "</select>",
                    token, submit="Save", cls="row theme")

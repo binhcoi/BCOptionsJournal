@@ -9,8 +9,6 @@ disabled -- plain POSTs and redirects -- because the core job is recording
 trades, and that should never depend on a script.
 """
 
-THEMES = ("system", "light", "dark", "paper", "slate")
-
 # One row per token, one column per palette. Every palette defines every
 # token, so no colour can fall through to another theme's value.
 _LIGHT = {
@@ -57,7 +55,58 @@ _SLATE = dict(_DARK, **{
     "amber": "#fcd34d", "amber-tint": "#3a3218",
     "chain-bg": "#162033", "current-tint": "#33301a",
 })
-PALETTES = {"light": _LIGHT, "dark": _DARK, "paper": _PAPER, "slate": _SLATE}
+_FOREST = dict(_DARK, **{
+    "bg": "#101b17", "panel": "#192a23", "ink": "#e0eee5", "dim": "#a0b7a9",
+    "line": "#344b3e", "accent": "#a3d9b3", "on-accent": "#102018",
+    "accent-tint": "#254333", "warn-bg": "#2c2919", "warn-line": "#776433",
+    "ok-bg": "#152d20", "neg-tint": "#402227", "pos-tint": "#193824",
+    "roll": "#c5b5ea", "roll-tint": "#352a48", "closed": "#f1a9c6", "closed-tint": "#402637",
+    "amber": "#e6c878", "amber-tint": "#3b3420",
+    "chain-bg": "#14221b", "current-tint": "#343520",
+})
+_ESPRESSO = dict(_DARK, **{
+    "bg": "#1b1714", "panel": "#2b231f", "ink": "#efe5d8", "dim": "#b9a99a",
+    "line": "#4c3c31", "accent": "#e4b080", "on-accent": "#24180e",
+    "accent-tint": "#4a3323", "warn-bg": "#35291a", "warn-line": "#8f6a39",
+    "ok-bg": "#1c3021", "neg-tint": "#442323", "pos-tint": "#1d3527",
+    "roll": "#c8b3e6", "roll-tint": "#3b2c45", "closed": "#e9a5bb", "closed-tint": "#452a34",
+    "amber": "#ecc479", "amber-tint": "#45371f",
+    "chain-bg": "#231d19", "current-tint": "#403524",
+})
+_PLUM = dict(_DARK, **{
+    "bg": "#1d1424", "panel": "#2b2034", "ink": "#f0e7f4", "dim": "#b8a5c1",
+    "line": "#4b3658", "accent": "#c9a7eb", "on-accent": "#21132c",
+    "accent-tint": "#422c55", "warn-bg": "#33291e", "warn-line": "#896a3c",
+    "ok-bg": "#1c3028", "neg-tint": "#45242f", "pos-tint": "#1c372c",
+    "roll": "#b9b4ff", "roll-tint": "#34304f", "closed": "#f4abc9", "closed-tint": "#4b2942",
+    "amber": "#e8c87d", "amber-tint": "#443522",
+    "chain-bg": "#241a2d", "current-tint": "#3e3044",
+})
+_GRAPHITE = dict(_DARK, **{
+    "bg": "#15191b", "panel": "#22282b", "ink": "#e4ecee", "dim": "#a4b1b7",
+    "line": "#3b464b", "accent": "#68c9c2", "on-accent": "#102321",
+    "accent-tint": "#214440", "warn-bg": "#302b1d", "warn-line": "#82703e",
+    "ok-bg": "#193028", "neg-tint": "#3d242a", "pos-tint": "#1d352b",
+    "roll": "#c0b4ed", "roll-tint": "#343047", "closed": "#eba8c4", "closed-tint": "#422a36",
+    "amber": "#e5c87e", "amber-tint": "#3d3524",
+    "chain-bg": "#1b2023", "current-tint": "#283e3c",
+})
+_HIGH_CONTRAST = dict(_DARK, **{
+    "bg": "#000000", "panel": "#101010", "ink": "#ffffff", "dim": "#cecece",
+    "line": "#858585", "pos": "#70f0a4", "neg": "#ff9d9d", "accent": "#ffe66d",
+    "on-accent": "#000000", "accent-tint": "#383000",
+    "warn-bg": "#282200", "warn-line": "#ffe66d", "ok-bg": "#002d1c",
+    "neg-tint": "#400b12", "pos-tint": "#00321a",
+    "roll": "#d3b2ff", "roll-tint": "#2b1649", "closed": "#ffb3d4", "closed-tint": "#45132b",
+    "amber": "#ffdb76", "amber-tint": "#3c2b00",
+    "chain-bg": "#080808", "current-tint": "#302b00",
+})
+PALETTES = {
+    "light": _LIGHT, "dark": _DARK, "paper": _PAPER, "slate": _SLATE,
+    "forest": _FOREST, "espresso": _ESPRESSO, "plum": _PLUM,
+    "graphite": _GRAPHITE, "high-contrast": _HIGH_CONTRAST,
+}
+THEMES = ("system", *PALETTES)
 
 
 def _tokens(palette: dict) -> str:
