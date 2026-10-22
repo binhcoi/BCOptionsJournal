@@ -1423,7 +1423,7 @@ class TestShares(WebTestCase):
         self._put_assigned("shr")
         body = self.get("/shares")
         self.assertIn("SHR", body)
-        self.assertIn("holding 1000", body)
+        self.assertRegex(body, r'href="/shares/SHR".*?</td><td>1000</td>')
         page = self.get("/shares/SHR")
         self.assertIn("Lots - 1", page)
         self.assertIn("put assignment", page)
@@ -1453,7 +1453,7 @@ class TestShares(WebTestCase):
         self.assertEqual(status, 303)
         page = self.get("/shares/SEL")
         self.assertIn("800.00", page)      # (14 - 10) x 200
-        self.assertIn("holding 100", self.get("/shares"))
+        self.assertRegex(self.get("/shares"), r'href="/shares/SEL".*?</td><td>100</td>')
 
     def test_selling_more_than_held_is_refused(self):
         self.post("/shares/buy", {"underlying": "shrt", "on": "2026-01-05",
@@ -1512,7 +1512,8 @@ class TestShares(WebTestCase):
         page = self.get("/shares/WHL")
         # 2,993.50 (put) + 993.50 (call) + 5,000.00 (shares) = 8,987.00
         self.assertIn("8,987.00", page)
-        self.assertIn("flat", self.get("/shares"))
+        self.assertRegex(self.get("/shares"),
+                         r'href="/shares/WHL".*?</td><td><span class="dim">-</span></td>')
 
 
 class TestFutureDatesRefused(WebTestCase):
@@ -1640,8 +1641,9 @@ class TestDecisionSupport(WebTestCase):
                         "&new_fee=7.80&new_quantity=12&on=2026-02-06")
         self.assertIn("Roll credit", frag)
         self.assertIn("1,985.70", frag)
-        self.assertIn('<span class="pos">29.85</span>', frag)   # break-even fell: good
-        self.assertIn("was 32.01", frag)
+        self.assertIn("(4,006.50)", frag)      # BTC: 10 x 100 x 4.00 + 6.50 fee
+        self.assertIn("5,992.20", frag)        # STO: 12 x 100 x 5.00 - 7.80 fee
+        self.assertIn("(1,013.00)", frag)      # closing leg P/L, including both fees
         self.assertIn("40,800.00", frag)       # capital at risk after
         self.assertIn("Size grows 10 &rarr; 12", frag)
         self.assertIn("42 DTE", frag)
@@ -1844,8 +1846,7 @@ class TestPositionsPagePolish(WebTestCase):
         self.add_position(underlying="pex", outcome="EXPIRED", closed_on="2026-03-20")
         self.assertEqual([q.status.value for q in self.positions() if q.underlying == "PEX"], ["EXPIRED"])
         self.add_position(underlying="pas", outcome="ASSIGNED", closed_on="2026-03-20")
-        self.assertIn("1000 held", self.get("/shares").replace("&middot;", "·").replace("  ", " ")
-                      if "1000 held" in self.get("/shares") else "1000 held")
+        self.assertRegex(self.get("/shares"), r'href="/shares/PAS".*?</td><td>1000</td>')
         status, _, body = self.add_position(underlying="bad", outcome="CLOSED",
                                             closed_on="2025-12-01", close_price="1")
         self.assertEqual(status, 400)
@@ -2517,7 +2518,7 @@ class TestShareRepairs(WebTestCase):
         page = self.get(f"/position/{call.id}")
         self.assertIn("300 shares held", page)
         ticker = self.get("/shares/CVT")
-        self.assertIn("300 of 300 shares", ticker)              # open calls fact
+        self.assertIn("300/300", ticker)                       # open calls fact
         self.assertIn("200/200", ticker)                         # oldest lot first
         self.assertIn("100/100", ticker)
         # A fourth contract has no shares behind it: uncovered, in red.

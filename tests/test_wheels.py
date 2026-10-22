@@ -51,6 +51,7 @@ class TestFullWheel(unittest.TestCase):
         self.assertEqual(v.share_realized, D("500.00"))       # (40 - 35) x 100
         self.assertFalse(v.is_open)
         self.assertEqual(v.remaining, 0)
+        self.assertEqual(v.cost_basis, D("0.00"))
         self.assertEqual(v.disposed, 100)
         self.assertEqual(v.last_disposed_on, date(2026, 5, 15))
         self.assertEqual(v.days, 56)
@@ -107,6 +108,16 @@ class TestOpenLotWithOpenCall(unittest.TestCase):
         self.assertEqual(t.held, 400)
         self.assertEqual(t.held_cost, D("4400.00"))
         self.assertEqual(t.basis.unit_price, D("11.00"))   # 4,400 / 400
+
+    def test_lot_cost_basis_tracks_remaining_shares_and_acquisition_fees(self):
+        self.lot.fee = D("3.00")
+        sale = ShareDisposal(id="sale", underlying="BETA", quantity=200,
+                             disposed_on=date(2026, 2, 1), proceeds_per_share=D("12"))
+        view = lot_views(self.index, [self.call], [self.lot], [sale])[0]
+        self.assertEqual(view.remaining, 100)
+        self.assertEqual(view.cost_basis, D("1001.00"))
+        ticker = by_ticker(self.index, [self.call], [self.lot], [sale])[0]
+        self.assertEqual(view.cost_basis, ticker.held_cost)
 
 
 class TestEverythingPaidBackLowersTheBasis(unittest.TestCase):

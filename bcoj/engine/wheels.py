@@ -44,6 +44,11 @@ class LotView:
         return self.remaining > 0
 
     @property
+    def cost_basis(self) -> Decimal:
+        """Cost of the shares still held, including acquisition fees pro-rata."""
+        return q2(self.lot.cost * self.remaining / self.lot.quantity)
+
+    @property
     def covered(self) -> int:
         """Shares currently spoken for by open calls."""
         return self.covered_shares

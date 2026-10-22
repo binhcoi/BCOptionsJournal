@@ -1,140 +1,141 @@
-# Running, backing up, restoring
+# Deployment and operations
 
-The journal is one SQLite file. Everything here is about that file.
+The application stores its journal, settings, password hash, and audit trail
+in one SQLite database. Keep that data file separate from application code.
 
-## From source (laptop, dev box)
+For the basic source checkout and startup command, see the
+[README](../README.md#run-locally).
+
+## Network access
+
+The source server binds to `127.0.0.1:8000` by default. For remote access
+through an SSH tunnel:
 
 ```bash
-python3 -m unittest discover -s tests -q
-python3 -m bcoj.web --db journal.db     # http://127.0.0.1:8000/
+ssh -L 8000:127.0.0.1:8000 user@example-host
 ```
 
-Python 3.10 or newer, standard library only. Loopback by default; reach it by
-forwarding the port (`ssh -L 8000:127.0.0.1:8000 host`).
+To listen on network interfaces directly:
 
-## LXC from a release
+```bash
+python3 -m bcoj.web --db journal.db --host 0.0.0.0 --port 8000
+```
 
-Each release on GitHub carries the wheel, `bcoj.service`, and three scripts.
-Debian 12 or Ubuntu 24.04 template, unprivileged, 1 vCPU, 512 MB, 4 GB disk.
-The app peaks at 29 MB resident; the journal grows about 150 KB a year.
+For access over an untrusted network, use an HTTPS reverse proxy and restrict
+the application port to the proxy. A proxy on another host or in another
+container needs an address it can reach; a proxy on the same host can use
+loopback. Forward `X-Forwarded-Proto: https` so the app marks session cookies
+`Secure`. WebSocket support is not required.
+
+## Release installation with systemd
+
+[GitHub releases](https://github.com/binhcoi/BCOptionsJournal/releases) contain
+a Python wheel, a systemd unit, and install, update, and import scripts.
+
+Run the scripts as root on a Debian or Ubuntu host with `sudo` available.
+Review the downloaded script before running it:
 
 ```bash
 curl -fsSLO https://github.com/binhcoi/BCOptionsJournal/releases/latest/download/install.sh
-sh install.sh                # or: sh install.sh 1.0.0
+sh install.sh
 ```
 
-That installs Python and a venv under `/opt/bcoj`, the wheel, a `bcoj`
-service user, the journal at `/srv/bcoj/journal.db`, and the systemd unit,
-bound to all interfaces for the proxy below. First login: `bcoj`.
+The installer creates a `bcoj` service account, installs the wheel into
+`/opt/bcoj/venv`, and stores the journal at `/srv/bcoj/journal.db`. The
+[packaged systemd unit](../deploy/bcoj.service) binds to all interfaces for
+network or reverse-proxy access.
 
-| Script | Does |
-|---|---|
-| `install.sh [version]` | First install. Idempotent |
-| `update.sh [version]` | Snapshot to `/srv/bcoj/backups/`, install the wheel, restart. Same command moves down a version; restore the snapshot if the schema moved |
-| `import.sh export.csv [estimates.json] [--force]` | Stop, reconcile, import, start. Refuses an unclean diff without `--force` |
+| Script | Purpose |
+| --- | --- |
+| [install.sh](../deploy/install.sh) `[version]` | Install a specified release, or the latest release by default. |
+| [update.sh](../deploy/update.sh) `[version]` | Stop the service, snapshot the journal, install the wheel, and restart. |
+| [import.sh](../deploy/import.sh) `export.csv [estimates.json] [--force]` | Stop the service, import a legacy export, then restart. See the [import reference](legacy-format.md). |
 
-The journal lives inside the container. A Proxmox rollback restores it too and
-loses every trade entered since, so snapshot from the Options page before an
-upgrade, and copy `/srv/bcoj/backups/` off the node nightly.
-
-## Releases
-
-Bump `__version__` in `bcoj/__init__.py`, commit, push to main. The workflow
-runs the tests on 3.10 and 3.12, tags `v<version>`, builds the wheel, creates
-the GitHub release with the wheel and the deploy scripts, and pushes
-`ghcr.io/binhcoi/bcoj:<version>` and `:latest`. A version already tagged only
-runs the tests. Pull requests and pushes to other branches run the tests only.
-
-## Behind a reverse proxy
-
-The app must bind an address the proxy can reach; `127.0.0.1` gives the proxy
-a 502, hence `--host 0.0.0.0` in the unit above. Firewall port 8000 to the proxy node only. In Nginx Proxy Manager: scheme
-`http`, the container's address, port 8000, an SSL certificate with Force SSL.
-No websockets. The proxy's `X-Forwarded-Proto: https` header, which NPM sends,
-makes the session cookie `Secure`.
-
-## Options
-
-Theme (system, light, dark, paper, slate), password, snapshots and exports
-live on the Options page.
-
-## Password
-
-Always required. First login is `bcoj`; the app then forces a change and
-stores the hash in the journal. Change it again under Options. Forgotten:
-start once with `BCOJ_PASSWORD=new-password`, which resets it. Scripts may
-send the password as HTTP Basic instead of logging in:
+Service management:
 
 ```bash
-curl -u x:PASSWORD -o journal.db http://127.0.0.1:8000/export/journal.db
+systemctl status bcoj
+journalctl -u bcoj
 ```
 
-### LXC sizing
-
-One process, one file, nothing running between requests. A four-year journal
-(650 KB) peaks at 29 MB resident; a page renders in 10 to 25 ms.
-
-| Resource | Size | Note |
-|---|---|---|
-| CPU | 1 vCPU | |
-| RAM | 256 MB | 512 MB if the container also runs `unattended-upgrades` or a working shell |
-| Root disk | 2 GB | OS plus Python; the code is 1 MB |
-| Data disk | 1 GB at `/srv/bcoj` | Journal grows about 150 KB a year; a year of daily snapshots is under 300 MB |
-| Swap | none | |
-
-Unprivileged, no nesting, no devices.
-
-Keep `/srv/bcoj` on a bind mount or a separate volume, outside the container's
-root. Rolling the container back after a bad upgrade must not roll the journal
-back with it. Container snapshots are crash-consistent for SQLite (the journal
-and its WAL share a directory), but they sit on the same disk as the container,
-so also copy the app's `backups/` folder off the host nightly.
-
-systemd unit:
-
-```ini
-[Unit]
-Description=BC Options Journal
-After=network.target
-
-[Service]
-User=bcoj
-WorkingDirectory=/opt/bcoj
-ExecStart=/usr/bin/python3 -m bcoj.web --db /srv/bcoj/journal.db
-Restart=on-failure
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=multi-user.target
-```
+For an LXC deployment, keep `/srv/bcoj` on a separate volume or bind mount so
+rolling back the container's root filesystem does not also roll back the
+journal. Keep independent backups outside the container host.
 
 ## Docker
 
-```bash
-docker compose -f docker/compose.yml up -d     # builds locally; tests run during the build
-docker run -d -p 127.0.0.1:8000:8000 -v bcoj:/data ghcr.io/binhcoi/bcoj:latest   # or the published image
-```
-
-Journal on the `/data` volume.
-
-## Backup
-
-All three give a complete, consistent copy:
-
-1. Options page, **Take a snapshot now**. Written to `backups/` beside the journal through SQLite's backup API. Optional label. Each snapshot has a **Download** link.
-2. Options page, **Export**, `journal.db`. The same copy, downloaded.
-3. Copy the file with the server stopped. Never while it runs: a plain copy can catch a write half way.
-
-Keep snapshots on another disk or machine. The app never deletes them.
-
-## Restore
-
-Options page, **Restore** on any snapshot, behind a confirmation. The current
-journal is snapshotted first as `before-restore`, then replaced and share
-allocations rebuilt. To undo, restore `before-restore`.
-
-With the server stopped:
+Build from the checkout:
 
 ```bash
-cp /srv/bcoj/backups/journal-YYYYMMDD-HHMMSS.db /srv/bcoj/journal.db
+docker compose -f docker/compose.yml up -d
 ```
+
+The [Compose configuration](../docker/compose.yml) publishes port 8000 to
+host loopback and stores the journal in `docker/data/`. The bind-mounted data
+directory must be writable by the container's user, UID 1000.
+
+Alternatively, use the published image with a named volume:
+
+```bash
+docker run -d --name bcoj -p 127.0.0.1:8000:8000 -v bcoj:/data ghcr.io/binhcoi/bcoj:latest
+```
+
+The journal is `/data/journal.db` inside the container. The
+[Dockerfile](../docker/Dockerfile) runs the test suite during image build and
+starts the app as a non-root user.
+
+## Authentication and settings
+
+The initial password is `bcoj`. First login requires choosing a replacement.
+Change it again on the Options page; changing the password signs out existing
+sessions. The same page holds the theme, snapshots, and exports.
+
+To reset a forgotten password, stop the current server and start it once with
+`BCOJ_PASSWORD` set:
+
+```bash
+BCOJ_PASSWORD='replace-with-new-password' python3 -m bcoj.web --db journal.db
+```
+
+For a service or container, supply that variable to its process for one
+startup, then remove it from the service or container configuration so later
+restarts do not reset the password again.
+
+Scripts can use HTTP Basic. This command prompts for the password instead of
+including it in the command line:
+
+```bash
+curl --user bcoj --output journal-backup.db http://127.0.0.1:8000/export/journal.db
+```
+
+## Backup and restore
+
+Use either **Take a snapshot now** or the `journal.db` export on the Options
+page. Both use SQLite's backup API to create a consistent copy while the app
+is running. Snapshots are stored in `backups/` beside the database and can be
+downloaded from that page.
+
+Do not copy only the live `.db` file while the server is writing: SQLite uses
+a write-ahead log. Use the snapshot or export operation instead. Keep copies
+on another disk or machine; the app does not automatically delete old
+snapshots.
+
+To restore, choose a snapshot on the Options page and confirm. The current
+journal is first saved as a `before-restore` snapshot. The selected snapshot
+is then restored and share allocations are rebuilt. To reverse the restore,
+restore the saved `before-restore` snapshot. Files from a newer schema version
+are refused.
+
+An update script also takes a snapshot before installing a release. A
+package downgrade does not downgrade the schema; a compatible earlier
+snapshot may be needed.
+
+## Release process
+
+The version is defined in [bcoj/__init__.py](../bcoj/__init__.py). The
+[CI workflow](../.github/workflows/ci.yml) tests pushes and pull requests on
+Python 3.10 and 3.12. A push to `main` with a version that has no existing tag
+creates `v<version>`, builds the wheel, publishes the GitHub release and
+scripts, and pushes `ghcr.io/binhcoi/bcoj:<version>` and `:latest`.
+
+An already tagged version runs tests without publishing another release.

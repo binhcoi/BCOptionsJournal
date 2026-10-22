@@ -57,7 +57,7 @@ def page(title: str, body: str, flash: str = "", nav_here: str = "", toolbar: st
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)} - {esc(APP_NAME)}</title>
 <link rel="stylesheet" href="/static/app.css?v={VERSION["app.css"]}">
-</head><body>
+</head><body class="{esc(nav_here)}">
 <header>
   <strong>{esc(APP_NAME)}</strong>
   {nav}
@@ -230,6 +230,11 @@ def contract_text(position) -> str:
         f"{side}{position.quantity} {position.underlying} {position.expiry} "
         f"{strike_text(position.strike)} {position.right.value[0]}"
     )
+
+
+def share_source_text(source) -> str:
+    """The acquisition label used in share tables."""
+    return "bought" if source.value == "OUTRIGHT_BUY" else source.value.replace("_", " ").lower()
 
 
 def status_badge(status) -> str:

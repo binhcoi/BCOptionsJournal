@@ -95,8 +95,14 @@ nav a, .tabs a {
 }
 nav a:hover, .tabs a:hover { background: var(--bg); color: var(--ink); }
 nav a.here, .tabs a.here { background: var(--accent); color: var(--on-accent); }
+@media (max-width: 760px) {
+  header { flex-wrap: wrap; gap: .5rem; }
+  header nav { width: 100%; overflow-x: auto; }
+  header nav a { white-space: nowrap; flex: 0 0 auto; }
+}
 main { max-width: 1180px; margin: 0 auto; padding: 1.2rem; }
 footer { max-width: 1180px; margin: 0 auto; padding: 0 1.2rem 1.2rem; font-size: .78rem; color: var(--dim); }
+body.positions main, body.positions footer { max-width: 1480px; }
 form.login, form.stack { display: grid; gap: .6rem; max-width: 22rem; justify-items: start; }
 /* Options: one panel, one row per setting. What it is on the left, the
    control on the right; every row the same shape. */
@@ -149,6 +155,28 @@ tbody tr:last-child td { border-bottom: 0; }
 tbody tr:hover { background: var(--bg); }
 td:last-child, th:last-child { text-align: left; }
 .wrap { overflow-x: auto; }
+table.shares th:nth-child(2), table.shares td:nth-child(2) { text-align: right; }
+/* The two share ledgers use the same tracks, including non-applicable cells. */
+table.share-ledger { table-layout: fixed; min-width: 70rem; }
+table.share-ledger th, table.share-ledger td { text-align: right; font-variant-numeric: tabular-nums; }
+table.share-ledger th:first-child, table.share-ledger td:first-child,
+table.share-ledger th:nth-child(2), table.share-ledger td:nth-child(2) { text-align: left; }
+table.share-ledger th:first-child { width: 7rem; }
+table.share-ledger th:nth-child(3) { width: 3.5rem; }
+table.share-ledger th:nth-child(4) { width: 3.75rem; }
+table.share-ledger th:nth-child(5) { width: 5.25rem; }
+table.share-ledger th:nth-child(6) { width: 6.25rem; }
+table.share-ledger th:nth-child(7), table.share-ledger th:nth-child(8) { width: 7rem; }
+table.share-ledger th:nth-child(9) { width: 3.5rem; }
+.share-origin { display: grid; grid-template-columns: 8rem auto; gap: .5rem;
+  align-items: center; justify-content: start; }
+.share-origin .origin-label { white-space: normal; }
+.share-origin .badge { white-space: nowrap; }
+.share-type-outright-buy { color: var(--accent); background: var(--accent-tint); }
+.share-type-buy-write { color: var(--roll); background: var(--roll-tint); }
+.share-type-put-assignment, .share-type-call-exercise, .share-type-called-away {
+  color: var(--amber); background: var(--amber-tint); }
+.share-type-sold { color: var(--closed); background: var(--closed-tint); }
 /* History: when, what, undo. Words wrap; the time and the button do not. */
 table.audit th, table.audit td { text-align: left; vertical-align: top; }
 table.audit td:first-child { white-space: nowrap; color: var(--dim); width: 10rem;
@@ -160,7 +188,7 @@ table.audit td:last-child { width: 0; white-space: nowrap; text-align: right; }
 table.audit s.dim a { color: inherit; }
 table.audit td:nth-child(2) s.dim .dim { color: inherit; }
 .filterbar form.filters button { padding: .35rem .8rem; }
-.filterbar .seg + form.filters { margin-top: .6rem; }
+.filterbar > .seg + form.filters { margin-top: .6rem; }
 
 /* A contract is five facts, not one string. Laid out as an inline grid with
    fixed tracks so expiry, strike and type align down the table whatever the
@@ -169,7 +197,7 @@ table.audit td:nth-child(2) s.dim .dim { color: inherit; }
    type. */
 .contract {
   display: inline-grid;
-  grid-template-columns: 3.4em 6ch 10.5ch auto;
+  grid-template-columns: 3.4em 7ch 10.5ch auto;
   column-gap: .55rem; align-items: baseline;
   /* Tracks are in ch, which follows the font. Pin the weight here so no
      ancestor (a bold row, a heading) can change the track widths. */
@@ -236,6 +264,11 @@ table.facts tr:last-child th, table.facts tr:last-child td { border-bottom: 0; }
 .facts.wide .chip { font-size: .92rem; padding: .3rem .75rem; background: var(--bg); color: var(--ink); }
 .facts.wide .chip.warn { border-color: var(--neg); background: var(--neg-tint); color: var(--neg); }
 .facts.wide .chip a { color: inherit; text-decoration: underline; }
+@media (max-width: 1000px) {
+  .facts.wide .cells { grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+    gap: .65rem .75rem; }
+  .facts.wide .cells > div { padding: 0; border-left: 0; }
+}
 
 .grow { flex: 1; }
 a.btn.new { padding: .45rem .9rem; font-size: inherit; font-weight: 600;

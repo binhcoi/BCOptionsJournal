@@ -1,8 +1,59 @@
-# The legacy spreadsheet format
+# Legacy import and CSV format
 
-One row per option position, open and close on the same row, derived columns
-by formula. This describes the format so the importer can be read without the
-file. No real data appears here.
+The importer accepts a positional CSV export with one row per option
+position. Opening and closing fills share a row; calculated columns provide
+the expected values used for reconciliation. The public
+[fixture](../tests/fixtures/synthetic_rows.csv) contains synthetic examples.
+
+## Import workflow
+
+```bash
+python3 -m bcoj.cli reconcile export.csv
+python3 -m bcoj.cli flags export.csv
+python3 -m bcoj.cli import export.csv --db journal.db
+```
+
+`reconcile` compares eight calculated figures per row with the CSV's values.
+Import refuses a disagreement unless `--force` is supplied; discrepancies
+remain flagged. Importing a file with the same content hash again is a no-op.
+
+| Command | Purpose |
+| --- | --- |
+| `reconcile` | Show exact matches, rounding differences, disagreements, and parse failures. |
+| `flags` | Identify data-quality cases that need review. |
+| `import` | Persist positions, share records, and flags in SQLite. |
+| `panel` | Reproduce the input format's summary calculations for comparison. |
+| `shares` | Inspect derived lots, disposals, and realized P/L by ticker. |
+| `chains` | Inspect roll chains, carry, net credit, and targets. |
+
+Use `python3 -m bcoj.cli COMMAND --help` for options. The `serve` command is
+also available; the [README](../README.md#run-locally) covers web startup.
+
+### Reconstructed acquisitions
+
+An export may omit outright share purchases. If matching cannot find enough
+shares, the ticker stays blocked until the missing acquisition is recorded.
+Optional reconstructed acquisitions can be loaded with `--estimates` from a
+JSON file selected by `BCOJ_ESTIMATES`, or from `private/estimates.json` in a
+source checkout:
+
+```json
+{
+  "estimates": [
+    {
+      "underlying": "ACME",
+      "quantity": 100,
+      "cost_per_share": "35.00",
+      "note": "Synthetic example: acquisition missing from the CSV"
+    }
+  ]
+}
+```
+
+These lots are marked as estimated for review. Keep actual exports and
+reconstructed acquisitions outside version control. Without a configuration
+file, `--estimates` adds no lots. See
+[bcoj/importer/estimates.py](../bcoj/importer/estimates.py) for the loader.
 
 ## Columns
 
@@ -70,9 +121,9 @@ disposal, the net of both when a buy-write is called away. Derivable from
 - `-` means not applicable
 - `0` and `0.00` are zero, distinct from blank
 
-## Quirks
+## Data-quality cases
 
-The importer flags these; it does not fix them.
+The importer flags these cases for review rather than changing source records.
 
 - **Only options get a row.** Outright share trades are disguised as options. Tells: a strike off any listed increment, zero premium, expiry at or before open, P/L equal to negated fees. Two or more together mean a share transaction. A consequence: a ticker's share count can go negative, and the importer blocks that ticker rather than compute through it.
 - **Partial events are flattened.** Where part of a position was assigned and the rest rolled, rows were reshaped by hand so every close negates its open. Fingerprint: quantity drops across a roll link, often with a fee that does not match the contract count.
@@ -81,7 +132,8 @@ The importer flags these; it does not fix them.
 
 ## What the importer does
 
-Writes what the sheet says, changes nothing. Recomputes eight derived figures
-per row and diffs them against the sheet's columns: exact, within rounding, or
-a disagreement. Suspicious rows are flagged, never corrected. Five years of
-hand-kept accounting is the acceptance test.
+The importer preserves entered values and links. It recomputes derived
+figures for comparison, records import provenance, and exposes unresolved
+issues on the Data page. The
+[importer tests](../tests/test_importer.py) verify the supported row shapes
+against independently calculated synthetic results.

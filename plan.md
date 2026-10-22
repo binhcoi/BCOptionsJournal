@@ -1,331 +1,197 @@
-# BC Options Trade Journal: design
+# Design
 
-A local, single-user options journal. Correct P/L across rolls, assignments,
-covered calls and shares; fast manual entry; decision support when rolling.
+BC Options Trade Journal is a single-user journal for options and shares.
+Its central requirement is consistent accounting across rolls, partial
+assignments, covered calls, and share disposals.
 
-It replaces a hand-maintained spreadsheet whose five years of arithmetic
-reconcile to the cent. The sheet is the source of history, not the design
-target. §3 lists what it cannot do; that is what the app is for. Its format is
-in [docs/legacy-format.md](docs/legacy-format.md).
+This document describes the model and design constraints. See the
+[README](README.md) for the product overview, [deployment guide](docs/deploy.md)
+for operations, and [import reference](docs/legacy-format.md) for the legacy
+CSV format and command-line workflow.
 
----
+## Architecture
 
-## 1. Decisions
-
-| Area | Decision | Why |
+| Layer | Responsibility | Source |
 | --- | --- | --- |
-| Language | Python 3.10+ | `Decimal` for money, `csv` for the import |
-| Dependencies | None | `Decimal`, `csv`, `sqlite3`, `http.server` are standard library. Runs wherever Python is |
-| Database | SQLite, one file | A few hundred rows a year. No ORM: ten tables, plain joins |
-| Migrations | Versioned runner over `PRAGMA user_version` | Each migration in its own transaction |
-| Frontend | stdlib `http.server`, hand-written HTML, CSS and script | One user on loopback needs no framework. Script swaps expand, open and switch in place, prefetched on hover; server-rendered paths remain and are what tests drive |
-| Priorities | Integrity first, then snappiness | Set 2026-09-03. Refuse impossible states at entry; every write audited and undoable; no full reload for expand, open, switch |
-| Deployment | A wheel and a GHCR image per release; an LXC installs the wheel by script | Pure Python, one artifact for every platform. See docs/deploy.md |
-| Market data | None. Open positions show a computed profit target | Works air-gapped |
-| Data in | Manual entry; a one-off importer for the legacy sheet | Import is a migration; corrections happen in the app |
-| Auth | One password, always; fixed default at first login; signed session cookie; HTTP Basic for scripts | A forwarded port is not a boundary. `BCOJ_PASSWORD` at start resets it |
-| Money | `Decimal` everywhere, stored as `TEXT` | `float` and `REAL` corrupt accounting silently |
+| Domain | Typed records, enums, and monetary values | [bcoj/domain](bcoj/domain) |
+| Engine | Cash flows, chains, share matching, targets, risk, and reports | [bcoj/engine](bcoj/engine) |
+| Storage | SQLite schema, migrations, transactions, and audit history | [bcoj/db](bcoj/db) |
+| Importer | CSV parsing, reconciliation, and data-quality flags | [bcoj/importer](bcoj/importer) |
+| Web | HTTP routing, HTML rendering, CSS, and progressive JavaScript | [bcoj/web](bcoj/web) |
+| CLI | Import, inspection, and server entry points | [bcoj/cli.py](bcoj/cli.py) |
 
----
+The domain and engine do not depend on the database, web server, or importer.
+The CLI and web layer call the same calculations. Trade actions return the
+records to create or update; the storage layer persists them.
 
-## 2. Arithmetic
+### Technology decisions
 
-Nothing computed is stored. Correcting a rule fixes all history.
+- **Python standard library.** `Decimal`, `sqlite3`, `csv`, and `http.server`
+  cover the requirements without third-party runtime dependencies. This is
+  intended for one journal owner, rather than a multi-tenant service.
+- **SQLite.** One file contains the journal, settings, and audit trail.
+  Foreign keys and constraints protect relationships; migrations advance
+  `PRAGMA user_version` transactionally.
+- **Explicit monetary precision.** Money uses `Decimal`, stored as `TEXT`.
+  Prices, fees, and accounting outputs are rounded explicitly. Dates use
+  ISO-8601 `TEXT`.
+- **Derived reporting.** Cash flows, P/L, chain carry, targets, and adjusted
+  basis are calculated from entered facts. Share allocations are a derived,
+  rebuildable table rather than an independent source of truth.
+- **Progressive enhancement.** The server renders complete pages and accepts
+  ordinary form submissions. JavaScript adds inline panels, prefetched
+  fragments, live previews, and submissions that retain the entry form.
 
-```
-Q = signed quantity   (positive SHORT, negative LONG)
+The authoritative schema is [bcoj/db/schema.py](bcoj/db/schema.py); field lists
+and SQL definitions are maintained there.
 
-open_cash  =  Q × mult × open_price  − open_fee
-close_cash = −Q × mult × close_price − close_fee
-P/L        = open_cash + close_cash        (zero while open)
-```
+## Accounting model
 
-**Carry.** Following the roll link, `carry(p) = realized(parent) + carry(parent)`.
-The leg closed in a roll is usually a loss even when the chain is ahead, so
-per-leg P/L alone misleads.
+### Positions and cash flow
 
-**Profit target.** The close price at which a chain nets a fraction (50% by
-default) of its available credit. Clamped at zero: an underwater chain has no
-target, and its best case is expiring worthless. A long leg targets 25% profit
-on its debit.
+A position records a contract, direction, positive quantity, opening fill,
+fees, dates, and status. It can be open, closed, expired, rolled, assigned, or
+superseded by a split. Roll and split links identify its predecessor; a
+position cannot have both kinds of parent.
 
-**Break-even.** `strike − net_chain_credit / shares` for a short put, mirrored
-for a call. Below it at expiry the whole chain is a net loss.
+For arithmetic, quantity is signed: positive for short, negative for long.
 
----
-
-## 3. What the sheet cannot do
-
-- **Share P/L.** Covered calls are unlinked rows; shares have no home. A wheel has no total and no duration.
-- **A trustworthy headline.** Adding share cash flow to option P/L is right only while the underlying is flat. Anything still held reads as a loss.
-- **Scope.** Realized for a ticker already contains losses on rolled legs, so a ticker can look healthy while a chain carries a large loss. Both are right at different scopes; the sheet labels neither.
-- **Read a roll chain.** Legs scattered by date; no view of the strike walking down as size grows.
-- **Break-even.** Never computed.
-- **Divide safely.** Per-share figures over a zero or negative share count give `#DIV/0!` or plausible nonsense.
-- **Usability.** Macro-button filtering, no notes, no validation, every roll retyped.
-
----
-
-## 4. Model
-
-### 4.1 `position`
-
-`id`, `underlying`, `expiry`, `strike`, `right`, `multiplier`; `direction`
-(`SHORT`/`LONG`) and `quantity` (always positive); open and close date, price,
-fee; `status` in `OPEN | CLOSED | EXPIRED | ROLLED | ASSIGNED | SPLIT`;
-`rolled_from_id`, `split_from_id`, `split_from_quantity`; `target_pct`,
-`notes`, `tags`.
-
-One row per position, not a fill ledger: one form, one submit per trade. The
-entry form accepts a negative quantity as shorthand for long.
-
-### 4.2 Shares
-
-FIFO and LIFO can differ by tens of thousands on one disposal and leave a
-different lot behind, so shares are a three-table ledger:
-
-- `share_lot`: quantity, date, cost per share, fee, `source` in `OUTRIGHT_BUY | BUY_WRITE | PUT_ASSIGNMENT`
-- `share_disposal`: quantity, date, proceeds per share, fee, `kind` in `SOLD | CALLED_AWAY`
-- `share_allocation`: which lots a disposal consumed and the P/L; derived, rebuilt on demand
-
-FIFO by default, specific-lot override per disposal. A buy-write's shares are
-earmarked to its own call, so FIFO cannot reach past them to a cheaper lot.
-The three sources differ only in label.
-
-Coverage is a fact about the ticker, not a link on the call: a short call is
-covered by the shares the ticker holds, oldest first; assignment sells by the
-matching rule as the broker does. A short call with no shares behind it is
-naked and flagged. A ticker's share count may not go negative.
-
-### 4.3 Split
-
-Divides a position into two children with the open date and price, the fee
-pro-rata, and `split_from_quantity` so inherited carry is divided, not
-duplicated. The parent stays as a `SPLIT` record and realizes nothing after.
-One primitive covers partial assignment, partial close and partial roll.
-
-Carry has one definition, `engine.chains.inherit`, used by the walker and the
-memoized index alike.
-
-### 4.4 Chain and wheel, both derived
-
-Walking roll and split links gives the chain: cumulative P/L, duration, net
-credit, capital at risk, legs, break-even, target, credit still to recover.
-Several successors from one predecessor render as a tree. Merging chains is
-not supported.
-
-The wheel is a ticker's episode: the assigning put's chain, the covered-call
-chains on the shares, and the share P/L. Realized only.
-
-### 4.5 `spread_group`
-
-A nullable id keeping a vertical's legs displayed and rolled together.
-
----
-
-## 5. Conventions
-
-- **Option and share P/L are stored apart.** The trader view reduces basis by net premium; the wheel total is identical either way, and a test asserts it.
-- **Period attribution.** A leg realizes on its close date. Chain and wheel totals are not summable with period totals.
-- **Capital at risk.** `strike × mult × qty` for a short put; the share cost for a covered call; the debit for a long option; `width × mult − credit` for a vertical. Naked calls are flagged and excluded from averages.
-- **Fees.** Always net. Per leg, default `quantity × fee_rate`, editable always. Expiry and assignment default to zero closing fee.
-- **No denominator, no figure.** Withheld with a reason, never an error code. Impossible inputs are refused.
-
-### 5.1 Adjusted basis
-
-One figure per ticker:
-
-```
-adjusted_basis  = (cost of shares held − option P/L − share P/L) / shares held
-min_call_strike = adjusted_basis rounded up to a listed strike, never below 0
+```text
+open_cash  =  signed_quantity * multiplier * open_price - open_fee
+close_cash = -signed_quantity * multiplier * close_price - close_fee
+realized   = open_cash + close_cash
 ```
 
-Shares are held at what was paid, fees in. Every closed option leg on the
-ticker and the P/L on every share sold lowers what the rest must fetch.
-Writing a call below the adjusted basis locks in a loss. Rules: the unit is the
-ticker, never the lot; realized only; lifetime, never reset; dividends out of
-scope.
+An open position has no realized P/L. A split parent contributes no further
+P/L because its children represent the continuing position. Fees are included
+in cash flows, with defaults that remain editable at entry.
 
----
+### Chains, rolls, and splits
 
-## 6. Entry
+A chain follows the predecessor links. Its carry is realized P/L inherited
+from earlier legs, distinct from the current leg's opening premium:
 
-Every trade form is the leg grid with the date first. Fee auto-fills, stays
-editable. Defaults follow the data.
-
-- **New position**: one row, submit leaves the cursor in a fresh row.
-- **Roll**: prefilled from the old leg; asks for the closing price and the new leg. One commit closes, links and carries. The preview (§7) is the roll itself run on a copy.
-- **Split**: one field, how many to peel off.
-- **Close, Expire, Assign**: inline under the row. Assign creates the lot (put) or sells shares (call).
-- **Buy-write, buy, sell shares**: on the shares page; outright stock never needs a fake option row.
-- **Due**: past-expiry open positions need a human to say expired or assigned; a filter on the positions table, not a page.
-
----
-
-## 7. Beyond the sheet
-
-- **Roll preview**: carry, this roll's credit or debit, capital at risk, break-even, target, credit still to recover, size growth, strike change; before and after.
-- **Risk**: concentration by ticker; worst-case obligation calendar by expiry.
-- **Chain view**: every leg in order as ordinary position rows, with the chain total.
-- **Wheel view**: option and share P/L side by side.
-- **Target performance**: how often legs end at or past the target, by ticker and DTE.
-- **Notes and tags** per position.
-- **Validation at entry**: dates in order, no future share dates, fee plausible, no over-selling a pinned lot, duplicate warning.
-- **Filters and saved views**: ticker, date, status, right, direction, tag, text; every link keeps the filter.
-- **Audit and undo**: every action recorded as a group and undone as one.
-
----
-
-## 8. Import and data health
-
-Import writes what the sheet says. It parses the layout, recomputes eight
-derived figures per row, diffs them against the sheet (exact, rounding,
-disagreement, unparseable), and flags rather than fixes: disguised share rows,
-flattened partials, negative share counts, date errors. The diff is the
-engine's acceptance test.
-
-The Data page is permanent: every record that disagrees with another or with
-the calendar, each linking to where it is fixed. Import flags can be dismissed
-once seen. Snapshots, restore and export live on the Options page. Reconstructed lots live in config outside version control (see
-`bcoj/importer/estimates.py`); without it a ticker in deficit stays blocked,
-which is visible where a guess is not.
-
----
-
-## 9. Schema
-
-```
-settings           key, value
-positions          id, underlying, expiry, strike, option_right, direction,
-                   quantity, multiplier, opened_on, open_price, open_fee,
-                   closed_on, close_price, close_fee, status,
-                   rolled_from_id, split_from_id, split_from_quantity,
-                   share_lot_id, spread_group_id, target_pct, notes,
-                   import_batch_id
-share_lots         id, underlying, quantity, acquired_on, cost_per_share, fee,
-                   source, assigning_position_id, estimated, notes
-share_disposals    id, underlying, quantity, disposed_on, proceeds_per_share,
-                   fee, kind, disposing_position_id, specific_lot_ids
-share_allocations  disposal_id, lot_id, quantity, realized_pl, cost_basis,
-                   proceeds                        -- derived, rebuildable
-position_covers, wheel_links, spread_groups, tags, position_tags
-flags              entity_type, entity_id, kind, detail, raised_at, resolved_at
-audit_log          at, entity_type, entity_id, action, before, after
-saved_views        id, name, filter
-import_batches     id, filename, file_hash, row_count, imported_at, report
+```text
+carry(next_leg) = realized(previous_leg) + carry(previous_leg)
+net_credit     = carry(current_leg) + open_cash(current_leg)
 ```
 
-Money is `TEXT` holding a Decimal's digits. Dates are ISO-8601 `TEXT`.
+A roll closes a leg and opens its successor as one action. Quantity can
+change explicitly. The preview runs that same action on copies of the input
+records, then reads the resulting chain; it has no separate accounting
+formula.
 
----
+A split retains its parent as a `SPLIT` record and creates two children.
+Quantities and opening fees sum to the parent's values. Each child inherits
+carry in proportion to its quantity through
+[`engine.chains.inherit`](bcoj/engine/chains.py). Chain links are checked for
+cycles. The UI presents related legs as ordinary position rows, with the
+chain totals kept separate from individual-leg results.
 
-## 10. Reporting
+### Shares, coverage, and wheel totals
 
-Dashboard: realized option P/L, realized share P/L, true total, capital at
-risk; per ticker, adjusted basis and `min_call_strike`.
+The share ledger has acquisitions, disposals, and allocations linking each
+disposal to the lots it consumed. Acquisitions can come from an outright buy,
+a buy-write, put assignment, or long-call exercise. A disposal is a sale or
+shares called away.
 
-No composite unrealized P/L. Without marks it is not computable, so three
-known figures sit side by side, never summed: open premium, expected P/L at
-target, chain carry.
+FIFO is the default matching rule. The engine also supports LIFO and explicit
+lot selection on a disposal. A pinned sale can consume only its selected
+lots. Shares cannot be sold before acquisition or beyond the available
+quantity. Import inconsistencies remain visible as blocked matching rather
+than producing a result from an invalid balance.
 
-Reports: realized by month, quarter and year with running total; by ticker;
-how short legs ended (hit rate, win rate, premium capture) by ticker and by
-DTE. Options book on the leg's close date, shares on the sale's date, shown
-apart before the total. Exports: positions.csv and shares.csv with the
-computed columns, journal.json, journal.db through the backup API.
+Coverage is derived at ticker level from the shares held and open short
+calls, allocated across lots oldest first. It does not depend on a manually
+maintained call-to-lot link. Excess calls are flagged as uncovered.
 
----
+**Cost basis** is the cost of shares still held, including acquisition fees
+pro-rata. Unit price is the original per-share fill. Option P/L and realized
+share P/L are separate; the ticker's wheel total is their lifetime sum.
 
-## 11. Milestones
+### Adjusted basis and targets
 
-| # | Deliverable | State |
-| --- | --- | --- |
-| ~~M1~~ | Engine, importer, reconciliation, storage | Done. Synthetic fixture reconciles exactly; a real five-year export to the cent bar one 25-cent fee typo |
-| ~~M2~~ | Manual entry, positions list, validation, audit trail | Done. Stdlib web UI; split divides chain history pro-rata; every mutation audited and revertible |
-| ~~M3~~ | Shares: lots, buy-write, buy and sell, wheels, true total | Done. Shares and per-ticker pages, wheel totals, true total on the dashboard |
-| ~~M4~~ | Roll preview, break-even, obligation calendar, concentration | Done. Preview runs the real roll on a copy; Risk page; strike drift and size growth on every chain |
-| ~~M5~~ | Reports, filters, saved views, notes and tags, export | Done. Realized by period and ticker, how short legs ended; filter bar every link keeps; CSV, JSON, SQLite export |
-| ~~M6~~ | Data health, snapshots and restore, deploy notes | Done. Data page with linked fixes and dismissable import flags; snapshots via backup API; restore snapshots first; docs/deploy.md |
-| ~~M7~~ | Login page, options page, versioning | Done. Login page; `bcoj` at first login, then a forced change; PBKDF2 hash and a session secret in `settings`, rotated on change so every browser logs out; HTTP Basic kept for scripts; `BCOJ_PASSWORD` resets. Options page: password, snapshots (take, download, restore), export, version and schema. Data page is health only. Version in the footer; a newer journal or snapshot is refused |
-| ~~M8~~ | Themes, 1.1.0 | Done. Five: system, light, dark, paper, slate. One token table generates every palette, `color-scheme` included; the setting is stamped as `data-theme` on `<html>` by the server, so a page never flashes the wrong theme. Also: forms in a panel submit in place; the server answers a script's POST with JSON, the page shows the flash and refreshes the table or its main content, and the entry forms stay open for the next trade |
-| M9 | Snapshot by API, 1.2.0 | Planned, 1 to 2 hours. A read-only token, hashed in `settings`, shown once on the Options page; `/api/snapshot` takes a snapshot and streams it; a one-line cron for another machine in docs/deploy.md |
+Adjusted basis is a ticker-level, realized-only measure:
 
-Versions: 1.0.0 at M7; the minor version rises with each milestone after. Bumping `__version__` on main is the release; the workflow tags, builds and publishes.
-The engine came before any UI so the reconciliation could prove it. 359 tests.
+```text
+adjusted_basis = (cost_basis - realized_option_pl - realized_share_pl) / shares_held
+```
 
----
+It is undefined when no shares remain or share matching is blocked. A
+negative value means realized returns exceed the cost of the remaining
+shares. Dividends are outside the model.
 
-## 12. Testing
+For a short option, the default closing target captures 50% of the chain's
+available credit. An underwater chain has no positive credit target. Long
+options instead target a 25% increase in opening price by default. Both
+percentages can be overridden per position.
 
-The public suite is synthetic: a hand-computed fixture with one row of every
-shape the format produces, so a clean reconciliation means the engine agrees
-with independent arithmetic. Invariants: a chain total equals the sum of its
-legs including split children; split quantities and fees sum to the parent's;
-allocation proceeds sum to the disposal's; both basis conventions give the same
-wheel total; no position closes before it opens; a disposal never exceeds what
-was acquired.
+Break-even is calculated for a short chain from its current strike and net
+credit per share: subtract the credit for a put, add it for a call. Figures
+without a valid denominator are withheld.
 
-A separate, unpublished suite reconciles the real export in full.
+## Integrity and correction
 
----
+Related position and share changes are stored together, with grouped audit
+entries. Undo reverses a whole action or refuses it when a later action
+depends on the records. Redo reapplies an undone action. Neither operation
+removes the audit history.
 
-## 13. Out of scope
+Entry validation checks dates, quantities, prices, fees, share availability,
+and duplicate records. Refused entries return HTTP 400 with an explanation.
+Corrections to share records live on the ticker's raw-data page; health
+checks identify problems and link to their records without modifying them.
 
-Live quotes, greeks, marks. Broker sync, multi-broker import. Multi-user,
-multi-account, multi-currency. Tax lots, wash sales, 1256. Corporate actions
-(edit rows). Merging chains.
+Authentication uses a single password, a PBKDF2 hash, signed session cookies,
+and CSRF tokens on forms. Changing the password rotates the session secret.
+HTTP Basic is available for scripts. Configuration and recovery instructions
+belong in the [deployment guide](docs/deploy.md).
 
----
+Snapshots and database exports use SQLite's backup API. Restore first takes
+a snapshot of the current journal, then replaces it and rebuilds share
+allocations. A snapshot with a newer schema is refused.
 
-## 14. Settled decisions
+## Reporting boundaries
 
-| Decision | Why |
-| --- | --- |
-| FIFO matching, specific-lot override per disposal | The convention is explicit and recorded |
-| Buy-write shares earmarked to their own call | FIFO would reach past them to a cheaper lot |
-| No composite unrealized P/L | Not computable without marks |
-| Profit target 50% default, per-position override; long legs 25% on the debit | Computed, never stored |
-| Import faithfully, correct in the app | Plus a permanent Data page |
-| Partial events import as-is, flagged | Only chain attribution is affected |
-| No dependencies | Engine, importer, storage and UI are stdlib |
-| Reconstructed lots in config, not source | Real holdings never enter version control |
-| Split keeps the parent as a `SPLIT` record | A journal does not delete what happened; the tombstone realizes nothing |
-| Split divides carry pro-rata by quantity | Duplicating it double-counts and wrecks break-even |
-| A split child links only to its split parent | One link, enforced on the type |
-| Refused actions are 400 | The user's mistake, not a crash |
-| Actions happen on the positions page, inline under the row | The detail page is for reading a chain |
-| Close prices prefill with the profit target | Blank when the chain has nothing to aim for |
-| A roll form is two labelled trades | It is two fills |
-| One row renderer for positions and chains | A chain expands in place as ordinary rows under a total; no tree, no labels |
-| Position columns: open price, close price, credit, closing, realized, break-even, at risk | An open leg's close price and closing cash are the target. Carry stays on the position page |
-| A wheel is derived, never stored | Realized only |
-| Coverage is a fact about the ticker, not a link on the call (2026-09-04) | Oldest lots cover first; assignment sells by the matching rule as the broker does. The cover-with-lot forms and unlinked-calls queue are gone |
-| Adjusted basis is a ticker figure: cost held less everything paid back (2026-09-04) | Replaced the per-lot model, which left out puts that never assigned and spread old calls over unrelated lots |
-| A pinned sale cannot exceed its lot | Refused at entry; a pinned sale draws only from its lot |
-| Share records are removable, undoably | A mis-entered record can block matching. Refused if calls or pinned sales depend on it |
-| No share record dated in the future | A lot dated after today is a recording error |
-| A lot's date can move, and its assignment moves with it | Updated together, audited, undoable |
-| One function, one form; one kind of list, one table | The leg grid serves every trade form; Due is a filter, not a page |
-| Undo takes back a whole action or nothing | One audit group per action, undone in reverse in one transaction; a dependent later action must be undone first |
-| Health checks name problems and point at the fix; they never change data | Fixing happens where the record lives |
-| Snapshots through SQLite's backup API; restore snapshots first | A restore is itself undoable |
-| Reports never mix scopes in a sum | Options by close date, shares by sale date; open legs appear nowhere |
-| "Hit" means ended at or past the target | A roll or assignment is neither; the chain decides later |
-| A filter travels with every link | A saved view is a query string under a name |
-| Exports carry the computed columns | A spreadsheet gets the engine's answers |
-| The roll preview is the roll itself, run on a copy | No second formula to drift; fetched from the server as typed |
-| Risk is worst case by construction | Every short put assigned, every short call delivered; a naked call is flagged, not summed |
-| Repairs live on a per-ticker raw-data page | Removing or re-dating is not a daily action |
-| Links carry both the expanded chain and the open action | Opening a form never collapses the chain |
-| Share forms are all in the page; tabs only toggle | No reload, no scroll |
-| Assignment dates default to today, or the expiry once passed | Neither needs typing |
-| A blocked ticker is not "short" | Matching can fail with a positive count; "short" means negative |
-| Shares are written before positions in a transaction | A buy-write's call points at a lot created in the same action |
-| Visual: the page's own position is tagged; actions colour-coded (blue close, purple roll, green keep, amber stock, grey split); open and closed legs look different; a chain's open legs share a rail | |
-| Put risk is not shown beside capital at risk | Identical for a short put |
-| A password always, the default fixed and forced to change | A forwarded port is not a boundary; a random default would need a console to read |
-| Changing the password logs every browser out | The session secret rotates with it |
-| Options holds what is about the app, Data what is about the records | Password, snapshots, export, version on one page; health on the other |
-| The version has one home, `bcoj.__version__`; a new one on main is a release | pyproject reads it; the workflow tags from it; footer, wheel and image can never disagree |
-| A form in a panel submits in place and stays open | Entering several trades in one sitting is the common case. The script posts with `X-Requested-With: fetch`; the server answers JSON instead of a redirect; without script the same form posts and redirects |
-| A palette is a row in one table, and every palette defines every token | A theme can never inherit a colour from another; the browser's own controls follow `color-scheme` |
+- **Period reports** attribute option P/L to the close date and share P/L to
+  the disposal date. Chain totals and ticker lifetime totals are different
+  scopes and are not added to period totals.
+- **Open-position figures** distinguish premium received, expected P/L at a
+  target, and inherited carry. There is no composite unrealized P/L without
+  market prices.
+- **Risk** groups short-put assignment obligations by expiry and shows
+  concentration by ticker. Covered-call exposure is represented by its
+  shares; uncovered calls are flagged rather than assigned a finite risk.
+- **Performance reports** group closed results by period and ticker, and
+  examine short-option outcomes and target performance.
+
+Exports include entered records and supported computed columns in CSV,
+JSON, and SQLite formats.
+
+## Verification
+
+The public tests use synthetic, independently calculated examples.
+Accounting invariants include conservation of quantities and fees through a
+split, proportional inheritance of carry, matching allocation proceeds to a
+disposal, and consistent wheel totals under both basis conventions.
+
+Storage tests cover migrations, auditing, undo, and restore. HTTP tests run
+a real local server against a temporary database to exercise routing,
+authentication, form parsing, CSRF validation, and persistence together. Test
+commands are in the [README](README.md#verification).
+
+## Scope and planned work
+
+The implemented workflow includes manual entry, inline close/roll/assignment
+and split actions, shares, chain views, risk and performance reports, filters,
+saved views, notes and tags, data health, snapshots, exports, and themes.
+
+Planned: a read-only token for retrieving a consistent snapshot through an
+API, with token management on the Options page. This endpoint is not yet
+implemented.
+
+Live quotes, broker synchronization, multi-user and multi-account operation,
+multi-currency accounting, dividends, tax reporting, automated corporate
+actions, and chain merging are outside the current scope. Spread metadata
+exists in the schema; grouped spread entry, rolling, and risk calculation
+are not implemented.

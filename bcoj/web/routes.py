@@ -426,7 +426,7 @@ def positions_page(conn, query, token: str = "") -> tuple[int, str]:
     totals = _scorecard_html(sc, f"the {len(listed)} position(s) in this table: "
                                  f"{sc.closed_legs} closed, {sc.open_legs} open")
 
-    table_html = r.table(POSITION_COLUMNS, rows, cls="positions")
+    table_html = '<div class="wrap">' + r.table(POSITION_COLUMNS, rows, cls="positions") + '</div>'
     filter_bar = _filter_bar(conn, query, show, token, positions)
     if partial == "table":
         # The table, the strip that describes it and the filter bar that
@@ -496,14 +496,17 @@ def _facts(title: str, note: str, rows, chips: str = "") -> str:
     """The strip: equal cells across the page, label over figure. Every figure
     is present, a dash where it does not apply, so the strip has the same shape
     wherever it appears. ``rows`` are (label, cell) with cell (html, tone) or
-    None. ``chips`` is an optional line of facts under the figures."""
+    None. A label can be (text, tooltip). ``chips`` is an optional line of
+    facts under the figures."""
     cap = f'<p class="cap">{r.esc(title)}' + (f" <small>{note}</small>" if note else "") + "</p>"
     cells = []
     for label, c in rows:
+        label_html = (f'<span title="{r.esc(label[1])}">{r.esc(label[0])}</span>'
+                      if isinstance(label, tuple) else f'<span>{r.esc(label)}</span>')
         if c is None:
-            cells.append(f'<div><span>{r.esc(label)}</span><b class="none">-</b></div>')
+            cells.append(f'<div>{label_html}<b class="none">-</b></div>')
         else:
-            cells.append(f'<div><span>{r.esc(label)}</span><b>{c[0]}</b></div>')
+            cells.append(f'<div>{label_html}<b>{c[0]}</b></div>')
     return (f'<div class="strip"><div class="facts wide">{cap}'
             f'<div class="cells" style="--n:{len(cells)}">{"".join(cells)}</div>{chips}</div></div>')
 
@@ -622,7 +625,7 @@ def _portfolio_totals(conn, positions, index) -> str:
         (REALIZED, r.money(q2(sc.banked + shares_pl), dash="0.00")),
         (AT_TARGET, f"<b>{r.money(q2(sc.at_target + shares_pl), dash='0.00')}</b>"),
         (AT_RISK, r.money(sc.at_risk, dash="0.00")),
-        ("Shares at cost", r.money(held_cost, dash="0.00")),
+        ("Cost basis", r.money(held_cost, dash="0.00")),
     ]
     options = _score_column(sc)
     del options[BREAK_EVEN]
@@ -940,7 +943,7 @@ def _chain_block(index, position, chain, act_id: str = "", which: str = "", toke
                    'the halves, which follow it here.</p>')
 
     return f"""<h2>Chain legs - {len(legs)}</h2>
-{r.table(POSITION_COLUMNS, rows, cls="positions chain").replace('<table class="positions chain">', '<table class="positions chain" data-fixed>', 1)}
+<div class="wrap">{r.table(POSITION_COLUMNS, rows, cls="positions chain").replace('<table class="positions chain">', '<table class="positions chain" data-fixed>', 1)}</div>
 {explain}"""
 
 
@@ -1330,30 +1333,23 @@ def _roll_preview_html(pv) -> str:
     target = (f'<span class="pos">{r.esc(price(tgt.price))}</span>'
               f"<small>expected {fmt(tgt.expected_pl)}</small>" if tgt.applicable
               else '<span class="neg">none: net debit</span>')
-    # For a short put a lower break-even is better; for a short call, higher.
-    be_up_good = pv.new_leg.right is Right.CALL
-    be_after = pv.break_even_after.price if pv.break_even_after else None
-    be_before = pv.break_even_before.price if pv.break_even_before else None
-    be_cls = "dim"
-    if be_after is not None and be_before is not None and be_after != be_before:
-        be_cls = "pos" if (be_after > be_before) == be_up_good else "neg"
+    short = pv.closing_leg.direction is Direction.SHORT
+    closing_label, opening_label = ("BTC", "STO") if short else ("STC", "BTO")
     risk_cls = ("neg" if pv.at_risk_before is not None and pv.at_risk_after is not None
                 and pv.at_risk_after > pv.at_risk_before else "dim")
     cells = [
         (f"Roll {roll_word}", f'<span class="{"pos" if pv.is_credit else "neg"}">'
                               f"{fmt(abs(pv.this_roll))}</span>"),
-        ("Closing books", signed(pv.closing_realized)),
+        (closing_label, signed(close_cash(pv.closing_leg))
+                        + f"<small>{signed(pv.closing_realized)} P/L</small>"),
+        (opening_label, signed(open_cash(pv.new_leg))),
         ("Carry after", signed(pv.carry_after) + was(pv.carry_before, pv.carry_after, True)),
         ("Net credit after", signed(pv.net_credit_after)
                              + was(pv.net_credit_before, pv.net_credit_after, True)),
-        ("Break-even after", (f'<span class="{be_cls}">{fmt(be_after)}</span>' if be_after is not None
-                              else '<span class="dim">-</span>') + was(be_before, be_after, be_up_good)),
         ("At risk after", (f'<span class="{risk_cls}">{fmt(pv.at_risk_after)}</span>'
                            if pv.at_risk_after is not None else '<span class="dim">-</span>')
                           + was(pv.at_risk_before, pv.at_risk_after, False)),
         ("Target", target),
-        ("To recover", f'<span class="neg">{fmt(pv.to_recover_after)}</span>' if pv.underwater_after
-                       else '<span class="pos">0.00</span>'),
         ("New leg", f"{pv.dte_after} DTE"),
     ]
     chips = []
@@ -1425,7 +1421,7 @@ def risk_page(conn, query) -> tuple[int, str]:
     cells = [
         ("Total exposure", r.money(total)),
         ("Options at risk", r.money(options_at_risk)),
-        ("Shares at cost", r.money(shares_total)),
+        ("Cost basis", r.money(shares_total)),
     ]
     if risks and total > 0:
         top = risks[0]
@@ -1471,7 +1467,7 @@ def risk_page(conn, query) -> tuple[int, str]:
 
     body = f"""{totals}
 <h2>Concentration</h2>
-{r.table(["Ticker", "Share", "Exposure", "Options at risk", "Shares at cost",
+{r.table(["Ticker", "Share", "Exposure", "Options at risk", "Cost basis",
           "Open premium", "Chain carry", "Ticker realized", "Open"], conc_rows, cls="risk")}
 <p class="hint">Exposure is options at risk plus shares held at cost. A covered
 call rides on its shares and is not counted twice; a naked call has no ceiling
@@ -2663,25 +2659,18 @@ def shares_page(conn, token, query) -> tuple[int, str]:
     positions, index, lots, disposals, tickers, suggestions = _share_context(conn)
 
     rows = []
-    for t in tickers:
+    for t in sorted(tickers, key=lambda t: (t.held <= 0, t.underlying)):
         name = r.esc(t.underlying)
         basis = t.basis
-        if t.error and t.held < 0:
-            state = (f'<span class="badge st-blocked" title="{r.esc(t.error)}">'
-                     f"short {-t.held} shares</span>")
-        elif t.error:
-            state = (f'<span class="badge st-blocked" title="{r.esc(t.error)}">'
-                     f"{t.held} held &middot; matching blocked</span>")
-        elif t.held > 0:
-            state = f'<span class="badge st-open">holding {t.held}</span>'
+        if t.error:
+            state = f'<span class="neg" title="matching blocked: {r.esc(t.error)}">{t.held}</span>'
         else:
-            state = '<span class="badge st-closed">flat</span>'
+            state = r.esc(t.held) if t.held else '<span class="dim">-</span>'
         rows.append([
             f'<a href="/shares/{name}"><b class="ticker">{name}</b></a>',
             state,
             r.money(t.held_cost if t.held > 0 else None),
             r.money(basis.unit_price if basis else None),
-            r.money(basis.min_call_strike if basis else None),
             r.money(t.realized if not t.error else None),
             r.money(t.option_pl),
             r.money(t.total if not t.error else None),
@@ -2693,7 +2682,7 @@ def shares_page(conn, token, query) -> tuple[int, str]:
     blocked = [t for t in tickers if t.error]
     totals = [
         ("Realized on shares", r.money(realized)),
-        ("Cost of shares held", r.money(held_cost)),
+        ("Cost basis", r.money(held_cost)),
         ("Tickers holding stock", r.esc(sum(1 for t in tickers if t.held > 0))),
     ]
     if blocked:
@@ -2710,14 +2699,13 @@ def shares_page(conn, token, query) -> tuple[int, str]:
     body = f"""{warn}{hint}
 {_kv("All tickers", "", totals)}
 {_share_forms(conn, kind, "", token, "/shares", "/shares?")}
-{r.table(["Ticker", "Position", "Held at cost", "Adj. basis", "Min call",
-          "Share P/L", "Option P/L", "Wheel total", "Lots"], rows, cls="shares")}
-<p class="hint">Shares are held at what was paid: the strike for an assignment,
-the fill for a purchase. Option P/L is every closed option on the ticker,
+<div class="wrap">{r.table(["Ticker", "Position", "Cost basis", "Adj. basis",
+          "Share P/L", "Option P/L", "Wheel total", "Lots"], rows, cls="shares")}</div>
+<p class="hint">Cost basis is what was paid for the shares still held, including
+fees: the strike for an assignment, the fill for a purchase. Option P/L is every closed option on the ticker,
 lifetime. Adjusted basis is the cost of the shares held less option P/L and the
 P/L on shares already sold, per share held; negative means they are paid for.
-Min call is the lowest strike that does not lock in a loss. Wheel total is
-option P/L plus share P/L, realized only.</p>"""
+Wheel total is option P/L plus share P/L, realized only.</p>"""
     return 200, r.page("Shares", body, nav_here="shares")
 
 
@@ -2733,15 +2721,15 @@ def ticker_page(conn, underlying, token, query) -> tuple[int, str]:
     b = t.basis
     facts = [
         ("Held", r.esc(t.held) if not t.error else f'<span class="neg">{t.held}</span>'),
-        ("Cost of shares held", r.money(t.held_cost if t.held > 0 else None)),
+        ("Cost basis", r.money(t.held_cost if t.held > 0 else None)),
         ("Share P/L", r.money(t.realized if not t.error else None)),
         ("Option P/L", r.money(t.option_pl)),
         ("Wheel total", r.money(t.total if not t.error else None)),
         ("Adjusted basis", r.money(b.unit_price) if b else '<span class="dim">-</span>'),
-        ("Min call strike", r.money(b.min_call_strike) if b else '<span class="dim">-</span>'),
-        ("Open calls", (f'<span class="{"neg" if t.uncovered_shares else "pos"}">'
-                        f"{t.open_call_shares} of {max(t.held, 0)} shares</span>"
-                        if t.open_call_shares else '<span class="dim">none</span>')),
+        (("Shares committed", "Shares required by open calls / shares held"),
+         (f'<span class="{"neg" if t.uncovered_shares else "pos"}">'
+          f"{t.open_call_shares}/{max(t.held, 0)}</span>"
+          if t.open_call_shares else '<span class="dim">none</span>')),
     ]
     fact_html = _kv(name, f"{len(t.lots)} lot(s)", facts)
 
@@ -2756,13 +2744,16 @@ def ticker_page(conn, underlying, token, query) -> tuple[int, str]:
     today = date.today()
     for v in t.lots:
         lot = v.lot
-        src = lot.source.value.replace("_", " ").lower()
-        badge = f'<span class="badge st-{"open" if v.is_open else "closed"}">{r.esc(src)}</span>'
+        src = r.share_source_text(lot.source)
+        type_class = lot.source.value.lower().replace("_", "-")
+        badge = f'<span class="badge share-type-{type_class}">{r.esc(src)}</span>'
+        labels = badge
         if lot.estimated:
-            badge += ' <span class="badge st-split" title="reconstructed from memory">estimated</span>'
+            labels += ' <span class="badge st-split" title="reconstructed from memory">estimated</span>'
         origin = by_id.get(lot.assigning_position_id) if lot.assigning_position_id else None
-        if origin is not None:
-            badge += f' <a class="dim" href="/position/{r.esc(origin.id)}">{r.contract(origin)}</a>'
+        contract = (f'<a class="dim" href="/position/{r.esc(origin.id)}">{r.contract(origin)}</a>'
+                    if origin is not None else "")
+        source = f'<div class="share-origin"><span class="origin-label">{labels}</span>{contract}</div>'
         cover = ""
         if v.is_open:
             cover = f"{v.covered}/{v.remaining}"
@@ -2780,28 +2771,40 @@ def ticker_page(conn, underlying, token, query) -> tuple[int, str]:
                     f'the raw data">{when}</a>')
         lot_rows.append([
             when,
-            badge,
-            r.esc(lot.quantity),
+            source,
             r.esc(v.remaining) if v.is_open else '<span class="dim">0</span>',
-            r.esc(price(lot.cost_per_share)),
+            r.esc(lot.quantity),
             cover or '<span class="dim">-</span>',
+            r.esc(price(lot.cost_per_share)),
+            r.money(v.cost_basis if v.is_open and not t.error else None),
             r.money(v.share_realized if v.disposed else None),
             r.esc(v.days),
         ])
 
     disp_rows = []
+    realized_by_disposal = {}
+    if not t.error:
+        matched = match_lots([l for l in lots if l.underlying == name],
+                             [d for d in disposals if d.underlying == name])
+        for allocation in matched.allocations:
+            realized_by_disposal[allocation.disposal_id] = (
+                realized_by_disposal.get(allocation.disposal_id, ZERO) + allocation.realized_pl)
     for d in sorted(disposals, key=lambda d: d.disposed_on, reverse=True):
         if d.underlying != name:
             continue
         via = by_id.get(d.disposing_position_id) if d.disposing_position_id else None
-        how = (f'<a href="/position/{r.esc(via.id)}">{r.contract(via)}</a>' if via
-               else r.esc(d.kind.value.replace("_", " ").lower()))
+        label = r.esc(d.kind.value.replace("_", " ").lower())
+        contract = f'<a href="/position/{r.esc(via.id)}">{r.contract(via)}</a>' if via else ""
         pinned = ""
         if d.specific_lot_ids:
             pinned = ' <span class="dim" title="pinned to a specific lot">&#128204;</span>'
-        disp_rows.append([r.esc(d.disposed_on), r.esc(d.quantity),
+        type_class = d.kind.value.lower().replace("_", "-")
+        how = (f'<div class="share-origin"><span class="origin-label">'
+               f'<span class="badge share-type-{type_class}">{label}</span>{pinned}</span>{contract}</div>')
+        dash = '<span class="dim">-</span>'
+        disp_rows.append([r.esc(d.disposed_on), how, dash, r.esc(d.quantity), dash,
                           r.esc(price(d.proceeds_per_share)), r.money(d.proceeds),
-                          how + pinned])
+                          r.money(realized_by_disposal.get(d.id)), dash])
 
     suggest_html = ""
 
@@ -2812,10 +2815,12 @@ def ticker_page(conn, underlying, token, query) -> tuple[int, str]:
     body = f"""{warn}
 {fact_html}
 <h2>Lots - {len(t.lots)}</h2>
-{r.table(["Acquired", "Source", "Qty", "Held", "Cost/sh", "Covered", "Share P/L", "Days"],
-         lot_rows, cls="lots")}
+<div class="wrap">{r.table(["Acquired", "Source", "Held", "Qty", "Covered", "Unit price",
+          ("Cost basis", "Cost of shares still held, including acquisition fees"), "Share P/L", "Days"],
+         lot_rows, cls="share-ledger lots")}</div>
 <h2>Disposals - {len(disp_rows)}</h2>
-{r.table(["Date", "Qty", "Price", "Proceeds", "Via"], disp_rows)}
+<div class="wrap">{r.table(["Date", "Via", "Held", "Qty", "Covered", "Unit price", "Proceeds", "Share P/L", "Days"],
+         disp_rows, cls="share-ledger disposals")}</div>
 {suggest_html}
 {forms}
 <p class="hint">Something entered wrong? <a href="/shares/{name}/data">Fix the raw
@@ -2878,7 +2883,7 @@ def ticker_data_page(conn, underlying, token, query) -> tuple[int, str]:
                                 kind="date", required=True),
                         r.field("Shares", "quantity", str(lot.quantity), kind="number", step="1",
                                 required=True),
-                        r.field("Cost / share", "cost_per_share", str(lot.cost_per_share),
+                        r.field("Unit price", "cost_per_share", str(lot.cost_per_share),
                                 kind="number", step="0.01", required=True),
                         r.field("Fee", "fee", str(lot.fee), kind="number", step="0.01"),
                         r.field("Notes", "notes", lot.notes),
@@ -2894,7 +2899,7 @@ def ticker_data_page(conn, underlying, token, query) -> tuple[int, str]:
             flags += f' <small class="dim note">{r.esc(lot.notes)}</small>'
         remaining = left.get(lot.id, lot.quantity)
         lot_rows.append([
-            f"{when}{r.esc(lot.acquired_on)}", r.esc(lot.source.value.replace("_", " ").lower()),
+            f"{when}{r.esc(lot.acquired_on)}", r.esc(r.share_source_text(lot.source)),
             r.esc(lot.quantity),
             (r.esc(remaining) if remaining else '<span class="dim">0</span>'),
             r.esc(price(lot.cost_per_share)), r.money(lot.fee),
@@ -2939,7 +2944,7 @@ it. A lot marked <em>estimated</em> was reconstructed from memory: check it agai
 a statement, correct it, and confirm. Every change is logged and can be undone
 from <a href="/audit">History</a>.</p>
 <h2>Lots - {len(lot_rows)}</h2>
-{r.table(["Acquired", "Source", "Qty", ("Left", "Shares of this lot still held"), "Cost/sh", "Fee",
+{r.table(["Acquired", "Source", "Qty", ("Left", "Shares of this lot still held"), "Unit price", "Fee",
           "From", "Notes", ""], lot_rows, cls="rawdata")}
 <h2>Disposals - {len(disp_rows)}</h2>
 {r.table(["Date", "Kind", "Qty", "Price", "Fee", "Via", "Lot", ""], disp_rows, cls="rawdata")}"""
@@ -3058,7 +3063,7 @@ def do_edit_lot(conn, lot_id, form) -> None:
     changes = {
         "acquired_on": _past(_date(form, "acquired_on", label="Acquired"), "Acquired"),
         "quantity": _int(form, "quantity", label="Shares"),
-        "cost_per_share": _decimal(form, "cost_per_share", label="Cost per share"),
+        "cost_per_share": _decimal(form, "cost_per_share", label="Unit price"),
         "fee": _decimal(form, "fee", ZERO),
         "notes": _one(form, "notes"),
     }
